@@ -39,14 +39,16 @@ Bot de Telegram que controla la reproduccion de YouTube (video en la PC donde co
 - BUG .bat resuelto: el patrón `for /f` para capturar salida de un comando Python con rutas y comillas NUNCA funciona (parsing de cmd). Solución robusta: redirigir salida a archivo temp (`> %TEMP%\..`) + `set /p` para leerlo. Ademas el .bat debe ser 100% ASCII (sin acentos/«») o cmd rompe el parsing: escribir sin tildes/ñ.
 - Player IPC verificado contra mpv portable real (fix de --idle=yes).
 - Busqueda YouTube verificada con yt-dlp real.
-- Falta probar el bot en vivo con Telegram (requiere token real en .env), y verificar el formulario real de ytremote.bat en una consola cmd.
+- BUG "pegado en buscando / no reproduce" CORREGIDO: el bot se congelaba porque (1) search() síncrono bloqueaba el event loop de Telegram mientras yt-dlp consultaba, y (2) Player._send_raw abria el named pipe de Windows con open() síncrono y bloqueante, que se colgaba si mpv aun no creaba el pipe. Fix: search() en asyncio.to_thread; Player usa to_thread para abrir/escribir el pipe, espera a que mpv cree el pipe al arrancar (con timeout) y nunca bloquea el loop. Verificado de verdad: mpv arranca, carga una URL de YouTube y reproduce sin cuelgues.
+- /start ahora muestra los comandos disponibles segun el rol del que pregunta (admin ve todo, dj ve controles, user ve lo basico) via help_for_role(). Verificado.
+- GUIA.txt actualizada: seccion USO con los comandos agrupados por rol (user / dj+admin / solo admin) y roles/permisos.
+- Falta probar el bot en vivo con Telegram (requiere token real en .env).
 
 ## Pendientes / ToDo
 - [ ] Verificar el formulario real de ytremote.bat en una consola cmd de Windows (pedido de token/ID).
 - [ ] Fase 6: testing en vivo con Telegram (token real en .env).
 - [ ] Completar/ajustar manual de usuario (GUIA.txt) al nuevo flujo.
 - [ ] Fase 7: push + crear release (zip) del proyecto.
-- [ ] Limpiar venv\ viejo local (ya no se usa, pero esta en carpeta; no se sube).
 - [ ] Limpiar venv\ viejo local (ya no se usa, pero esta en carpeta; no se sube).
 
 ## Decisiones recientes
