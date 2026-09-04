@@ -1,0 +1,57 @@
+GUIA DE YT-REMOTE
+=================
+
+Que es YT-Remote?
+-----------------
+Un bot de Telegram que reproduce videos de YouTube. Le mandas
+ordenes desde Telegram y los videos suenan donde tengas la PC
+(en una TV, un monitor, un proyector, da igual: en la pantalla
+a la que este conectada tu PC).
+
+Como se usa? En 3 pasos y listo:
+
+PASO 1 - Crear tu bot y conseguir el TOKEN
+------------------------------------------
+1. Abre Telegram y busca a @BotFather.
+2. Escribele el comando:   /newbot
+3. Elige un nombre para el bot (el que quieras).
+4. Elige un nombre de usuario (debe terminar en "bot").
+5. @BotFather te da un codigo tipo:   1234567890:AAHxh......
+   Ese codigo es tu TOKEN. Guardalo.
+
+PASO 2 - Conseguir tu ID (para que te reconozca)
+------------------------------------------------
+1. En Telegram busca a @userinfobot.
+2. Escribele cualquier mensaje (por ejemplo: hola).
+3. Te va a mostrar tu numero de ID, tipo:   123456789
+   Ese es tu ID. Guardalo.
+
+PASO 3 - Configurar y arrancar
+------------------------------
+1. Doble clic en  ytremote.bat
+2. Si es la primera vez, te va a preguntar por tu TOKEN y tu ID.
+   Pegalos como te indica (tambien los podes pegar en el archivo .env
+   si sabes lo que haces, pero no es necesario).
+3. El bot arranca solo. Dejalo abierto.
+4. Crea un grupo en Telegram, agrega tu bot, y en ese grupo
+   mandale:   /start
+   El bot se configura solo para funcionar ahi.
+
+USO EN EL GRUPO
+---------------
+- /play  metalica nothing else matters   -> busca y muestra resultados
+- /play  https://youtu.be/xxxxx           -> reproduce ese link directo
+- /pause /resume /next /prev /stop        -> controles de reproduccion
+- /volume 70                              -> cambia el volumen
+- /queue                                  -> muestra la cola de temas
+- /now                                    -> que esta sonando
+
+Nota: por defecto solo el dueno (tu) puede administrar. Para darle
+permisos a otros, usa el comando /adduser con tu ID y el de ellos.
+
+PROBLEMAS
+---------
+- Si al hacer doble clic no pasa nada, vuelve a descargar la version
+  completa desde el repositorio (falta algun archivo interno).
+- Si el bot no responde en el grupo, revisa que en el grupo hayas
+  agragado el bot y le hayas mandado /start.

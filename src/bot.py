@@ -20,6 +20,7 @@ from player import Player
 from queue_manager import QueueItem, QueueManager
 from roles import VALID_ROLES, RoleManager
 from search import SearchResult, is_youtube_link, search
+import setup_cli as setup
 
 logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s", level=logging.INFO
@@ -125,9 +126,15 @@ class YTRemoteBot:
         return wrapper
 
     def _chat_allowed(self, update: Update) -> bool:
-        """Restringe el bot al chat permitido si ALLOWED_CHAT_ID esta definido."""
+        """Restringe el bot al chat permitido.
+
+        - Si ALLOWED_CHAT_ID esta definido: solo ese chat.
+        - Si no esta definido (primera vez): solo el dueno, hasta que
+          el propio /start configure el grupo permitido.
+        """
         if self.config.allowed_chat_id is None:
-            return True
+            user = update.effective_user
+            return user is not None and user.id == self.config.owner_id
         chat_id = update.effective_chat.id if update.effective_chat else None
         return chat_id == self.config.allowed_chat_id
 
@@ -158,6 +165,20 @@ class YTRemoteBot:
             user_id,
         )
         print(f"[YT-Remote] /start recibido | chat_id={chat_id} | chat={chat_title} | usuario={user_id}")
+
+        # Primera configuracion: el dueno configura el grupo permitido.
+        user = update.effective_user
+        is_owner = user is not None and user.id == self.config.owner_id
+        if is_owner and self.config.allowed_chat_id is None:
+            allowed = chat.id if chat else None
+            if allowed is not None:
+                setup.set_allowed_chat_id(allowed)
+                self.config.allowed_chat_id = allowed
+                logger.info("Grupo permitido configurado: %s", allowed)
+                await update.message.reply_text(
+                    "Configurado: este chat quedo habilitado para el bot."
+                )
+                return
 
         if not self._chat_allowed(update):
             await update.message.reply_text("Este bot no esta habilitado en este chat.")
