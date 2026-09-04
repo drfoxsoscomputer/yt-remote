@@ -4,9 +4,8 @@ GUIA DE YT-REMOTE
 Que es YT-Remote?
 -----------------
 Un bot de Telegram que reproduce videos de YouTube. Le mandas
-ordenes desde Telegram y los videos suenan donde tengas la PC
-(en una TV, un monitor, un proyector, da igual: en la pantalla
-a la que este conectada tu PC).
+ordenes desde Telegram y los videos se reproducen en la PC
+donde este corriendo el programa.
 
 Como se usa? En 3 pasos y listo:
 
