@@ -18,7 +18,6 @@ class Player:
         self.mpv_path = mpv_path
         self._proc: subprocess.Popen[bytes] | None = None
         self._lock = asyncio.Lock()
-        self._connected = False
 
     @property
     def is_playing(self) -> bool:
@@ -34,7 +33,7 @@ class Player:
                 "--input-ipc-server=" + MPV_PIPE,
                 "--terminal=no",
                 "--really-quiet",
-                "--no-video-idle",
+                "--idle=yes",
             ],
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
