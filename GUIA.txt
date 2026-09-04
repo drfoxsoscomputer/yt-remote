@@ -38,15 +38,30 @@ PASO 3 - Configurar y arrancar
 
 USO EN EL GRUPO
 ---------------
+Despues de /start, el bot te muestra los comandos que podes usar
+segun tu rol (admin, dj o user).
+
+Comandos de usuarios (user, dj y admin):
 - /play  metalica nothing else matters   -> busca y muestra resultados
 - /play  https://youtu.be/xxxxx           -> reproduce ese link directo
-- /pause /resume /next /prev /stop        -> controles de reproduccion
-- /volume 70                              -> cambia el volumen
-- /queue                                  -> muestra la cola de temas
-- /now                                    -> que esta sonando
+- /queue                                 -> muestra la cola de temas
+- /now                                   -> que esta sonando
 
-Nota: por defecto solo el dueno (tu) puede administrar. Para darle
-permisos a otros, usa el comando /adduser con tu ID y el de ellos.
+Comandos de control (dj y admin):
+- /pause  /resume  /next  /prev  /stop   -> controles de reproduccion
+- /volume 70                             -> cambia el volumen
+
+Comandos de administracion (solo admin):
+- /adduser  <id>  <rol>                  -> da acceso con un rol
+- /removeuser  <id>                      -> quita acceso
+
+Roles y permisos:
+- admin: hace todo
+- dj: reproduce, pausa, salta, cola y volumen
+- user: solo pide canciones
+
+Nota: por defecto solo el dueno (tu) es admin. Para darle acceso a
+otros, usa /adduser con su ID de Telegram y el rol (admin, dj o user).
 
 PROBLEMAS
 ---------

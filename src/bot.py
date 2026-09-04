@@ -4,6 +4,7 @@ Controla un reproductor mpv local reproduciendo videos de YouTube.
 Los comandos se enrutan por roles (admin > dj > user).
 """
 
+import asyncio
 import logging
 
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
@@ -150,21 +151,51 @@ class YTRemoteBot:
         wrapper.__name__ = getattr(handler, "__name__", "wrapper")
         return wrapper
 
+    def help_for_role(self, role: str) -> str:
+        """Devuelve el listado de comandos permitidos para un rol."""
+        rank = {"user": 0, "dj": 1, "admin": 2}
+        level = rank.get(role, 0)
+
+        def add(required: str, line: str) -> None:
+            lines.append(line) if rank.get(required, 0) <= level else None
+
+        lines: list[str] = []
+
+        # user
+        lines.append("• /play <busqueda o link> — busca y reproduce")
+        lines.append("• /queue — ver la cola de temas")
+        lines.append("• /now — que esta sonando")
+
+        if level >= 1:  # dj
+            lines.append("• /pause /resume — pausar y reanudar")
+            lines.append("• /next /prev — cambiar de tema")
+            lines.append("• /stop — detener y limpiar cola")
+            lines.append("• /volume <0-100> — ajustar el volumen")
+
+        if level >= 2:  # admin
+            lines.append("• /adduser <id> <rol> — dar acceso con un rol")
+            lines.append("• /removeuser <id> — quitar acceso")
+
+        return "\n".join(lines)
+
     async def cmd_start(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         chat = update.effective_chat
         chat_id = chat.id if chat else "?"
         chat_title = chat.title if chat and chat.title else "(chat privado)"
         user = update.effective_user
         user_id = user.id if user else "?"
+        user_id_int = user.id if user else None
+        user_role = self.roles.get_role(user_id_int) if user_id_int is not None else "user"
 
         # Imprime el ID del chat en la consola para que el usuario pueda copiarlo.
         logger.info(
-            "Mensaje /start | chat_id=%s | chat_title=%s | usuario_id=%s",
+            "Mensaje /start | chat_id=%s | chat_title=%s | usuario_id=%s | rol=%s",
             chat_id,
             chat_title,
             user_id,
+            user_role,
         )
-        print(f"[YT-Remote] /start recibido | chat_id={chat_id} | chat={chat_title} | usuario={user_id}")
+        print(f"[YT-Remote] /start recibido | chat_id={chat_id} | chat={chat_title} | usuario={user_id} | rol={user_role}")
 
         # Primera configuracion: el dueno configura el grupo permitido.
         user = update.effective_user
@@ -176,7 +207,9 @@ class YTRemoteBot:
                 self.config.allowed_chat_id = allowed
                 logger.info("Grupo permitido configurado: %s", allowed)
                 await update.message.reply_text(
-                    "Configurado: este chat quedo habilitado para el bot."
+                    "Configurado: este chat quedo habilitado para el bot.\n\n"
+                    "Comandos disponibles para tu rol (admin):\n"
+                    + self.help_for_role("admin")
                 )
                 return
 
@@ -185,7 +218,9 @@ class YTRemoteBot:
             return
 
         await update.message.reply_text(
-            "YT-Remote activo. Usa /play <busqueda o link> para reproducir."
+            "YT-Remote activo.\n\n"
+            f"Comandos disponibles para tu rol ({user_role}):\n"
+            + self.help_for_role(user_role)
         )
 
     async def cmd_play(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -206,7 +241,11 @@ class YTRemoteBot:
         await context.bot.send_message(
             update.effective_chat.id, "Buscando...", parse_mode=ParseMode.HTML
         )
-        results = search(query, self.config.max_results)
+        # yt-dlp es lento y bloqueante: ejecutarlo en un thread para no
+        # congelar el bot mientras busca.
+        results = await asyncio.to_thread(
+            search, query, self.config.max_results
+        )
         if not results:
             await update.message.reply_text("No encontre resultados.")
             return
@@ -251,11 +290,23 @@ class YTRemoteBot:
             return
 
         # empezar reproduccion desde cero
-        await self.player.start()
-        self.queue.add(item)
-        self.queue.next()  # marca el actual
-        await self.player.load(url)
-        await self.player.play()
+        try:
+            await self.player.start()
+        except RuntimeError as exc:
+            await update.message.reply_text(
+                f"Problema al iniciar el reproductor: {exc}"
+            )
+            return
+        try:
+            self.queue.add(item)
+            self.queue.next()  # marca el actual
+            await self.player.load(url)
+            await self.player.play()
+        except RuntimeError as exc:
+            await update.message.reply_text(
+                f"No se pudo reproducir: {exc}"
+            )
+            return
         await update.message.reply_text(f"▶️ Reproduciendo: {item.title}")
 
     async def cmd_pause(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
