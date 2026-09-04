@@ -1,16 +1,14 @@
-# Virtualenv
+# Virtualenv (enfoque anterior, ya no se usa)
 venv/
 .env
 
-# Datos generados
+# Datos generados en tiempo de ejecucion
 data/roles.json
+data/*.json
 
-# Caché Python
+# Cache Python
 __pycache__/
 *.py[cod]
 
-# mpv
+# Logs
 *.log
-
-# mpv portable (cada PC lo trae; no va al repo)
-runtime/
