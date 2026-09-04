@@ -259,12 +259,26 @@ class YTRemoteBot:
             keyboard.append([InlineKeyboardButton(label, callback_data=cb)])
 
         reply_markup = InlineKeyboardMarkup(keyboard)
-        await context.bot.send_photo(
-            update.effective_chat.id,
-            photo=results[0].thumbnail,
-            caption="Elegi un video:",
-            reply_markup=reply_markup,
-        )
+        thumb = results[0].thumbnail
+        sent_photo = False
+        if thumb:
+            try:
+                await context.bot.send_photo(
+                    update.effective_chat.id,
+                    photo=thumb,
+                    caption="Elegi un video:",
+                    reply_markup=reply_markup,
+                )
+                sent_photo = True
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("No se pudo enviar foto con thumbnail: %s", exc)
+        if not sent_photo:
+            # Sin thumbnail (o fallo): mostrar resultados como texto.
+            await context.bot.send_message(
+                update.effective_chat.id,
+                "Elegi un video:",
+                reply_markup=reply_markup,
+            )
 
     async def on_callback(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         query = update.callback_query

@@ -25,6 +25,19 @@ class SearchResult:
     title: str
     duration: str
     thumbnail: str
+    video_id: str = ""
+
+
+def _build_thumbnail(video_id: str) -> str:
+    """Construye la URL de la miniatura a partir del ID del video.
+
+    Con extract_flat yt-dlp no devuelve las URLs de las miniaturas,
+    pero la miniatura de YouTube siempre esta disponible en esta URL
+    estable a partir del video ID.
+    """
+    if not video_id:
+        return ""
+    return f"https://i.ytimg.com/vi/{video_id}/hqdefault.jpg"
 
 
 def is_youtube_link(text: str) -> bool:
@@ -58,13 +71,15 @@ def search(query: str, max_results: int = 5) -> list[SearchResult]:
             url = entry.get("url") or entry.get("webpage_url") or ""
             if not url:
                 continue
+            video_id = entry.get("id") or ""
             duration = entry.get("duration") or 0
             results.append(
                 SearchResult(
                     url=url,
                     title=entry.get("title") or "(sin titulo)",
                     duration=_fmt_duration(duration),
-                    thumbnail=entry.get("thumbnail") or "",
+                    thumbnail=_build_thumbnail(video_id),
+                    video_id=video_id,
                 )
             )
     return results
