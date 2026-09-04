@@ -130,9 +130,11 @@ class Player:
         payload = json.dumps({"command": [command, *args]})
         await self._send_raw(payload)
 
-    async def load(self, url: str) -> None:
+    async def load(self, url: str, audio_url: str | None = None) -> None:
         """Carga y reproduce un URL/stream en mpv."""
         await self.command("loadfile", url, "replace")
+        if audio_url:
+            await self.command("audio-add", audio_url, "select")
 
     async def play(self) -> None:
         await self.command("set", "pause", "no")

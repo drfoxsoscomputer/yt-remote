@@ -92,3 +92,53 @@ def _fmt_duration(seconds: int | float) -> str:
     if h:
         return f"{h}:{m:02d}:{s:02d}"
     return f"{m}:{s:02d}"
+
+
+def resolve_stream_url(youtube_url: str) -> tuple[str, str | None] | None:
+    """Resuelve un link de YouTube a URLs de stream que mpv puede reproducir.
+
+    Devuelve (video_url, audio_url) o (url, None) si es un stream combinado.
+    Devuelve None si no se pudo resolver (video no disponible, rate limit, etc).
+    """
+    import yt_dlp
+
+    opts: "dict[str, Any]" = {
+        "quiet": True,
+        "no_warnings": True,
+        "skip_download": True,
+        "noplaylist": True,
+    }
+    try:
+        with yt_dlp.YoutubeDL(opts) as ydl:
+            info = ydl.extract_info(youtube_url, download=False)
+            if not info:
+                return None
+
+            # Stream directo (un solo URL con audio+video)
+            if info.get("url"):
+                return (str(info["url"]), None)
+
+            # Streams separados (DASH: video + audio)
+            requested = info.get("requested_formats")
+            if requested and isinstance(requested, list):
+                video_url = None
+                audio_url = None
+                for fmt in requested:
+                    vcodec = fmt.get("vcodec", "none")
+                    acodec = fmt.get("acodec", "none")
+                    furl = fmt.get("url")
+                    if not furl:
+                        continue
+                    if vcodec != "none" and not video_url:
+                        video_url = str(furl)
+                    elif acodec != "none" and not audio_url:
+                        audio_url = str(furl)
+                if video_url:
+                    return (video_url, audio_url)
+
+            # Fallback: webpage URL (mpv intentara resolver con su ytdl hook)
+            if info.get("webpage_url"):
+                return (str(info["webpage_url"]), None)
+    except Exception:
+        pass
+    return None
