@@ -36,7 +36,7 @@ def search(query: str, max_results: int = 5) -> list[SearchResult]:
     """Busca videos en YouTube y devuelve los resultados."""
     import yt_dlp
 
-    ydl_opts: dict[str, object] = {
+    ydl_opts: "dict[str, Any]" = {
         "quiet": True,
         "no_warnings": True,
         "skip_download": True,
@@ -45,7 +45,7 @@ def search(query: str, max_results: int = 5) -> list[SearchResult]:
     }
 
     results: list[SearchResult] = []
-    with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+    with yt_dlp.YoutubeDL(ydl_opts) as ydl:  # type: ignore[arg-type]
         try:
             info = ydl.extract_info(f"ytsearch{max_results}:{query}", download=False)
         except Exception:

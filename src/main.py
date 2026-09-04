@@ -1,9 +1,23 @@
-"""Entry point de YT-Remote."""
+"""Entry point de YT-Remote.
+
+Arranca el bot de Telegram que controla mpv para reproducir
+videos de YouTube en el TV local.
+"""
+
+import sys
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 
 def main() -> None:
-    print("YT-Remote arrancando...")
-    print("Configura tu token en config.json para habilitar el bot.")
+    from bot import YTRemoteBot
+    from config import load_config
+
+    config = load_config()
+    bot = YTRemoteBot(config)
+    app = bot.build()
+    app.run_polling(allowed_updates=["message", "callback_query"])
 
 
 if __name__ == "__main__":
