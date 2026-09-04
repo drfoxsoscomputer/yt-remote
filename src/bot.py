@@ -37,6 +37,16 @@ class YTRemoteBot:
         self.queue = QueueManager()
         # cache: callback_data -> SearchResult para los botones de busqueda
         self._search_cache: dict[str, SearchResult] = {}
+        self._register_owner()
+
+    def _register_owner(self) -> None:
+        """El dueno (OWNER_ID) queda como admin automaticamente."""
+        if self.config.owner_id is None:
+            logger.warning("OWNER_ID no configurado en .env: no hay admin inicial.")
+            return
+        if not self.roles.has_role(self.config.owner_id, "admin"):
+            self.roles.set_role(self.config.owner_id, "admin")
+            logger.info("Dueno %s registrado como admin.", self.config.owner_id)
 
     @property
     def app(self) -> Application:
@@ -45,20 +55,53 @@ class YTRemoteBot:
     def build(self) -> Application:
         app = Application.builder().token(self.config.token).build()
 
-        app.add_handler(CommandHandler("play", self.cmd_play))
-        app.add_handler(CommandHandler("pause", self._require("dj", self.cmd_pause)))
-        app.add_handler(CommandHandler("resume", self._require("dj", self.cmd_resume)))
-        app.add_handler(CommandHandler("next", self._require("dj", self.cmd_next)))
-        app.add_handler(CommandHandler("prev", self._require("dj", self.cmd_prev)))
-        app.add_handler(CommandHandler("stop", self._require("dj", self.cmd_stop)))
-        app.add_handler(CommandHandler("volume", self._require("dj", self.cmd_volume)))
-        app.add_handler(CommandHandler("queue", self.cmd_queue))
-        app.add_handler(CommandHandler("now", self.cmd_now))
-        app.add_handler(CommandHandler("adduser", self._require("admin", self.cmd_adduser)))
+        app.add_handler(CommandHandler("play", self._require_chat(self.cmd_play)))
+        app.add_handler(CommandHandler("start", self._require_chat(self.cmd_start)))
         app.add_handler(
-            CommandHandler("removeuser", self._require("admin", self.cmd_removeuser))
+            CommandHandler(
+                "pause", self._require_chat(self._require("dj", self.cmd_pause))
+            )
         )
-        app.add_handler(CallbackQueryHandler(self.on_callback))
+        app.add_handler(
+            CommandHandler(
+                "resume", self._require_chat(self._require("dj", self.cmd_resume))
+            )
+        )
+        app.add_handler(
+            CommandHandler(
+                "next", self._require_chat(self._require("dj", self.cmd_next))
+            )
+        )
+        app.add_handler(
+            CommandHandler(
+                "prev", self._require_chat(self._require("dj", self.cmd_prev))
+            )
+        )
+        app.add_handler(
+            CommandHandler(
+                "stop", self._require_chat(self._require("dj", self.cmd_stop))
+            )
+        )
+        app.add_handler(
+            CommandHandler(
+                "volume", self._require_chat(self._require("dj", self.cmd_volume))
+            )
+        )
+        app.add_handler(CommandHandler("queue", self._require_chat(self.cmd_queue)))
+        app.add_handler(CommandHandler("now", self._require_chat(self.cmd_now)))
+        app.add_handler(
+            CommandHandler(
+                "adduser", self._require_chat(self._require("admin", self.cmd_adduser))
+            )
+        )
+        app.add_handler(
+            CommandHandler(
+                "removeuser",
+                self._require_chat(self._require("admin", self.cmd_removeuser)),
+            )
+        )
+
+        app.add_handler(CallbackQueryHandler(self._require_chat(self.on_callback)))
 
         self._app = app
         app.run_polling  # noqa: B018  (validar metodo disponible)
@@ -80,6 +123,49 @@ class YTRemoteBot:
 
         wrapper.__name__ = handler.__name__
         return wrapper
+
+    def _chat_allowed(self, update: Update) -> bool:
+        """Restringe el bot al chat permitido si ALLOWED_CHAT_ID esta definido."""
+        if self.config.allowed_chat_id is None:
+            return True
+        chat_id = update.effective_chat.id if update.effective_chat else None
+        return chat_id == self.config.allowed_chat_id
+
+    def _require_chat(self, handler):
+        """Envuelve un handler exigiendo que el chat este permitido."""
+
+        async def wrapper(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+            if not self._chat_allowed(update):
+                logger.info("Rechazado mensaje de chat no permitido.")
+                return
+            await handler(update, context)
+
+        wrapper.__name__ = getattr(handler, "__name__", "wrapper")
+        return wrapper
+
+    async def cmd_start(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        chat = update.effective_chat
+        chat_id = chat.id if chat else "?"
+        chat_title = chat.title if chat and chat.title else "(chat privado)"
+        user = update.effective_user
+        user_id = user.id if user else "?"
+
+        # Imprime el ID del chat en la consola para que el usuario pueda copiarlo.
+        logger.info(
+            "Mensaje /start | chat_id=%s | chat_title=%s | usuario_id=%s",
+            chat_id,
+            chat_title,
+            user_id,
+        )
+        print(f"[YT-Remote] /start recibido | chat_id={chat_id} | chat={chat_title} | usuario={user_id}")
+
+        if not self._chat_allowed(update):
+            await update.message.reply_text("Este bot no esta habilitado en este chat.")
+            return
+
+        await update.message.reply_text(
+            "YT-Remote activo. Usa /play <busqueda o link> para reproducir."
+        )
 
     async def cmd_play(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         text = (context.args or [])
