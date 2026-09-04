@@ -20,7 +20,7 @@ from config import Config
 from player import Player
 from queue_manager import QueueItem, QueueManager
 from roles import VALID_ROLES, RoleManager
-from search import SearchResult, is_youtube_link, search
+from search import SearchResult, is_youtube_link, search, resolve_stream_url
 import setup_cli as setup
 
 logging.basicConfig(
@@ -307,6 +307,16 @@ class YTRemoteBot:
             await update.message.reply_text(f"Agregado a la cola: {item.title}")
             return
 
+        # Resolver el link de YouTube a URLs de stream directo que mpv
+        # pueda reproducir sin necesitar yt-dlp propio.
+        resolved = await asyncio.to_thread(resolve_stream_url, url)
+        if not resolved:
+            await update.message.reply_text(
+                "No se pudo resolver el video. Espera un momento e intenta de nuevo."
+            )
+            return
+        stream_url, audio_url = resolved
+
         # empezar reproduccion desde cero
         try:
             await self.player.start()
@@ -318,7 +328,7 @@ class YTRemoteBot:
         try:
             self.queue.add(item)
             self.queue.next()  # marca el actual
-            await self.player.load(url)
+            await self.player.load(stream_url, audio_url)
             await self.player.play()
         except RuntimeError as exc:
             await update.message.reply_text(
