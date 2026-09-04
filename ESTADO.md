@@ -16,31 +16,37 @@ Bot de Telegram que controla la reproduccion de YouTube en la TV (PC conectado p
 - `src/search.py` — is_youtube_link() + search() via yt-dlp; SearchResult.
 - `src/player.py` — clase Player, IPC de mpv por named pipe `\\.\pipe\mpv-ytremote`. Usa `--idle=yes` para mantener el pipe vivo.
 - `src/queue_manager.py` — QueueManager + QueueItem (deque FIFO).
-- `src/config.py` — load_config(); lee token PRIMERO de .env, fallback config.json; resuelve mpv_path relativo al PROJECT_ROOT; error claro si falta token.
+- `src/config.py` — load_config(); lee token PRIMERO de .env, fallback config.json; resuelve mpv_path relativo al PROJECT_ROOT; error claro si falta token; lee OWNER_ID y ALLOWED_CHAT_ID.
+- `src/setup_cli.py` — utilidades para ytremote.bat: is_configured(), write_env(), set/get_allowed_chat_id(). Escribe el .env sin tocar archivos a mano.
 - `src/roles.py` — RoleManager (admin/dj/user); has_role por rango; persiste data/roles.json.
 - `config.json` — NO sensibles: mpv_path, default_role, max_results; token placeholder.
-- `.env` — TOKEN REAL (ignorado por git).
-- `setup.bat` / `start.bat` — verifican Python y mpv embebidos; arrancan con runtime\python\python.exe.
+- `.env` — TOKEN REAL + OWNER_ID + ALLOWED_CHAT_ID (ignorado por git).
+- `.env.example` — plantilla segura de configuracion (versionada).
+- `ytremote.bat` — UNICO archivo de arranque: si .env vacio muestra formulario (pide token e ID, guiado); si listo, arranca el bot. Mensajes amigables, sin jerga tecnica.
+- `GUIA.txt` — guia de usuario en texto plano (como crear bot, conseguir ID, uso, problemas).
 - `.gitignore` — ignora .env, venv, data/roles.json, __pycache__, *.log.
 - `runtime/` — Python 3.13.9 embebido + mpv portable (SE SUBEN al repo, por decision del usuario: todo incluido).
 
 ## Estado actual
 - Fases 1-5 completadas y pusheadas. Fase 6 (testing) en curso.
 - Python portable embebido + mpv portable dentro de runtime/ (todo en el repo por decision del usuario).
-- start.bat y setup.bat reescritos para usar el Python embebido (sin depender del sistema ni de venv).
+- UNICO ytremote.bat reemplaza a start.bat y setup.bat (eliminados); con formulario de primera configuracion y mensajes amigables.
 - Token ahora se lee de .env (seguridad: no subir token real a GitHub).
 - OWNER_ID + ALLOWED_CHAT_ID leidos de .env; el dueno queda como admin automaticamente.
-- Restriccion de chat implementada: si ALLOWED_CHAT_ID esta definido, el bot solo responde ahi.
-- /start imprime el chat_id en consola (para copiar el ID del grupo al .env).
+- Restriccion de chat: si ALLOWED_CHAT_ID definido solo responde ahi; si no, solo el dueno hasta que configure el grupo.
+- Autoconfiguracion: el dueno manda /start la primera vez y el bot guarda ese chat como permitido (implementado en bot.py cmd_start + setup_cli.set_allowed_chat_id; verify: _chat_allowed corretto).
+- setup_cli.py verificado (is-configured/save/set-chat + CLI; write_env; set/get allowed_chat_id). HAY que verificar el formulario real en doble clic (no simulable por pipeline).
+- BUG .bat resuelto: el patrón `for /f` para capturar salida de un comando Python con rutas y comillas NUNCA funciona (parsing de cmd). Solución robusta: redirigir salida a archivo temp (`> %TEMP%\..`) + `set /p` para leerlo. Ademas el .bat debe ser 100% ASCII (sin acentos/«») o cmd rompe el parsing: escribir sin tildes/ñ.
 - Player IPC verificado contra mpv portable real (fix de --idle=yes).
 - Busqueda YouTube verificada con yt-dlp real.
-- Falta probar el bot en vivo con Telegram (requiere token real en .env).
+- Falta probar el bot en vivo con Telegram (requiere token real en .env), y verificar el formulario real de ytremote.bat en una consola cmd.
 
 ## Pendientes / ToDo
+- [ ] Verificar el formulario real de ytremote.bat en una consola cmd de Windows (pedido de token/ID).
 - [ ] Fase 6: testing en vivo con Telegram (token real en .env).
-- [ ] Completar el manual de usuario (los pasos 1-3 aprobados; falta cerrar el flujo de configuracion con el chat_ID).
-- [ ] Fase 7: push final.
-- [ ] Manual de usuario (decision: portable de verdad, todo incluido en el repo).
+- [ ] Completar/ajustar manual de usuario (GUIA.txt) al nuevo flujo.
+- [ ] Fase 7: push + crear release (zip) del proyecto.
+- [ ] Limpiar venv\ viejo local (ya no se usa, pero esta en carpeta; no se sube).
 - [ ] Limpiar venv\ viejo local (ya no se usa, pero esta en carpeta; no se sube).
 
 ## Decisiones recientes
