@@ -95,10 +95,14 @@ def _fmt_duration(seconds: int | float) -> str:
 
 
 def resolve_stream_url(youtube_url: str) -> tuple[str, str | None] | None:
-    """Resuelve un link de YouTube a URLs de stream que mpv puede reproducir.
+    """Resuelve un link de YouTube a una URL de stream directo que mpv puede reproducir.
+
+    Usa el player client 'android' de yt-dlp, que suele devolver un solo
+    stream mp4 (video+audio juntos) y evita el bloqueo de "Sign in to
+    confirm you're not a bot" que aplica YouTube al client web.
 
     Devuelve (video_url, audio_url) o (url, None) si es un stream combinado.
-    Devuelve None si no se pudo resolver (video no disponible, rate limit, etc).
+    Devuelve None si no se pudo resolver.
     """
     import yt_dlp
 
@@ -107,6 +111,7 @@ def resolve_stream_url(youtube_url: str) -> tuple[str, str | None] | None:
         "no_warnings": True,
         "skip_download": True,
         "noplaylist": True,
+        "extractor_args": {"youtube": {"player_client": ["android"]}},
     }
     try:
         with yt_dlp.YoutubeDL(opts) as ydl:
