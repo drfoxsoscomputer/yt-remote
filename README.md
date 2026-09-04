@@ -1,8 +1,7 @@
 # YT-Remote
 
-Bot de Telegram para controlar la reproduccion de videos de YouTube en tu TV
-(conectado por HDMI a tu PC). Busqueda privada en el chat, video en pantalla
-completa en el TV.
+Bot de Telegram para controlar la reproduccion de videos de YouTube.
+Busqueda privada en el chat, video en la PC donde corre el programa.
 
 ## Requisitos
 

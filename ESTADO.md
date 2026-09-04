@@ -3,7 +3,7 @@
 > Pagina que cualquier sesion futura lee primero. Si esto no esta actualizado, es un bug mio, no del usuario.
 
 ## Que es
-Bot de Telegram que controla la reproduccion de YouTube en la TV (PC conectado por HDMI). Busqueda privada en el chat, roles (admin/dj/user) y thumbnails en los resultados.
+Bot de Telegram que controla la reproduccion de YouTube (video en la PC donde corre el programa). Busqueda privada en el chat, roles (admin/dj/user) y thumbnails en los resultados.
 
 ## Como correr
 1. Todo vive DENTRO de la carpeta (portable de verdad): Python embebido en `runtime\python\`, mpv en `runtime\mpv\`, dependencias en el Python embebido.

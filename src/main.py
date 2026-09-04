@@ -1,7 +1,7 @@
 """Entry point de YT-Remote.
 
 Arranca el bot de Telegram que controla mpv para reproducir
-videos de YouTube en el TV local.
+videos de YouTube en la PC.
 """
 
 import sys
