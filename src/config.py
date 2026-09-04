@@ -30,11 +30,21 @@ def _read_dotenv() -> dict[str, str]:
 class Config:
     """Configuracion de YT-Remote."""
 
-    def __init__(self, token: str, mpv_path: str, default_role: str, max_results: int) -> None:
+    def __init__(
+        self,
+        token: str,
+        mpv_path: str,
+        default_role: str,
+        max_results: int,
+        owner_id: int | None = None,
+        allowed_chat_id: int | None = None,
+    ) -> None:
         self.token = token
         self.mpv_path = mpv_path
         self.default_role = default_role
         self.max_results = max_results
+        self.owner_id = owner_id
+        self.allowed_chat_id = allowed_chat_id
 
 
 def load_config() -> Config:
@@ -52,19 +62,35 @@ def load_config() -> Config:
     env = _read_dotenv()
     token = env.get("TELEGRAM_TOKEN", str(data.get("telegram_token", "")))
 
+    def _to_int(value: str | None) -> int | None:
+        if value is None or str(value).strip() == "":
+            return None
+        try:
+            return int(str(value).strip())
+        except ValueError:
+            return None
+
+    owner_id = _to_int(env.get("OWNER_ID"))
+    allowed_chat_id = _to_int(env.get("ALLOWED_CHAT_ID"))
+
     config = Config(
         token=token,
         mpv_path=mpv_path,
         default_role=str(data.get("default_role", "user")),
         max_results=int(data.get("max_results", 5)),
+        owner_id=owner_id,
+        allowed_chat_id=allowed_chat_id,
     )
 
     if config.token in ("", "TU_TOKEN_AQUI"):
         raise ValueError(
             "El token de Telegram no esta configurado.\n"
             f"1. Crea el archivo .env en {PROJECT_ROOT}\n"
-            "2. Escribe en el:  TELEGRAM_TOKEN=tu_token_de_botfather\n"
-            "(El .env no se sube a GitHub; el token queda solo en tu maquina)."
+            "2. Escribe en el archivo, con tus datos reales:\n"
+            "      TELEGRAM_TOKEN=tu_token_de_botfather\n"
+            "      OWNER_ID=123456789\n"
+            "3. OWNER_ID es tu ID de Telegram (se consigue con @userinfobot).\n"
+            "(El .env no se sube a GitHub; queda solo en tu maquina)."
         )
 
     return config

@@ -29,13 +29,16 @@ Bot de Telegram que controla la reproduccion de YouTube en la TV (PC conectado p
 - Python portable embebido + mpv portable dentro de runtime/ (todo en el repo por decision del usuario).
 - start.bat y setup.bat reescritos para usar el Python embebido (sin depender del sistema ni de venv).
 - Token ahora se lee de .env (seguridad: no subir token real a GitHub).
+- OWNER_ID + ALLOWED_CHAT_ID leidos de .env; el dueno queda como admin automaticamente.
+- Restriccion de chat implementada: si ALLOWED_CHAT_ID esta definido, el bot solo responde ahi.
+- /start imprime el chat_id en consola (para copiar el ID del grupo al .env).
 - Player IPC verificado contra mpv portable real (fix de --idle=yes).
 - Busqueda YouTube verificada con yt-dlp real.
 - Falta probar el bot en vivo con Telegram (requiere token real en .env).
 
 ## Pendientes / ToDo
 - [ ] Fase 6: testing en vivo con Telegram (token real en .env).
-- [ ] Restriccion de chat/whitelist (solo funcione en grupo privado del admin) — pendiente de decidir e implementar.
+- [ ] Completar el manual de usuario (los pasos 1-3 aprobados; falta cerrar el flujo de configuracion con el chat_ID).
 - [ ] Fase 7: push final.
 - [ ] Manual de usuario (decision: portable de verdad, todo incluido en el repo).
 - [ ] Limpiar venv\ viejo local (ya no se usa, pero esta en carpeta; no se sube).
@@ -45,9 +48,11 @@ Bot de Telegram que controla la reproduccion de YouTube en la TV (PC conectado p
 - Todo incluido en el repo (no setup que descargue): el usuario descomprime y ya esta todo. (2026-09-04)
 - El token real va SOLO en .env (gitignored), nunca en config.json ni en el repo publico. (2026-09-04)
 - El arranque es con start.bat (no .exe) por ahora. (2026-09-04)
+- Dueno definido por OWNER_ID en .env (se registra admin solo); whitelist de chat via ALLOWED_CHAT_ID; /start imprime el chat_id. (2026-09-04)
 
 ## Tests / verificacion
 - Player IPC: mpv arranca en idle, acepta set_volume/get_property, se cierra. Verificado.
 - Busqueda: yt-dlp devuelve resultados reales; is_youtube_link() correcto.
-- Config: token desde .env; error claro sin token; .env ignorado por git (git check-ignore).
-- Dependencias importan en el Python embebido.
+- Config: token/OWNER_ID/ALLOWED_CHAT_ID desde .env; .env ignorado, .env.example versionado (git check-ignore).
+- YTRemoteBot instancia sin red y registra al dueno (OWNER_ID) como admin (verificado).
+- Sintaxis OK en todos los .py; dependencias importan en el Python embebido.
