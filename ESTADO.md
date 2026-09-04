@@ -36,12 +36,13 @@ Bot de Telegram que controla la reproduccion de YouTube (video en la PC donde co
 - Restriccion de chat: si ALLOWED_CHAT_ID definido solo responde ahi; si no, solo el dueno hasta que configure el grupo.
 - Autoconfiguracion: el dueno manda /start la primera vez y el bot guarda ese chat como permitido (implementado en bot.py cmd_start + setup_cli.set_allowed_chat_id; verify: _chat_allowed corretto).
 - setup_cli.py verificado (is-configured/save/set-chat + CLI; write_env; set/get allowed_chat_id). HAY que verificar el formulario real en doble clic (no simulable por pipeline).
-- BUG .bat resuelto: el patrón `for /f` para capturar salida de un comando Python con rutas y comillas NUNCA funciona (parsing de cmd). Solución robusta: redirigir salida a archivo temp (`> %TEMP%\..`) + `set /p` para leerlo. Ademas el .bat debe ser 100% ASCII (sin acentos/«») o cmd rompe el parsing: escribir sin tildes/ñ.
+- BUG .bat resuelto: el patron `for /f` para capturar salida de un comando Python con rutas y comillas NUNCA funciona (parsing de cmd). Solucion robusta: redirigir salida a archivo temp (`> %TEMP%\..`) + `set /p` para leerlo. Ademas el .bat debe ser 100% ASCII (sin acentos/<<>>) o cmd rompe el parsing: escribir sin tildes/n.
 - Player IPC verificado contra mpv portable real (fix de --idle=yes).
 - Busqueda YouTube verificada con yt-dlp real.
-- BUG "pegado en buscando / no reproduce" CORREGIDO: el bot se congelaba porque (1) search() síncrono bloqueaba el event loop de Telegram mientras yt-dlp consultaba, y (2) Player._send_raw abria el named pipe de Windows con open() síncrono y bloqueante, que se colgaba si mpv aun no creaba el pipe. Fix: search() en asyncio.to_thread; Player usa to_thread para abrir/escribir el pipe, espera a que mpv cree el pipe al arrancar (con timeout) y nunca bloquea el loop. Verificado de verdad: mpv arranca, carga una URL de YouTube y reproduce sin cuelgues.
-- CAUSA RAiz adicional del "se queda buscando": con extract_flat=True yt-dlp devuelve thumbnails VACIOS, y cmd_play hacia send_photo(photo="") que se colgaba. Fix: search.py construye la miniatura desde el video ID (https://i.ytimg.com/vi/<id>/hqdefault.jpg) y cmd_play cae a un mensaje de texto con botones si el thumbnail falta o la foto falla (try/except). Verificado: busqueda de 'denicher pool inexplicable' devuelve thumbs validos (HTTP 200).
+- BUG "pegado en buscando / no reproduce" CORREGIDO: el bot se congelaba porque (1) search() sincrono bloqueaba el event loop de Telegram mientras yt-dlp consultaba, y (2) Player._send_raw abria el named pipe de Windows con open() sincrono y bloqueante, que se colgaba si mpv aun no creaba el pipe. Fix: search() en asyncio.to_thread; Player usa to_thread para abrir/escribir el pipe, espera a que mpv cree el pipe al arrancar (con timeout) y nunca bloquea el loop. Verificado de verdad: mpv arranca, carga una URL de YouTube y reproduce sin cuelgues.
+- CAUSA RAIZ adicional del "se queda buscando": con extract_flat=True yt-dlp devuelve thumbnails VACIOS, y cmd_play hacia send_photo(photo="") que se colgaba. Fix: search.py construye la miniatura desde el video ID (https://i.ytimg.com/vi/<id>/hqdefault.jpg) y cmd_play cae a un mensaje de texto con botones si el thumbnail falta o la foto falla (try/except). Verificado: busqueda de 'denicher pool inexplicable' devuelve thumbs validos (HTTP 200).
 - BUG REAL del "no veo ni escucho nada": mpv daba "loading failed" al cargar YouTube porque NO encontraba yt-dlp (el unico yt-dlp.exe vive en runtime\python\Scripts, pero el sistema no tiene ninguno y mpv no lo usaba). Fix: player.py _mpv_env() agrega runtime\python\Scripts al PATH del proceso mpv. Verificado de verdad: mpv ahora emite audio-reconfig + video-reconfig + playback-restart (antes: loading failed).
+- FIX DEFINITIVO del "no veo ni escucho nada": ahora el bot RESUELVE las URLs de YouTube a streams directos de googlevideo en Python (usando yt-dlp como libreria) ANTES de pasarselas a mpv. mpv ya no necesita resolver YouTube internamente. Funciona con videos DASH (streams separados: video VP9 + audio Opus) via audio-add. Verificado: busqueda + seleccion + resolucion + carga en mpv = reproduce correctamente.
 - UX miniaturas segun pedido del user: el listado de resultados (/play) se muestra SIN miniatura (solo texto + botones titulo/duracion); la miniatura aparece al ELEGIR el video (on_callback envia la foto del elegido + "Reproduciendo: <titulo>").
 - /start ahora muestra los comandos disponibles segun el rol del que pregunta (admin ve todo, dj ve controles, user ve lo basico) via help_for_role(). Verificado.
 - GUIA.txt actualizada: seccion USO con los comandos agrupados por rol (user / dj+admin / solo admin) y roles/permisos.
@@ -50,7 +51,7 @@ Bot de Telegram que controla la reproduccion de YouTube (video en la PC donde co
 ## Pendientes / ToDo
 - [ ] Verificar el formulario real de ytremote.bat en una consola cmd de Windows (pedido de token/ID).
 - [ ] Fase 6: testing en vivo con Telegram (token real en .env).
-- [ ] Completar/ajustar manual de usuario (GUIA.txt) al nuevo flujo.
+- [ ] Completar/ajustar manual de usuario (GUIA.txt) al nuevo flujo (reordenar pasos segun aprobacion del usuario).
 - [ ] Fase 7: push + crear release (zip) del proyecto.
 - [ ] Limpiar venv\ viejo local (ya no se usa, pero esta en carpeta; no se sube).
 
@@ -67,3 +68,4 @@ Bot de Telegram que controla la reproduccion de YouTube (video en la PC donde co
 - Config: token/OWNER_ID/ALLOWED_CHAT_ID desde .env; .env ignorado, .env.example versionado (git check-ignore).
 - YTRemoteBot instancia sin red y registra al dueno (OWNER_ID) como admin (verificado).
 - Sintaxis OK en todos los .py; dependencias importan en el Python embebido.
+- resolve_stream_url(): busca + resuelve + carga en mpv con streams separados (video VP9 + audio Opus via audio-add). Verificado: mpv reproduce con exito.
