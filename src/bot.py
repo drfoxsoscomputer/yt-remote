@@ -259,26 +259,13 @@ class YTRemoteBot:
             keyboard.append([InlineKeyboardButton(label, callback_data=cb)])
 
         reply_markup = InlineKeyboardMarkup(keyboard)
-        thumb = results[0].thumbnail
-        sent_photo = False
-        if thumb:
-            try:
-                await context.bot.send_photo(
-                    update.effective_chat.id,
-                    photo=thumb,
-                    caption="Elegi un video:",
-                    reply_markup=reply_markup,
-                )
-                sent_photo = True
-            except Exception as exc:  # noqa: BLE001
-                logger.warning("No se pudo enviar foto con thumbnail: %s", exc)
-        if not sent_photo:
-            # Sin thumbnail (o fallo): mostrar resultados como texto.
-            await context.bot.send_message(
-                update.effective_chat.id,
-                "Elegi un video:",
-                reply_markup=reply_markup,
-            )
+        # Listado de resultados sin miniatura: la miniatura se muestra al
+        # elegir un video (ver on_callback).
+        await context.bot.send_message(
+            update.effective_chat.id,
+            "Elegi un video:",
+            reply_markup=reply_markup,
+        )
 
     async def on_callback(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         query = update.callback_query
@@ -289,7 +276,24 @@ class YTRemoteBot:
         if result is None:
             await query.edit_message_text("Esa busqueda ya expiro, busca de nuevo.")
             return
-        await query.edit_message_caption(caption=f"Reproduciendo: {result.title}")
+
+        # Confirmar la eleccion pidiendo reproducir.
+        await query.edit_message_text(f"Reproduciendo: {result.title}")
+
+        # Mostrar la miniatura del video elegido mas su titulo.
+        if result.thumbnail:
+            try:
+                await context.bot.send_photo(
+                    update.effective_chat.id,
+                    photo=result.thumbnail,
+                    caption=f"Reproduciendo: {result.title}",
+                )
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("No se pudo mostrar la miniatura elegida: %s", exc)
+                await update.effective_chat.send_message(
+                    f"▶️ Reproduciendo: {result.title}"
+                )
+
         await self._load_url(update, result.url, caption=result.title)
 
     async def _load_url(
