@@ -1,0 +1,13 @@
+# Virtualenv
+venv/
+.env
+
+# Datos generados
+data/roles.json
+
+# Caché Python
+__pycache__/
+*.py[cod]
+
+# mpv
+*.log

@@ -1,0 +1,6 @@
+{
+  "telegram_token": "TU_TOKEN_AQUI",
+  "mpv_path": "mpv",
+  "default_role": "user",
+  "max_results": 5
+}
