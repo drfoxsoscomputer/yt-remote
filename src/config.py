@@ -1,10 +1,30 @@
-"""Carga de configuracion desde config.json."""
+"""Carga de configuracion desde config.json y .env.
+
+El token de Telegram se lee PRIMERO del archivo .env (que NO se sube a
+GitHub, por seguridad). config.json mantiene valores no sensibles y un
+placeholder de token como respaldo.
+"""
 
 import json
 from pathlib import Path
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 CONFIG_PATH = PROJECT_ROOT / "config.json"
+ENV_PATH = PROJECT_ROOT / ".env"
+
+
+def _read_dotenv() -> dict[str, str]:
+    """Lee variables del archivo .env (formato CLAVE=valor, una por linea)."""
+    values: dict[str, str] = {}
+    if not ENV_PATH.exists():
+        return values
+    for line in ENV_PATH.read_text(encoding="utf-8").splitlines():
+        line = line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, _, value = line.partition("=")
+        values[key.strip()] = value.strip().strip('"').strip("'")
+    return values
 
 
 class Config:
@@ -27,17 +47,24 @@ def load_config() -> Config:
         mpv_path = PROJECT_ROOT / mpv_path
     mpv_path = str(mpv_path)
 
+    # El token real va en .env (no se sube a GitHub). El de config.json es
+    # solo un placeholder de respaldo.
+    env = _read_dotenv()
+    token = env.get("TELEGRAM_TOKEN", str(data.get("telegram_token", "")))
+
     config = Config(
-        token=str(data["telegram_token"]),
+        token=token,
         mpv_path=mpv_path,
         default_role=str(data.get("default_role", "user")),
         max_results=int(data.get("max_results", 5)),
     )
 
-    if config.token == "TU_TOKEN_AQUI":
+    if config.token in ("", "TU_TOKEN_AQUI"):
         raise ValueError(
-            "El token de Telegram no esta configurado. "
-            f"Edita {CONFIG_PATH} y coloca tu token de @BotFather."
+            "El token de Telegram no esta configurado.\n"
+            f"1. Crea el archivo .env en {PROJECT_ROOT}\n"
+            "2. Escribe en el:  TELEGRAM_TOKEN=tu_token_de_botfather\n"
+            "(El .env no se sube a GitHub; el token queda solo en tu maquina)."
         )
 
     return config
