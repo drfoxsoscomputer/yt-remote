@@ -40,6 +40,7 @@ Bot de Telegram que controla la reproduccion de YouTube (video en la PC donde co
 - Player IPC verificado contra mpv portable real (fix de --idle=yes).
 - Busqueda YouTube verificada con yt-dlp real.
 - BUG "pegado en buscando / no reproduce" CORREGIDO: el bot se congelaba porque (1) search() síncrono bloqueaba el event loop de Telegram mientras yt-dlp consultaba, y (2) Player._send_raw abria el named pipe de Windows con open() síncrono y bloqueante, que se colgaba si mpv aun no creaba el pipe. Fix: search() en asyncio.to_thread; Player usa to_thread para abrir/escribir el pipe, espera a que mpv cree el pipe al arrancar (con timeout) y nunca bloquea el loop. Verificado de verdad: mpv arranca, carga una URL de YouTube y reproduce sin cuelgues.
+- CAUSA RAiz adicional del "se queda buscando": con extract_flat=True yt-dlp devuelve thumbnails VACIOS, y cmd_play hacia send_photo(photo="") que se colgaba. Fix: search.py construye la miniatura desde el video ID (https://i.ytimg.com/vi/<id>/hqdefault.jpg) y cmd_play cae a un mensaje de texto con botones si el thumbnail falta o la foto falla (try/except). Verificado: busqueda de 'denicher pool inexplicable' devuelve thumbs validos (HTTP 200).
 - /start ahora muestra los comandos disponibles segun el rol del que pregunta (admin ve todo, dj ve controles, user ve lo basico) via help_for_role(). Verificado.
 - GUIA.txt actualizada: seccion USO con los comandos agrupados por rol (user / dj+admin / solo admin) y roles/permisos.
 - Falta probar el bot en vivo con Telegram (requiere token real en .env).
