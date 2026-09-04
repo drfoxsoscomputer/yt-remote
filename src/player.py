@@ -9,6 +9,7 @@ import json
 import os
 import subprocess
 import time
+from pathlib import Path
 
 MPV_PIPE = r"\\.\pipe\mpv-ytremote"
 
@@ -16,6 +17,22 @@ MPV_PIPE = r"\\.\pipe\mpv-ytremote"
 _PIPE_WAIT_TIMEOUT = 15.0
 # Timeout para cada escritura en el pipe (evita colgar el bot para siempre).
 _SEND_TIMEOUT = 10.0
+
+
+def _mpv_env() -> dict[str, str]:
+    """Variables de entorno para mpv.
+
+    mpv necesita encontrar yt-dlp.exe para resolver videos de YouTube.
+    El unico yt-dlp del proyecto vive en runtime\\python\\Scripts, asi que
+    se lo agregamos al PATH del proceso mpv (queda portable, sin depender
+    de un yt-dlp instalado en el sistema).
+    """
+    env = os.environ.copy()
+    project_root = Path(__file__).resolve().parent.parent
+    scripts_dir = str(project_root / "runtime" / "python" / "Scripts")
+    old_path = env.get("PATH", "")
+    env["PATH"] = scripts_dir + os.pathsep + old_path
+    return env
 
 
 class Player:
@@ -66,6 +83,7 @@ class Player:
             ],
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
+            env=_mpv_env(),
         )
 
     def _wait_pipe(self) -> None:
