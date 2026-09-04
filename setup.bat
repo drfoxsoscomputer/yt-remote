@@ -1,11 +1,11 @@
 @echo off
-REM Setup de YT-Remote - primera ejecucion
+REM Setup de YT-Remote - primera ejecucion (portable, no toca el sistema)
 echo ====================================
 echo  YT-Remote - Instalacion inicial
 echo ====================================
 echo.
 
-REM Crear virtualenv
+REM Crear virtualenv local
 echo [1/3] Creando entorno virtual...
 python -m venv venv
 if errorlevel 1 goto :error
@@ -17,12 +17,23 @@ pip install --upgrade pip
 pip install -r requirements.txt
 if errorlevel 1 goto :error
 
-REM Verificar mpv
-echo [3/3] Verificando mpv...
-where mpv >nul 2>&1
-if errorlevel 1 (
-    echo [!] mpv no encontrado. Instalado con: winget install mpv
+REM Verificar mpv portable dentro de la carpeta
+echo [3/3] Verificando mpv portable...
+if not exist "runtime\mpv\mpv.exe" (
+    echo.
+    echo [!] Falta el mpv portable en: runtime\mpv\mpv.exe
+    echo.
+    echo     Para que esto sea portable (funcione sin instalar nada en el
+    echo     sistema), descarga el zip portable de mpv de:
+    echo     https://sourceforge.net/projects/mpv-player-windows/files/
+    echo.
+    echo     Descomprime TODO el contenido del zip dentro de la carpeta:
+    echo     yt-remote\runtime\mpv\
+    echo     (debe quedar runtime\mpv\mpv.exe)
+    echo.
+    goto :error
 )
+echo     mpv portable encontrado en runtime\mpv\mpv.exe
 
 echo.
 echo ====================================

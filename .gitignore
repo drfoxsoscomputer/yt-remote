@@ -11,3 +11,6 @@ __pycache__/
 
 # mpv
 *.log
+
+# mpv portable (cada PC lo trae; no va al repo)
+runtime/

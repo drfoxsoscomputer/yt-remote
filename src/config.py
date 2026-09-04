@@ -21,9 +21,15 @@ def load_config() -> Config:
     with CONFIG_PATH.open("r", encoding="utf-8") as f:
         data = json.load(f)
 
+    raw_mpv = str(data.get("mpv_path", "mpv"))
+    mpv_path = Path(raw_mpv)
+    if not mpv_path.is_absolute():
+        mpv_path = PROJECT_ROOT / mpv_path
+    mpv_path = str(mpv_path)
+
     config = Config(
         token=str(data["telegram_token"]),
-        mpv_path=str(data.get("mpv_path", "mpv")),
+        mpv_path=mpv_path,
         default_role=str(data.get("default_role", "user")),
         max_results=int(data.get("max_results", 5)),
     )
