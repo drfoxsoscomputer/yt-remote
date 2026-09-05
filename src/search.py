@@ -26,6 +26,8 @@ class SearchResult:
     duration: str
     thumbnail: str
     video_id: str = ""
+    duration_seconds: int = 0
+    channel: str = ""
 
 
 def _build_thumbnail(video_id: str) -> str:
@@ -38,6 +40,24 @@ def _build_thumbnail(video_id: str) -> str:
     if not video_id:
         return ""
     return f"https://i.ytimg.com/vi/{video_id}/hqdefault.jpg"
+
+
+_VIDEO_ID_RE = re.compile(
+    r"(?:youtube\.com/(?:watch\?[^#]*v=|shorts/|live/|embed/)|youtu\.be/)"
+    r"([A-Za-z0-9_-]{11})"
+)
+
+
+def thumbnail_from_url(url: str) -> str:
+    """Deriva la miniatura de YouTube desde un link directo (watch/shorts/youtu.be).
+
+    Sirve para items sin thumbnail cargado (links directos de /play, /now);
+    si no se puede extraer el ID devuelve "".
+    """
+    m = _VIDEO_ID_RE.search(url or "")
+    if not m:
+        return ""
+    return _build_thumbnail(m.group(1))
 
 
 def is_youtube_link(text: str) -> bool:
@@ -80,6 +100,8 @@ def search(query: str, max_results: int = 5) -> list[SearchResult]:
                     duration=_fmt_duration(duration),
                     thumbnail=_build_thumbnail(video_id),
                     video_id=video_id,
+                    duration_seconds=int(duration),
+                    channel=entry.get("channel") or entry.get("uploader") or "",
                 )
             )
     return results
@@ -94,12 +116,81 @@ def _fmt_duration(seconds: int | float) -> str:
     return f"{m}:{s:02d}"
 
 
+def is_playlist_url(url: str) -> bool:
+    """Devuelve True si el link de YouTube apunta a una playlist o mix."""
+    text = url.strip()
+    if "/playlist?list=" in text:
+        return True
+    m = re.search(r"[?&]list=([A-Za-z0-9_-]+)", text)
+    if not m:
+        return False
+    list_id = m.group(1)
+    # Un mix (radio) tiene list id tipo RD..., RDCLAK..., RDAMVM..., etc;
+    # una playlist normal es un list id plano. En ambos casos hay que
+    # expandir, salvo list=WL (watch later) de sesion que no aplica aqui.
+    return list_id != "WL"
+
+
+def expand_playlist(url: str, max_results: int = 50) -> list[SearchResult]:
+    """Expande una playlist o mix de YouTube a sus tracks.
+
+    Usa yt-dlp con extract_flat para no descargar nada: solo los metadatos
+    (id, titulo, url, duracion) de cada track. Devuelve [] si falla o si la
+    URL no es una playlist.
+    """
+    import yt_dlp
+
+    if not is_playlist_url(url):
+        return []
+
+    ydl_opts: "dict[str, Any]" = {
+        "quiet": True,
+        "no_warnings": True,
+        "skip_download": True,
+        "extract_flat": True,
+        "noplaylist": False,
+    }
+
+    tracks: list[SearchResult] = []
+    with yt_dlp.YoutubeDL(ydl_opts) as ydl:  # type: ignore[arg-type]
+        try:
+            info = ydl.extract_info(url, download=False)
+        except Exception:
+            return tracks
+
+        entries = info.get("entries") or []
+        for entry in entries:
+            if not entry or len(tracks) >= max_results:
+                continue
+            video_url = entry.get("url") or entry.get("webpage_url") or ""
+            if not video_url:
+                continue
+            video_id = entry.get("id") or ""
+            duration = entry.get("duration") or 0
+            tracks.append(
+                SearchResult(
+                    url=video_url,
+                    title=entry.get("title") or "(sin titulo)",
+                    duration=_fmt_duration(duration),
+                    thumbnail=_build_thumbnail(video_id),
+                    video_id=video_id,
+                    duration_seconds=int(duration),
+                    channel=entry.get("channel") or entry.get("uploader") or "",
+                )
+            )
+    return tracks
+
+
 def resolve_stream_url(youtube_url: str) -> tuple[str, str | None] | None:
     """Resuelve un link de YouTube a una URL de stream directo que mpv puede reproducir.
 
-    Usa el player client 'android' de yt-dlp, que suele devolver un solo
-    stream mp4 (video+audio juntos) y evita el bloqueo de "Sign in to
-    confirm you're not a bot" que aplica YouTube al client web.
+    Usa el player client 'visionos' de yt-dlp: no le aplican el bloqueo de
+    "Sign in to confirm you're not a bot" (a diferencia del client web) y
+    expone los formatos de alta resolucion. Con 'android' el bot quedaba
+    limitado a 360p.
+
+    La resolucion se limita a 1080p ('bestvideo[height<=1080]+bestaudio');
+    si el video no tiene esa resolucion se toma la mayor que no la supere.
 
     Devuelve (video_url, audio_url) o (url, None) si es un stream combinado.
     Devuelve None si no se pudo resolver.
@@ -111,7 +202,8 @@ def resolve_stream_url(youtube_url: str) -> tuple[str, str | None] | None:
         "no_warnings": True,
         "skip_download": True,
         "noplaylist": True,
-        "extractor_args": {"youtube": {"player_client": ["android"]}},
+        "format": "bestvideo[height<=1080]+bestaudio/best",
+        "extractor_args": {"youtube": {"player_client": ["visionos"]}},
     }
     try:
         with yt_dlp.YoutubeDL(opts) as ydl:
