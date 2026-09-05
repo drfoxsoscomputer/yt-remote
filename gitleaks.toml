@@ -1,0 +1,14 @@
+title = "yt-remote gitleaks"
+
+[extend]
+useDefault = true
+
+[allowlist]
+description = "Runtime vendido de terceros (yt-dlp/python/mpv) excluido del scan: sus cadenas api_key/access_token son publicas del upstream. Nuestro codigo (src/, scripts/, .bat, config) SI se escanea."
+paths = [
+  '''runtime/''',
+  '''routes/''',
+  '''tests/''',
+  '''venv/''',
+  '''data/''',
+]

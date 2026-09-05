@@ -28,6 +28,9 @@ Bot de Telegram que controla la reproduccion de YouTube (video en la PC donde co
 - `runtime/` — Python 3.13.9 embebido + mpv portable (SE SUBEN al repo, por decision del usuario: todo incluido).
 
 ## Estado actual
+- RELEASE v0.1.0 PUBLICADO (2026-09-05), ZIP re-subido CORREGIDO: https://github.com/drfoxsoscomputer/yt-remote/releases/tag/v0.1.0. La historia se reescribió DOS veces con git filter-repo por claves placeholder que vienen DENTRO del código vendido de yt-dlp (shahid.py=claves AWS, cybrary/googledrive/stacommu/wrestleuniverse=`AIza...` = google_api_key). GitHub push protection bloqueó y secret scanning dejó 5 alertas abiertas; se forzó main a la historia limpia (0388cc1→7659e30). Verificado a nivel de BYTES (no de lo que muestra la consola): CERO patrones de credencial en el remoto (clone fresco), en todo el historial, en los textos del ZIP y en ESTADO. LECCION CLAVE: (1) revisar yt-dlp vendido por claves ANTES de commitear; (2) los valores que muestra la consola de tooling pueden venir ENMASCARADOS (`__VG_GOOGLE_API_KEY_...` en pantalla = `AIza...` en bytes reales) — verificar con conteos por regex con python, no con ojos; (3) usar filter-repo con `regex:` no con literales copiados de pantalla.
+- `.pyc` de los extractores con claves: borrados localmente (no estaban trackeados ni entran al ZIP).
+- Idiomas: GUIA.txt, README.md y .bat con acentos y ñ (español neutro); ytremote.bat UTF-8 con BOM + chcp 65001 (el BOM + acentos aún sin probar a fondo en cmd — pendiente micro-test).
 - MODELO NUEVO (imita el flujo de YouTube): `/play` reproducе YA, sin cola manual. Un nuevo /play corta lo que suene (loadfile replace). Al terminar una canción el bot sigue solo con radio por semilla (busca "una parecida" al track actual).
 - Prefetch 2 fases (cero silencio): Fase A decide el candidato al reproducir (playlist > radio semilla); Fase B resuelve el stream ~45s antes del final (las URLs de googlevideo expiran) y lo cachea. El end-file salta al stream cacheado al instante. Un /play del usuario cancela el prefetch.
 - Playlists/mixes: /play con link de list/mix expande todos los tracks (expand_playlist con extract_flat) y arma una PLAYLIST FIJA (set_playlist): el primero suena YA, el cursor avanza en orden y da la vuelta (BUCLE) al llegar al final; nunca se consumen (la lista queda siempre completa en /queue). Un /play nuevo (playlist o cancion suelta) reemplaza la reproduccion entera.
@@ -62,14 +65,16 @@ Bot de Telegram que controla la reproduccion de YouTube (video en la PC donde co
 - Falta probar el bot en vivo con Telegram (requiere token real en .env).
 
 ## Pendientes / ToDo
+- [ ] CERRAR las 5 alertas de secret scanning (siguen `open` aunque las claves ya no existen): marcarlas resolved/false_positive vía API (requiere decisión del usuario).
+- [ ] PENDIENTE SIN PROBAR: ytremote.bat con BOM+acentos en cmd real (el test previo colgó por un loop de mi diseño, no por el .bat necesariamente) — rehacer con stdin de respuestas y stub de python.exe.
+- [ ] FASE 2 (aprobada 2026-09-05): mini reproductor con botones en Telegram — /buscar (alias /play), /lista (alias /queue con botones "▶️ N"), tarjeta persistente editada con [⏮ ▶/⏸ ⏭ ⏹] + [🔊−10 🔊+10 📋], /prev REAL (quitar el placeholder `cycle ab-loop`), arreglar /volume (exigir arg, validar 0-100, avisar si mpv no esta vivo), y menu "/" (setMyCommands) SOLO con comandos instantaneos sin argumento; ayuda/docs con el orden completo. Actualizar README/GUIA al final.
 - [ ] PROBAR EN VIVO con Telegram: playlist fija (25 temas siempre visibles, bucle, /queue N salta sin perder la lista), radio por artista (elegir otro musico en /play y verificar que /next da canciones de ESE artista), y que /play nuevo corte el bucle.
 - [ ] Verificar el formulario real de ytremote.bat en una consola cmd de Windows (pedido de token/ID).
-- [ ] Fase 6: testing en vivo con Telegram (token real en .env). PROBAR el flujo nuevo: busca→suena ya, /next, fin de canción→sigue solo, playlist/mix, que /play corte lo que suena.
-- [ ] Completar/ajustar manual de usuario (GUIA.txt) al nuevo flujo (reordenar pasos segun aprobacion del usuario).
-- [ ] Fase 7: push + crear release (zip) del proyecto.
 - [ ] Limpiar venv\ viejo local (ya no se usa, pero esta en carpeta; no se sube).
 
 ## Decisiones recientes
+- RELEASE + push limpio (2026-09-05): historia reescrita 2 veces con git filter-repo (falsos positivos de yt-dlp vendido: AWS en shahid.py, AIza en cybrary/googledrive/stacommu/wrestleuniverse). Force-push autorizado explícitamente por el usuario. Leccion: nunca commitear yt-dlp entero sin escanear claves; verificar por bytes, no por pantalla.
+- FASE 2 (2026-09-05, aprobada por el user): mini reproductor con botones — renames /buscar y /lista, tarjeta persistente, toggle play/pause, /prev real. El menu "/" queda SOLO con comandos instantaneos (tocar /play en el menu envia sin argumento y no se puede editar; la busqueda SIEMPRE sera /buscar <texto>).
 - NUEVO MODELO (2026-09-04, aprobado por el user): el bot imita el flujo de YouTube — /play suena YA (no se encola); un nuevo /play corta lo que suene; al terminar sigue solo con radio por semilla (busca "una parecida"); prefetch en 2 fases para cero silencio; soporta playlists/mixes (primero suena ya, resto en cola). Motivo: el usuario quiere música continua sin colas manuales (evitar el "¿Sigues ahí?" de YouTube en navegador).
 - Portable de verdad: todo dentro de la carpeta (Python embebido 3.13.9 + mpv). (2026-09-04)
 - Todo incluido en el repo (no setup que descargue): el usuario descomprime y ya esta todo. (2026-09-04)

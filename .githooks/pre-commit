@@ -1,0 +1,28 @@
+#!/bin/sh
+# Pre-commit hook de yt-remote: doble barrera anti-secretos.
+# 1) scan_secrets.py  -> patrones de credenciales por bytes sobre texto plano
+# 2) gitleaks          -> reglas extendidas del upstream (runtime/ excluido)
+# Si cualquiera detecta algo, el commit se ABORTA.
+
+set -e
+
+ROOT="$(git rev-parse --show-toplevel)"
+cd "$ROOT"
+
+echo "[pre-commit] ejecutando scan_secrets.py..."
+if ! python scripts/scan_secrets.py; then
+    echo "[pre-commit] ABORTADO: scan_secrets.py encontro potenciales credenciales."
+    exit 1
+fi
+
+echo "[pre-commit] ejecutando gitleaks (staged)..."
+if command -v gitleaks >/dev/null 2>&1; then
+    if ! gitleaks protect --no-banner --staged --config gitleaks.toml; then
+        echo "[pre-commit] ABORTADO: gitleaks encontro potenciales secretos."
+        exit 1
+    fi
+else
+    echo "[pre-commit] ADVERTENCIA: gitleaks no esta instalado; solo corrio scan_secrets.py."
+fi
+
+exit 0
