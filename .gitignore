@@ -12,3 +12,11 @@ __pycache__/
 
 # Logs
 *.log
+
+# Herramientas de desarrollo (skill registry, indice de codigo)
+.atl/
+.codegraph/
+
+# Config real (la plantilla publica es .env.example)
+.env.example.tmp
+*.swp

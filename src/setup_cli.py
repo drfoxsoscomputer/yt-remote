@@ -50,9 +50,9 @@ def write_env(token: str, owner_id: str) -> None:
     token = token.strip()
     owner_id = owner_id.strip()
     if not token or token == "TU_TOKEN_AQUI":
-        raise ValueError("El token no puede estar vacio.")
+        raise ValueError("El token no puede estar vacío.")
     if not owner_id:
-        raise ValueError("El ID de dueno no puede estar vacio.")
+        raise ValueError("El ID de dueño no puede estar vacío.")
     env["TELEGRAM_TOKEN"] = token
     env["OWNER_ID"] = owner_id
     _write(env)

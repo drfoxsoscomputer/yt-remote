@@ -7,7 +7,7 @@ Los comandos se enrutan por roles (admin > dj > user).
 import asyncio
 import logging
 
-from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
+from telegram import BotCommand, InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.constants import ParseMode
 from telegram.ext import (
     Application,
@@ -20,7 +20,7 @@ from config import Config
 from player import Player
 from queue_manager import QueueItem, QueueManager
 from roles import VALID_ROLES, RoleManager
-from search import SearchResult, is_youtube_link, search, resolve_stream_url
+from search import SearchResult, is_playlist_url, expand_playlist, is_youtube_link, search, resolve_stream_url, thumbnail_from_url
 import setup_cli as setup
 
 logging.basicConfig(
@@ -36,9 +36,21 @@ class YTRemoteBot:
         self.config = config
         self.roles = RoleManager()
         self.player = Player(config.mpv_path)
+        self.player._on_track_ended = self._mpv_track_ended_callback
+        self._queue_advance_needed = False
         self.queue = QueueManager()
+        # Ancla de la radio: el ARTISTA fijado UNA sola vez, en la primera
+        # reproduccion del usuario (al elegir la cancion del /play). /next y
+        # el auto-advance lo reusan tal cual, sin re-derivar en cada salto.
+        self._radio_artist: str = ""
+        self._last_query: str = ""
         # cache: callback_data -> SearchResult para los botones de busqueda
         self._search_cache: dict[str, SearchResult] = {}
+        # Prefetch (auto-continuacion): candidato a siguiente + stream resuelto
+        self._prefetch_task: asyncio.Task | None = None
+        self._prefetch_basis: str | None = None
+        self._prefetch_candidate: tuple[QueueItem, bool] | None = None
+        self._prefetch_resolved: tuple[tuple[QueueItem, bool], tuple[str, str | None]] | None = None
         self._register_owner()
 
     def _register_owner(self) -> None:
@@ -106,6 +118,38 @@ class YTRemoteBot:
         app.add_handler(CallbackQueryHandler(self._require_chat(self.on_callback)))
 
         self._app = app
+
+        async def post_init(_app: Application) -> None:
+            # Menú de comandos: al escribir "/" Telegram muestra esta lista.
+            bot = _app.bot
+            try:
+                await bot.set_my_commands(
+                    [
+                        BotCommand("play", "Busca y reproduce un video o link de YouTube"),
+                        BotCommand("queue", "Ver la cola; /queue N reproduce el tema N"),
+                        BotCommand("now", "Que esta sonando"),
+                        BotCommand("pause", "Pausar la reproduccion"),
+                        BotCommand("resume", "Reanudar la reproduccion"),
+                        BotCommand("next", "Saltar al siguiente tema"),
+                        BotCommand("stop", "Detener y limpiar la cola"),
+                        BotCommand("volume", "Ajustar el volumen (0-100)"),
+                        BotCommand("adduser", "Dar acceso con un rol (admin)"),
+                        BotCommand("removeuser", "Quitar acceso (admin)"),
+                    ]
+                )
+            except Exception as exc:  # noqa: BLE001 - no debe tumbar el arranque
+                logger.warning("No se pudo registrar los comandos: %s", exc)
+
+        app.post_init = post_init
+
+        # Job periódico para verificar si hay que avanzar la cola
+        # (se ejecuta cada 5 segundos empezando a los 10s).
+        if app.job_queue:
+            app.job_queue.run_repeating(
+                self._check_queue_advance_job,
+                interval=5,
+                first=10,
+            )
         app.run_polling  # noqa: B018  (validar metodo disponible)
         return app
 
@@ -117,9 +161,7 @@ class YTRemoteBot:
             if user is None:
                 return
             if not self.roles.has_role(user.id, role):
-                await update.message.reply_text(
-                    f"Acceso denegado: necesitas rol '{role}' para este comando."
-                )
+                await self._reply(update, f"Acceso denegado: necesitas rol '{role}' para este comando.")
                 return
             await handler(update, context)
 
@@ -151,6 +193,308 @@ class YTRemoteBot:
         wrapper.__name__ = getattr(handler, "__name__", "wrapper")
         return wrapper
 
+    async def _reply(self, update, text: str, **kwargs):
+        """Envia un mensaje de respuesta, manejando tanto CallbackQuery como Message.
+
+        - Si update es None (auto-advance sin usuario): no responde.
+        - Si update.callback_query: responde (answer) y edita el mensaje original.
+        - Si update.message: responde normalmente (reply_text), pasando los kwargs.
+        """
+        if update is None:
+            return
+        if update.callback_query:
+            query = update.callback_query
+            try:
+                await query.answer()
+            except Exception:
+                pass
+            parse_mode = kwargs.get("parse_mode")
+            if parse_mode:
+                await query.edit_message_text(text, parse_mode=parse_mode)
+            else:
+                await query.edit_message_text(text)
+        else:
+            await update.message.reply_text(text, **kwargs)
+
+    def _thumbnail_for(self, item: QueueItem) -> str:
+        """URL de la miniatura del item; la deriva del link si no la trae."""
+        if item.thumbnail:
+            return item.thumbnail
+        return thumbnail_from_url(item.url)
+
+    async def _send_track_card(
+        self, update, caption: str, item: QueueItem | None
+    ) -> None:
+        """Envia titulo + miniatura del tema (fallback a texto si falla la foto)."""
+        if item is None:
+            await self._reply(update, caption)
+            return
+        thumbnail = self._thumbnail_for(item)
+        if thumbnail:
+            try:
+                await update.effective_chat.send_photo(  # type: ignore[union-attr]
+                    photo=thumbnail, caption=caption
+                )
+                return
+            except Exception as exc:  # noqa: BLE001 - no debe romper el comando
+                logger.warning("No se pudo enviar la miniatura: %s", exc)
+        await self._reply(update, caption)
+
+    def _mpv_track_ended_callback(self) -> None:
+        """Callback invocado por el reader thread cuando mpv detecta end-file.
+
+        Este callback se ejecuta en un hilo separado. Sólo marca una bandera
+        que el bot verificará en el siguiente handler para avanzar la cola.
+        """
+        self._queue_advance_needed = True
+
+    def _check_queue_advance(self) -> bool:
+        """Verifica y limpia la bandera de avance de cola.
+
+        Retorna True si se avanzó la cola, False en caso contrario.
+        """
+        if self._queue_advance_needed:
+            self._queue_advance_needed = False
+            return True
+        return False
+
+    def _cancel_prefetch(self) -> None:
+        """Cancela el prefetch en curso (nuevo /play del usuario)."""
+        if self._prefetch_task is not None:
+            self._prefetch_task.cancel()
+        self._prefetch_task = None
+        self._prefetch_basis = None
+        self._prefetch_candidate = None
+        self._prefetch_resolved = None
+
+    def _radio_seed(self, title: str) -> str:
+        """A partir del titulo actual arma una semilla de busqueda limpia.
+
+        Quita lo que sobra para buscar "una parecida": corchetes, parentesis,
+        remixes, videos oficiales, lyric, etc. Ej:
+        "Metallica - Nothing Else Matters (Official Video)" -> "Metallica - Nothing Else Matters"
+        """
+        import re as _re
+
+        cleaned = _re.sub(r"[\(\[].*?[\)\]]", "", title)
+        cleaned = _re.sub(
+            r"\b(official video|official music video|official audio|lyric|lyrics|hq|hd|remix|mtv)\b",
+            "",
+            cleaned,
+            flags=_re.IGNORECASE,
+        )
+        return " ".join(cleaned.split()).strip()
+
+    @staticmethod
+    def _artist_from_title(title: str) -> str:
+        """Extrae el artista del patron 'Artista - Titulo' al inicio.
+
+        El patron "X - Y" al comienzo del titulo es el tipico de la musica
+        ("KENT LEROY - Quiero Cantar del Amor (CD completo)" -> "KENT LEROY").
+        Devuelve "" si no se parece a ese patron.
+        """
+        import re as _re
+
+        m = _re.match(r"^\s*([^\-–—]+?)\s*[–—-]\s+", title)
+        if not m:
+            return ""
+        return " ".join(m.group(1).split()).strip(" -–—")
+
+    @staticmethod
+    def _normalizar(s: str) -> str:
+        """Normaliza un texto para comparaciones: minusculas, sin acentos,
+        sin puntuacion ni espacios ("Kent Leroy" -> "kentleroy")."""
+        import re as _re
+        import unicodedata
+
+        s = "".join(
+            c for c in unicodedata.normalize("NFD", s.lower()) if unicodedata.category(c) != "Mn"
+        )
+        return _re.sub(r"[^a-z0-9]", "", s)
+
+    def _artist_seed(self, item: QueueItem) -> str:
+        """Semilla de busqueda por el ARTISTA real (NUNCA el canal/uploader).
+
+        El artista se fija UNA sola vez: en la primera reproduccion del
+        usuario (cuando elige la cancion, ver on_callback). Aca NO se
+        re-deriva en cada /next:
+
+        1. Ancla de sesion (_radio_artist): el artista elegido en /play.
+        2. Artista propagado por la radio (candidate.artist): respaldo si la
+           sesion arranco sin ancla explicita (ej. playlist/link directo).
+        3. Si no hay ninguno: artista parseado del titulo ("KENT LEROY - ...").
+        4. Ultimo recurso: titulo limpio (_radio_seed).
+        """
+        if self._radio_artist:
+            return self._radio_artist
+        if item.artist:
+            return item.artist
+        artist = self._artist_from_title(item.title)
+        if artist:
+            return artist
+        return self._radio_seed(item.title)
+
+    async def _pick_next_candidate(self, current: QueueItem) -> tuple[QueueItem | None, bool]:
+        """Fase A: decide cual es el siguiente a reproducir.
+
+        Prioridad:
+        1. Si la cola (playlist del usuario) tiene items, ese es el siguiente.
+        2. Si no, radio por semilla: busca "una parecida" al track actual.
+
+        Devuelve (candidato, vino_de_la_cola).
+        """
+        peeked = self.queue.peek(0)
+        if peeked is not None:
+            return peeked, True
+
+        # Radio por semilla: buscar por el ARTISTA real (cantante/grupo/banda),
+        # NUNCA por el canal que subio el video (suele ser un re-uploader o
+        # un canal de charlas/sermones, no el musico).
+        seed = self._artist_seed(current)
+        if not seed:
+            return None, False
+        # Pedir mas resultados: mas catalogo del artista para poder avanzar
+        # sin repetir (la radio busca 50 y elige entre los no-recientes).
+        try:
+            results = await asyncio.to_thread(search, seed, 50)
+        except Exception:
+            return None, False
+
+        def _candidate(r) -> tuple[QueueItem, bool]:
+            # El candidato de radio guarda el ARTISTA que lo genero (no su
+            # canal): es el ANCLA que mantiene la cadena aunque este video
+            # sea un re-upload en otro canal o su titulo venga al reves.
+            return (
+                QueueItem(
+                    url=r.url,
+                    title=r.title,
+                    duration_seconds=r.duration_seconds,
+                    thumbnail=r.thumbnail,
+                    channel=r.channel,
+                    artist=seed,
+                ),
+                False,
+            )
+
+        import re as _re
+
+        # Pasada 1: preferir resultados cuyo TITULO mencione al artista
+        # (normalizado). Es lo que garantiza "otra cancion de ESE artista"
+        # aunque la busqueda traiga mezclado algo de otro genero.
+        anchor = self._normalizar(seed)
+        if anchor:
+            for r in results:
+                if (
+                    r.url != current.url
+                    and not self.queue.is_recent(r.url)
+                    and anchor in self._normalizar(r.title)
+                ):
+                    return _candidate(r)
+        # Pasada 2: lo que parece musica (titulo con 'Artista - Cancion').
+        for r in results:
+            if (
+                r.url != current.url
+                and not self.queue.is_recent(r.url)
+                and bool(_re.search(r"[–\-—]", r.title))
+            ):
+                return _candidate(r)
+        # Pasada 3: cualquier no-reciente (para no apagar la radio).
+        for r in results:
+            if r.url != current.url and not self.queue.is_recent(r.url):
+                return _candidate(r)
+        return None, False
+
+    def _schedule_prefetch(self, current: QueueItem) -> None:
+        """Programa el prefetch del siguiente track en 2 fases.
+
+        Fase A (inmediata): decide el candidato (playlist o radio por semilla).
+        Fase B (programada): ~45s antes de que termine el actual, resuelve el
+        stream del candidato y lo cachea para que el salto sea instantaneo.
+        """
+        self._cancel_prefetch()
+        self._prefetch_basis = current.url
+
+        async def _flow() -> None:
+            try:
+                candidate, from_queue = await self._pick_next_candidate(current)
+            except asyncio.CancelledError:
+                return
+            if candidate is None:
+                return
+            # el usuario puede interceptar mientras tanto: solo seguimos
+            # si seguimos reproduciendo el mismo track.
+            if self._prefetch_basis != current.url or self._prefetch_basis is None:
+                return
+            self._prefetch_candidate = (candidate, from_queue)
+
+            # Fase B: resolver el stream cerca del final, no al inicio
+            # (las URLs de googlevideo expiran con el tiempo).
+            wait = max(0, current.duration_seconds - 45)
+            try:
+                if wait:
+                    await asyncio.sleep(wait)
+            except asyncio.CancelledError:
+                return
+            if (
+                self._prefetch_basis != current.url
+                or self.queue.current is not current
+            ):
+                return
+            try:
+                resolved = await asyncio.to_thread(resolve_stream_url, candidate.url)
+            except Exception:
+                resolved = None
+            if resolved:
+                self._prefetch_resolved = ((candidate, from_queue), resolved)
+
+        self._prefetch_task = asyncio.create_task(_flow())
+
+    async def _advance_after_end(self, context) -> None:
+        """Reproduce el siguiente tras end-file.
+
+        Si el prefetch ya resuelto el stream -> reproduce cacheado (cero
+        silencio). Si no (duracion desconocida), reproduce por Fase A/B
+        directo.
+        """
+        if self._prefetch_resolved is not None:
+            (candidate, from_queue), (stream_url, audio_url) = self._prefetch_resolved
+            self._prefetch_resolved = None
+            try:
+                await self.player.start()
+                await self.player.load(stream_url, audio_url)
+                await self.player.play()
+            except RuntimeError as exc:
+                await self._reply(None, f"No se pudo continuar: {exc}")
+                return
+            # Si venia de la playlist, avanzar el cursor (bucle) para no repetir
+            # el mismo track en el siguiente prefetch.
+            if from_queue:
+                self.queue.next()
+            else:
+                self.queue.set_current(candidate)
+            self._schedule_prefetch(candidate)
+            await self._reply(None, f"▶️ Siguiente: {candidate.title}")
+            return
+
+        # Sin prefetch listo: resolver el siguiente ahora mismo.
+        current_item = self.queue.current
+        if current_item is None:
+            return
+        candidate, from_queue = await self._pick_next_candidate(current_item)
+        if candidate is None:
+            await self._reply(None, "La cola quedo vacia.")
+            return
+        if from_queue:
+            self.queue.next()  # avanza el cursor de la playlist (bucle)
+        started = await self._play_item(None, candidate, preserve_current=from_queue)
+        if started:
+            await self._reply(None, f"▶️ Siguiente: {candidate.title}")
+
+    async def _check_queue_advance_job(self, context) -> None:
+        """Job periódico: si la bandera está puesta, avanzar con el prefetch."""
+        if self._check_queue_advance():
+            await self._advance_after_end(context)
+
     def help_for_role(self, role: str) -> str:
         """Devuelve el listado de comandos permitidos para un rol."""
         rank = {"user": 0, "dj": 1, "admin": 2}
@@ -163,12 +507,12 @@ class YTRemoteBot:
 
         # user
         lines.append("• /play <busqueda o link> — busca y reproduce")
-        lines.append("• /queue — ver la cola de temas")
+        lines.append("• /queue — ver la cola; /queue N reproduce el tema N")
         lines.append("• /now — que esta sonando")
 
         if level >= 1:  # dj
             lines.append("• /pause /resume — pausar y reanudar")
-            lines.append("• /next /prev — cambiar de tema")
+            lines.append("• /next — saltar al siguiente tema")
             lines.append("• /stop — detener y limpiar cola")
             lines.append("• /volume <0-100> — ajustar el volumen")
 
@@ -206,36 +550,78 @@ class YTRemoteBot:
                 setup.set_allowed_chat_id(allowed)
                 self.config.allowed_chat_id = allowed
                 logger.info("Grupo permitido configurado: %s", allowed)
-                await update.message.reply_text(
-                    "Configurado: este chat quedo habilitado para el bot.\n\n"
-                    "Comandos disponibles para tu rol (admin):\n"
-                    + self.help_for_role("admin")
-                )
+                await self._reply(update, "Configurado: este chat quedo habilitado para el bot.\n\n" + "Comandos disponibles para tu rol (admin):\n" + self.help_for_role("admin"))
                 return
 
         if not self._chat_allowed(update):
-            await update.message.reply_text("Este bot no esta habilitado en este chat.")
+            await self._reply(update, "Este bot no esta habilitado en este chat.")
             return
 
-        await update.message.reply_text(
-            "YT-Remote activo.\n\n"
-            f"Comandos disponibles para tu rol ({user_role}):\n"
-            + self.help_for_role(user_role)
-        )
+        await self._reply(update, "YT-Remote activo.\n\n" + f"Comandos disponibles para tu rol ({user_role}):\n" + self.help_for_role(user_role))
 
     async def cmd_play(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         text = (context.args or [])
         query = " ".join(text).strip()
         if not query:
-            await update.message.reply_text("Uso: /play <busqueda o link de YouTube>")
+            await self._reply(update, "Uso: /play <busqueda o link de YouTube>")
             return
+        # Nuevo /play = nueva intencion: se descarta el ancla anterior de la
+        # radio. Se redefine cuando el usuario elige la cancion (on_callback)
+        # o en la playlist (primer track).
+        self._radio_artist = ""
+        self._last_query = query
 
         if is_youtube_link(query):
+            # Playlist o mix: expandir y encolar todos sus tracks. El primero
+            # suena YA y el resto queda en queue_manager para el prefetch.
+            if is_playlist_url(query):
+                await context.bot.send_message(
+                    update.effective_chat.id,
+                    "Expandiendo playlist/mix, un momento...",
+                )
+                tracks = await asyncio.to_thread(
+                    expand_playlist, query, 50
+                )
+                if not tracks:
+                    await self._reply(update, "No se pudo expandir esa lista.")
+                    return
+                # Playlist fija: se encola completa y el primero se reproduce
+                # ya. El cursor avanza en orden y da la vuelta (bucle).
+                items = [
+                    QueueItem(
+                        url=t.url,
+                        title=t.title,
+                        duration_seconds=t.duration_seconds,
+                        thumbnail=t.thumbnail,
+                        channel=t.channel,
+                    )
+                    for t in tracks
+                ]
+                self.queue.set_playlist(items)
+                first = items[0]
+                # Ancla de la radio: se fija con el primer track de la
+                # playlist (su artista), para cuando se agote el bucle.
+                artist = self._artist_from_title(first.title)
+                if artist:
+                    self._radio_artist = artist
+                started = await self._play_item(update, first, preserve_current=True)
+                if started:
+                    await self._reply(
+                        update,
+                        f"▶️ Playlist ({len(tracks)}): {first.title}\n"
+                        f"Bucle activo: suena en orden y se repite; /queue para verla.",
+                    )
+                return
+
             await context.bot.send_message(
                 update.effective_chat.id, "Reproduciendo link directo..."
             )
-            await self._load_url(update, query)
-            return
+            item = QueueItem(
+                url=query, title=query, thumbnail=thumbnail_from_url(query)
+            )
+            started = await self._play_item(update, item)
+            if not started:
+                return
 
         # Busqueda por nombre -> mostrar botones con thumbnail
         await context.bot.send_message(
@@ -247,7 +633,7 @@ class YTRemoteBot:
             search, query, self.config.max_results
         )
         if not results:
-            await update.message.reply_text("No encontre resultados.")
+            await self._reply(update, "No encontre resultados.")
             return
 
         self._search_cache.clear()
@@ -294,128 +680,239 @@ class YTRemoteBot:
                     f"▶️ Reproduciendo: {result.title}"
                 )
 
-        await self._load_url(update, result.url, caption=result.title)
+        # ANCLA DE LA RADIO: la primera reproduccion del usuario es la que
+        # define el artista. Se captura aca, UNA sola vez, de la cancion
+        # elegida ("KENT LEROY - Quiero Cantar del Amor" -> "KENT LEROY").
+        # Si esa cancion no trae "Artista - Cancion" en el titulo, se usa
+        # el texto del /play (el usuario lo escribio buscando a alguien).
+        artist = self._artist_from_title(result.title)
+        if not artist and self._last_query:
+            artist = self._last_query
+        self._radio_artist = artist
 
-    async def _load_url(
-        self, update: Update, url: str, caption: str | None = None
-    ) -> None:
-        item = QueueItem(url=url, title=caption or url)
-
-        # ya hay algo reproduciendo -> poner en cola
-        if self.player.is_playing:
-            self.queue.add(item)
-            await update.message.reply_text(f"Agregado a la cola: {item.title}")
+        item = QueueItem(
+            url=result.url,
+            title=result.title,
+            duration_seconds=result.duration_seconds,
+            thumbnail=result.thumbnail,
+            channel=result.channel,
+            artist=artist,
+        )
+        started = await self._play_item(update, item)
+        if not started:
             return
+
+    async def _play_item(
+        self,
+        update: Update,
+        item: QueueItem,
+        *,
+        preserve_current: bool = False,
+    ) -> bool:
+        """Reproduce un video YA, imitando el flujo de YouTube.
+
+        Recibe el QueueItem ya construido (con url, titulo, duracion, thumbnail
+        y channel). Resuelve el stream URL, arranca el player si hace falta,
+        carga y reproduce al instante. 'loadfile replace' corta cualquier cosa
+        que esté sonando (no se encola: el usuario elige y suena en el momento).
+
+        - preserve_current=False (radio / cancion suelta): marca el item como
+          actual (set_current) y programa el prefetch del siguiente.
+        - preserve_current=True (playlist/jump): la cola ya posiciono el item
+          como current; solo reproduce y programa el prefetch.
+        """
+        self._cancel_prefetch()
 
         # Resolver el link de YouTube a URLs de stream directo que mpv
         # pueda reproducir sin necesitar yt-dlp propio.
-        resolved = await asyncio.to_thread(resolve_stream_url, url)
+        resolved = await asyncio.to_thread(resolve_stream_url, item.url)
         if not resolved:
-            await update.message.reply_text(
-                "No se pudo resolver el video. Espera un momento e intenta de nuevo."
-            )
-            return
+            await self._reply(update, "No se pudo resolver el video. Espera un momento e intenta de nuevo.")
+            return False
         stream_url, audio_url = resolved
 
         # empezar reproduccion desde cero
         try:
             await self.player.start()
         except RuntimeError as exc:
-            await update.message.reply_text(
-                f"Problema al iniciar el reproductor: {exc}"
-            )
-            return
+            await self._reply(update, f"Problema al iniciar el reproductor: {exc}")
+            return False
         try:
-            self.queue.add(item)
-            self.queue.next()  # marca el actual
             await self.player.load(stream_url, audio_url)
             await self.player.play()
+            if not preserve_current:
+                self.queue.set_current(item)
         except RuntimeError as exc:
-            await update.message.reply_text(
-                f"No se pudo reproducir: {exc}"
-            )
-            return
-        await update.message.reply_text(f"▶️ Reproduciendo: {item.title}")
+            await self._reply(update, f"No se pudo reproducir: {exc}")
+            return False
+        self._schedule_prefetch(item)
+        return True
+
+    async def _load_url(
+        self, update: Update, url: str, caption: str | None = None
+    ) -> None:
+        # Delegamos la lógica core en _play_item y nos quedamos solo
+        # en la respuesta final (el "▶️ Reproduciendo:").
+        item = QueueItem(
+            url=url, title=caption or url, thumbnail=thumbnail_from_url(url)
+        )
+        started = await self._play_item(update, item)
+        if started:
+            await self._reply(update, f"▶️ Reproduciendo: {caption or url}")
 
     async def cmd_pause(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         await self.player.pause()
-        await update.message.reply_text("⏸️ Pausado")
+        await self._reply(update, "⏸️ Pausado")
 
     async def cmd_resume(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         await self.player.play()
-        await update.message.reply_text("▶️ Reanudando")
+        await self._reply(update, "▶️ Reanudando")
 
     async def cmd_next(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-        item = self.queue.next()
-        if item is None:
-            await update.message.reply_text("No hay mas canciones en la cola.")
+        """Salta YA al siguiente tema: corta el actual y reproduce el siguiente.
+
+        Igual que en el auto-advance: si el prefetch ya resolvio el stream,
+        salta con cero silencio; si no, toma el proximo de la cola o hace
+        radio por semilla del track actual.
+        """
+
+        # Prefetch ya resuelto -> salto instantaneo (cero silencio).
+        if self._prefetch_resolved is not None:
+            (candidate, from_queue), (stream_url, audio_url) = self._prefetch_resolved
+            self._prefetch_resolved = None
+            self._cancel_prefetch()
+            try:
+                await self.player.load(stream_url, audio_url)
+                await self.player.play()
+            except RuntimeError as exc:
+                await self._reply(update, f"No se pudo saltar: {exc}")
+                return
+            if from_queue:
+                self.queue.next()  # avanza el cursor de la playlist (bucle)
+            else:
+                self.queue.set_current(candidate)
+            self._schedule_prefetch(candidate)
+            await self._send_track_card(
+                update, f"⏭️ Siguiente: {candidate.title}", candidate
+            )
             return
-        await self.player.load(item.url)
-        await update.message.reply_text(f"⏭️ Siguiente: {item.title}")
+
+        # Sin prefetch: decidir el siguiente ahora mismo (cola o radio).
+        current_item = self.queue.current
+        if current_item is None:
+            await self._reply(update, "No hay ninguna cancion reproduciendose.")
+            return
+        candidate, from_queue = await self._pick_next_candidate(current_item)
+        if candidate is None:
+            await self._reply(update, "No tengo nada siguiente para reproducir.")
+            return
+        if from_queue:
+            self.queue.next()  # avanza el cursor de la playlist (bucle)
+        started = await self._play_item(update, candidate, preserve_current=from_queue)
+        if not started:
+            await self._reply(update, "No se pudo reproducir el siguiente tema.")
+            return
+        await self._send_track_card(
+            update, f"⏭️ Siguiente: {candidate.title}", candidate
+        )
 
     async def cmd_prev(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         await self.player.command("cycle", "ab-loop")  # placeholder; sin historial no aplica
-        await update.message.reply_text("No hay cancion anterior en la cola.")
+        await self._reply(update, "No hay cancion anterior en la cola.")
 
     async def cmd_stop(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         await self.player.stop()
         self.queue.clear()
-        await update.message.reply_text("⏹️ Detenido y cola limpia")
+        self._cancel_prefetch()
+        self._queue_advance_needed = False
+        self._radio_artist = ""
+        await self._reply(update, "⏹️ Detenido y cola limpia")
 
     async def cmd_volume(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         try:
             vol = int(context.args[0]) if context.args else 50
         except (ValueError, IndexError):
-            await update.message.reply_text("Uso: /volume <0-100>")
+            await self._reply(update, "Uso: /volume <0-100>")
             return
         await self.player.set_volume(vol)
-        await update.message.reply_text(f"🔊 Volumen: {vol}")
+        await self._reply(update, f"🔊 Volumen: {vol}")
 
     async def cmd_queue(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-        items = self.queue.all()
-        if not items:
-            await update.message.reply_text("La cola esta vacia.")
+        n = None
+        if context.args:
+            try:
+                n = int(context.args[0])
+            except ValueError:
+                n = None
+
+        # Reproducir el tema de la posición elegida (/queue N). La cola es
+        # fija y queda intacta: jump_to solo mueve el cursor (bucle).
+        if n is not None:
+            cur = self.queue.current
+            item = self.queue.jump_to(n)
+            if item is None:
+                await self._reply(update, "Numero fuera de rango. /queue para ver la lista.")
+                return
+            if item is cur:
+                await self._reply(update, f"Ya esta sonando: {item.title}")
+                return
+            started = await self._play_item(update, item, preserve_current=True)
+            if started:
+                await self._reply(update, f"▶️ Reproduciendo: {item.title}")
             return
-        lines = [f"{i+1}. {it.title}" for i, it in enumerate(items)]
-        await update.message.reply_text("Cola:\n" + "\n".join(lines))
+
+        # Lista visible: la playlist completa SIEMPRE con el actual marcado
+        # [▶️] en su posición (los 25 temas se ven siempre, no se consumen).
+        cur = self.queue.current
+        items = self.queue.all()
+        if cur is None and not items:
+            await self._reply(update, "La cola esta vacia.")
+            return
+        lines = []
+        if items:
+            for i, it in enumerate(items, start=1):
+                mark = " [▶️]" if it is cur else ""
+                lines.append(f"{i}.{mark} {it.title}")
+        else:
+            if cur is not None:
+                lines.append(f"1. [▶️] {cur.title}")
+        await self._reply(update, "Cola:\n" + "\n".join(lines))
 
     async def cmd_now(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         cur = self.queue.current
         if cur is None:
-            await update.message.reply_text("No hay ninguna cancion reproduciendose.")
+            await self._reply(update, "No hay ninguna cancion reproduciendose.")
         else:
-            await update.message.reply_text(f"▶️ Sonando: {cur.title}")
+            await self._send_track_card(update, f"▶️ Sonando: {cur.title}", cur)
 
     async def cmd_adduser(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         args = context.args or []
         if len(args) != 2:
-            await update.message.reply_text("Uso: /adduser <telegram_user_id> <rol>")
+            await self._reply(update, "Uso: /adduser <telegram_user_id> <rol>")
             return
         try:
             user_id = int(args[0])
         except ValueError:
-            await update.message.reply_text("El ID debe ser un numero.")
+            await self._reply(update, "El ID debe ser un numero.")
             return
         role = args[1].lower()
         if role not in VALID_ROLES:
-            await update.message.reply_text(f"Roles validos: {sorted(VALID_ROLES)}")
+            await self._reply(update, f"Roles validos: {sorted(VALID_ROLES)}")
             return
         self.roles.set_role(user_id, role)
-        await update.message.reply_text(
-            f"Usuario {user_id} ahora es '{role}'."
-        )
+        await self._reply(update, f"Usuario {user_id} ahora es '{role}'.")
 
     async def cmd_removeuser(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         args = context.args or []
         if not args:
-            await update.message.reply_text("Uso: /removeuser <telegram_user_id>")
+            await self._reply(update, "Uso: /removeuser <telegram_user_id>")
             return
         try:
             user_id = int(args[0])
         except ValueError:
-            await update.message.reply_text("El ID debe ser un numero.")
+            await self._reply(update, "El ID debe ser un numero.")
             return
         if self.roles.remove_user(user_id):
-            await update.message.reply_text(f"Usuario {user_id} removido.")
+            await self._reply(update, f"Usuario {user_id} removido.")
         else:
-            await update.message.reply_text(f"El usuario {user_id} no estaba registrado.")
+            await self._reply(update, f"El usuario {user_id} no estaba registrado.")

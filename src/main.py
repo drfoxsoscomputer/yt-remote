@@ -4,6 +4,7 @@ Arranca el bot de Telegram que controla mpv para reproducir
 videos de YouTube en la PC.
 """
 
+import atexit
 import sys
 from pathlib import Path
 
@@ -16,6 +17,11 @@ def main() -> None:
 
     config = load_config()
     bot = YTRemoteBot(config)
+
+    # Al salir el bot, matar tambien mpv: si no, cada cierre deja un proceso
+    # mpv huerfano con su ventana abierta (se acumulan en segundo plano).
+    atexit.register(bot.player._quit)
+
     app = bot.build()
     app.run_polling(allowed_updates=["message", "callback_query"])
 
