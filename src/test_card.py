@@ -21,6 +21,8 @@ class FakeBot:
     def __init__(self):
         self.sent = []
         self.edited = []
+        self.get_me_ok = True
+        self.pending_updates = []
 
     async def send_message(self, chat_id, text, **kwargs):
         msg = SimpleNamespace(message_id=len(self.sent) + 100)
@@ -41,18 +43,52 @@ class FakeBot:
     async def edit_message_caption(self, caption=None, chat_id=None, message_id=None, **kwargs):
         self.edited.append((chat_id, message_id, "CAP:" + str(caption), kwargs))
 
+    async def get_me(self):
+        if not self.get_me_ok:
+            raise RuntimeError("sin conexion")
+        return "ok"
+
+    async def get_updates(self, timeout=None, offset=None, **kwargs):
+        if offset == -1:
+            return []
+        return list(self.pending_updates)
+
+
+class _FakeBacklogMsg:
+    def __init__(self, chat_id, text):
+        self.chat_id = chat_id
+        self.text = text
+
+
+class _FakeBacklogUpd:
+    def __init__(self, chat_id, text):
+        self.message = _FakeBacklogMsg(chat_id, text)
+
 
 class FakePlayer:
-    def __init__(self):
+    def __init__(self, fail_loads=0):
         self.volume = 100
         self.resumed = 0
         self.paused = 0
         self.stopped = 0
         self.running = True
+        self.fail_loads = fail_loads
+        self.loaded = []
+        self.starts = 0
 
     @property
     def is_running(self):
         return self.running
+
+    async def start(self):
+        self.starts += 1
+        self.running = True
+
+    async def load(self, url, audio=None):
+        self.loaded.append((url, audio))
+        if self.fail_loads > 0:
+            self.fail_loads -= 1
+            raise RuntimeError("load rejected")
 
     async def set_volume(self, vol):
         self.volume = vol
@@ -94,16 +130,17 @@ class FakeUpdate:
 
         self.callback_query = _Query(self)
         self.chat = SimpleNamespace(id=chat_id)
+        self.effective_user = SimpleNamespace(id=77)
 
     @property
     def effective_chat(self):
         return self.chat
 
 
-def make_bot():
+def make_bot(fail_loads=0):
     import bot as bot_mod
 
-    player = FakePlayer()
+    player = FakePlayer(fail_loads=fail_loads)
     bot_mod.Player = lambda *a, **k: player
     config = SimpleNamespace(
         mpv_path="mpv", owner_id=1, allowed_chat_id=None, max_results=5
@@ -118,15 +155,15 @@ def test_control_keyboard_and_status():
     b = make_bot()
     kb = b._control_keyboard()
     rows = kb.inline_keyboard
-    # Fila 1: 4 botones de control; fila 2: vol-10, estado de volumen, vol+10, lista
+    # Fila 1: 🔍 lupa + 4 botones de control; fila 2: vol-10, estado, vol+10, lista
     labels1 = [btn.text for btn in rows[0]]
     labels2 = [btn.text for btn in rows[1]]
-    assert labels1 == ["⏮", "⏸️", "⏭", "⏹"], labels1
+    assert labels1 == ["🔍", "⏮", "⏸️", "⏭", "⏹"], labels1
     assert labels2 == ["🔊−10", "🔊 100", "🔊+10", "📋"], labels2
-    # En pausa el botón central debe ser ▶️
+    # En pausa el botón central (indice 2, tras la lupa) debe ser ▶️
     b._paused = True
     kb = b._control_keyboard()
-    assert [btn.text for btn in kb.inline_keyboard[0]][1] == "▶️"
+    assert [btn.text for btn in kb.inline_keyboard[0]][2] == "▶️"
 
     # Estado: sin track
     assert "No hay ninguna cancion sonando." in b._track_status_text()
@@ -196,6 +233,23 @@ async def test_dispatch_unknown_action():
     await b._on_control(upd, SimpleNamespace(args=[]), "???")
 
 
+async def test_wizard_from_card_button_sends_new_message():
+    """La lupa de la tarjeta (ctl:buscar) abre el wizard con un MENSAJE NUEVO
+    en el chat: ni un toast invisible (estaba convirtiendo el prompt en un
+    query.answer() sin efecto) ni una edicion de la tarjeta del reproductor."""
+    b = make_bot()
+    upd = FakeUpdate("ctl:buscar", chat_id=44)
+    ctx = SimpleNamespace(args=[], bot=b._app.bot)
+    await b._on_control(upd, ctx, "buscar")
+    prompts = [m for m in b._app.bot.sent if "Paso 1 de 2" in str(m[1])]
+    assert prompts, b._app.bot.sent
+    assert prompts[0][0] == 44, prompts
+    # La tarjeta no se reescribio con el texto del wizard
+    assert not [e for e in b._app.bot.edited if "Paso" in str(e)], b._app.bot.edited
+    # El wizard quedo esperando el artista
+    assert b._wizard_state.get(77) == "artist"
+
+
 async def test_card_photo_created_and_media_edited():
     """Tarea 1: la tarjeta se crea como FOTO (miniatura+caption+botones en un
     solo mensaje) y el siguiente tema se refleja con edit_message_media (muda
@@ -235,45 +289,361 @@ async def test_card_text_fallback_without_thumbnail():
     assert not [e for e in b._app.bot.edited if e[2] == "MEDIA"]
 
 
-def test_artist_from_title():
-    """Tarea 4: extraccion del artista real (no la cancion) en formato normal,
-    invertido (cristiano), con 3+ segmentos y desempate por canal."""
+class FakeMessageUpdate:
+    """Mensaje de texto mínimo para el wizard (on_wizard_text / cmd_play)."""
+
+    def __init__(self, text, user_id=77, chat_id=44):
+        self.sent = []
+        self.callback_query = None
+        self.message = SimpleNamespace(
+            text=text, message_id=200, reply_text=self._reply_text
+        )
+        self.chat = SimpleNamespace(id=chat_id)
+        self.effective_user = SimpleNamespace(id=user_id)
+
+    async def _reply_text(self, text, **kwargs):
+        self.sent.append((text, kwargs))
+
+    @property
+    def effective_chat(self):
+        return self.chat
+
+
+def test_artist_seed_literal_or_channel():
+    """La semilla de la radio es SIEMPRE lo que escribió el usuario o, en
+    links/playlists sin wizard, el canal del video. El titulo JAMAS se parsea."""
+    import bot as bot_mod
+    from queue_manager import QueueItem
+
+    b = bot_mod.YTRemoteBot(
+        SimpleNamespace(mpv_path="mpv", owner_id=1, allowed_chat_id=None, max_results=5)
+    )
+    item = QueueItem(
+        url="u1",
+        title="Inexplicable - GP BAND - [Cover Julissa]",
+        channel="Generación Pentecostal",
+    )
+    # Sin ancla de sesion: cae al canal (conservador, sin derivar del titulo).
+    assert b._artist_seed(item) == item.channel
+    # Con ancla de sesion (lo que escribio el usuario): gana la literal.
+    b._radio_artist = "gp band"
+    assert b._artist_seed(item) == "gp band"
+    # Sin ancla ni canal: no hay radio, no se improvisa.
+    b._radio_artist = ""
+    assert b._artist_seed(QueueItem(url="u2", title="Solo un titulo")) == ""
+
+
+def test_radio_gate_strict_excludes_covers():
+    """El /next estricto: solo temas que mencionen al artista del usuario o
+    que sean del mismo canal. El cover de otro artista (Denicher Pol) queda
+    fuera, aunque suene parecido."""
+    import bot as bot_mod
+    from queue_manager import QueueItem
+    from search import SearchResult
+
+    b = make_bot()
+    b._radio_artist = "GP Band"
+    current = QueueItem(url="u0", title="actual")
+
+    cases = [
+        # (resultados, url esperada del candidato)
+        ([SearchResult(url="u1", title="Inexplicable - GP BAND - [Cover Julissa]", duration="3:00", thumbnail="")], "u1"),
+        ([SearchResult(url="u2", title="Adoración - GP Band", duration="4:00", thumbnail="", channel="Otro")], "u2"),
+        ([SearchResult(url="u4", title="Tema X", duration="2:00", thumbnail="", channel="GP Band")], "u4"),
+        ([SearchResult(url="u5", title="Denicher Pol - Inexplicable Cover", duration="4:30", thumbnail="")], None),
+        ([], None),  # radio agotada
+    ]
+    original = bot_mod.search
+    try:
+        for idx, (results, expected) in enumerate(cases):
+            bot_mod.search = lambda q, n, _r=results: _r
+            candidate, from_queue = asyncio.run(b._pick_next_candidate(current))
+            got = candidate.url if candidate else None
+            assert got == expected, f"caso {idx}: {got} != {expected}"
+    finally:
+        bot_mod.search = original
+
+
+async def test_wizard_two_steps_and_anchor_literal():
+    """El wizard: Paso 1 pide el artista, Paso 2 la cancion. Al terminar, el
+    artista de la radio es EXACTAMENTE lo que escribio el usuario y la
+    busqueda se lanza con 'artista cancion'."""
+    b = make_bot()
+    calls = []
+
+    async def fake_run(update, context, query):
+        calls.append(query)
+
+    b._run_search = fake_run
+
+    ctx = SimpleNamespace(args=[], bot=b._app.bot)
+    upd = FakeMessageUpdate("")
+    await b._wizard_begin(upd, ctx)
+    assert b._wizard_state.get(77) == "artist"
+    assert "Paso 1 de 2" in b._app.bot.sent[0][1]
+
+    upd2 = FakeMessageUpdate("GP Band")
+    await b.on_wizard_text(upd2, SimpleNamespace(args=[]))
+    assert b._wizard_state.get(77) == "song"
+    assert b._wizard_artist[77] == "GP Band"
+    assert "Paso 2 de 2" in upd2.sent[0][0]
+
+    upd3 = FakeMessageUpdate("Inexplicable")
+    await b.on_wizard_text(upd3, SimpleNamespace(args=[]))
+    assert 77 not in b._wizard_state
+    assert 77 not in b._wizard_artist
+    assert b._radio_artist == "GP Band", b._radio_artist
+    assert calls == ["GP Band Inexplicable"], calls
+
+
+async def test_wizard_abort_with_cancel():
+    b = make_bot()
+    ctx = SimpleNamespace(args=[], bot=b._app.bot)
+    upd = FakeMessageUpdate("")
+    await b._wizard_begin(upd, ctx)
+    assert b._wizard_state.get(77) == "artist"
+    assert "Paso 1 de 2" in b._app.bot.sent[0][1]
+    await b.cmd_cancelar(FakeMessageUpdate(""), SimpleNamespace(args=[]))
+    assert 77 not in b._wizard_state
+    assert 77 not in b._wizard_artist
+
+
+async def test_cmd_play_routes():
+    """/buscar sin texto abre el wizard (paso 1); con texto libre va como
+    artista directo (paso 2); con link reproduce directo."""
+    b = make_bot()
+    began = []
+
+    async def fake_begin(update, context, hint=""):
+        began.append(hint)
+
+    b._wizard_begin = fake_begin
+    played = []
+
+    async def fake_play(update, context, query):
+        played.append(query)
+
+    b._play_link_or_playlist = fake_play
+
+    await b.cmd_play(FakeMessageUpdate(""), SimpleNamespace(args=[]))
+    assert began == [""], began
+    await b.cmd_play(FakeMessageUpdate(""), SimpleNamespace(args=["Mafe Restrepo"]))
+    assert began == ["", "Mafe Restrepo"], began
+    await b.cmd_play(
+        FakeMessageUpdate(""), SimpleNamespace(args=["https://youtu.be/abc"])
+    )
+    assert played == ["https://youtu.be/abc"], played
+
+
+async def _wait_until(pred, timeout=2.0):
+    waited = 0.0
+    while not pred() and waited < timeout:
+        await asyncio.sleep(0.02)
+        waited += 0.02
+    assert pred(), "condicion no se cumplio a tiempo"
+
+
+def _patch_resolve(bot_mod, mapping):
+    """Reemplaza resolve_stream_url del modulo bot con una fake sin red."""
+    original = bot_mod.resolve_stream_url
+
+    def fake(url):
+        return mapping.get(url)
+
+    bot_mod.resolve_stream_url = fake
+    return original
+
+
+async def test_stream_for_caches_and_reuses():
+    """El mesonero resuelve una URL una sola vez: la guarda y la reutiliza."""
     import bot as bot_mod
 
-    # Formato normal "ARTISTA - Cancion"
-    assert bot_mod.YTRemoteBot._artist_from_title(
-        "KENT LEROY - Quiero Cantar del Amor (CD completo)"
-    ) == "KENT LEROY"
-    # Sin guion: no es artista
-    assert bot_mod.YTRemoteBot._artist_from_title("Solo un titulo") == ""
-    # Invertido "Cancion - Artista - Banda - Ministerio"
-    assert bot_mod.YTRemoteBot._artist_from_title(
-        "IMPACTANTE - Mafe Restrepo - GP BAND - Generacion Pentecostal"
-    ) == "Mafe Restrepo"
-    # Desempate por canal: si el canal coincide con un segmento, gana ese
-    assert bot_mod.YTRemoteBot._artist_from_title(
-        "IMPACTANTE - Mafe Restrepo - GP BAND - Generacion Pentecostal",
-        channel="Generación Pentecostal",
-    ) == "Generacion Pentecostal"
-    # Canal sin coincidencia no confunde el invertido
-    assert bot_mod.YTRemoteBot._artist_from_title(
-        "Alguien - Artista X - Banda", channel="Otro Canal"
-    ) == "Artista X"
-    # Guion sin espacios: "X - Y"
-    assert bot_mod.YTRemoteBot._artist_from_title("Vanessa - Corazon Herido") == "Vanessa"
-    # Titulo vacio
-    assert bot_mod.YTRemoteBot._artist_from_title("") == ""
+    calls = []
+
+    def fake(url):
+        calls.append(url)
+        return ("stream-" + url, None)
+
+    original = _patch_resolve(bot_mod, {})
+    bot_mod.resolve_stream_url = fake
+    try:
+        b = make_bot()
+        first = await b._stream_for("u1")
+        second = await b._stream_for("u1")
+        assert first == ("stream-u1", None)
+        assert second == first
+        assert calls == ["u1"], calls  # resolvio una sola vez
+        # una URL sin stream no se cachea
+        bot_mod.resolve_stream_url = lambda url: None
+        assert await b._stream_for("u2") is None
+        assert "u2" not in b._stream_cache
+    finally:
+        bot_mod.resolve_stream_url = original
+
+
+async def test_stream_for_dedupes_inflight():
+    """Dos pedidos simultaneos de la misma URL resuelven una sola vez."""
+    import bot as bot_mod
+
+    calls = []
+
+    def fake(url):
+        calls.append(url)
+        return f"stream-{url}", None
+
+    original = bot_mod.resolve_stream_url
+    bot_mod.resolve_stream_url = fake
+    try:
+        b = make_bot()
+        r1, r2 = await asyncio.gather(b._stream_for("u1"), b._stream_for("u1"))
+        assert r1 == r2 == ("stream-u1", None)
+        assert calls == ["u1"], calls
+    finally:
+        bot_mod.resolve_stream_url = original
+
+
+async def test_anticipate_urls_serial_and_clear():
+    """Anticipar encola varias URLs y el cache se vacia con _clear_stream_cache."""
+    import bot as bot_mod
+
+    order = []
+
+    def fake(url):
+        order.append(url)
+        return ("stream-" + url, None)
+
+    original = _patch_resolve(bot_mod, {})
+    bot_mod.resolve_stream_url = fake
+    try:
+        b = make_bot()
+        b._anticipate_urls(["u1", "u2", "u3"])
+        await _wait_until(lambda: len(b._stream_cache) == 3)
+        assert set(b._stream_cache) == {"u1", "u2", "u3"}
+        assert order == ["u1", "u2", "u3"], order  # serial, una a la vez
+        # repetir un enqueo no re-resuelve nada
+        exposed = len(order)
+        b._anticipate_urls(["u1", "u2", "u3", "u4"])
+        await _wait_until(lambda: len(b._stream_cache) == 4)
+        assert order[exposed:] == ["u4"], order[exposed:]
+        # limpiar: cache y cola vacias
+        b._clear_stream_cache()
+        assert b._stream_cache == {}
+        assert b._resolving == set()
+    finally:
+        bot_mod.resolve_stream_url = original
+
+
+async def test_cache_expired_retries_once():
+    """Si la URL cacheada vencio (mpv la rechaza), se re-resuelve una vez."""
+    import bot as bot_mod
+    from queue_manager import QueueItem
+
+    b = make_bot(fail_loads=1)
+    b._stream_cache["u1"] = ("vencida", None)  # entrada cacheada expirada
+
+    def fake(url):
+        return ("stream-fresca", None)
+
+    original = _patch_resolve(bot_mod, {})
+    bot_mod.resolve_stream_url = fake
+    try:
+        async def _no_candidate(current=None):
+            return None, False
+
+        b._pick_next_candidate = _no_candidate  # evita radio/red real
+        upd = FakeUpdate("ctl:next", chat_id=44)
+        started = await b._play_item(upd, QueueItem(url="u1", title="X"))
+        assert started
+        assert b.player.loaded == [("vencida", None), ("stream-fresca", None)], b.player.loaded
+        assert b._stream_cache["u1"] == ("stream-fresca", None)
+    finally:
+        bot_mod.resolve_stream_url = original
+
+
+async def test_wizard_no_active_state_replies():
+    """Texto sin wizard activo NUNCA queda en silencio: avisa, no traga."""
+    b = make_bot()
+    upd = FakeMessageUpdate("gp band")
+    await b.on_wizard_text(upd, SimpleNamespace(args=[]))
+    assert upd.sent, f"deberia haber respondido, no callar: {upd.sent}"
+    assert "No hay una busqueda activa" in upd.sent[0][0], upd.sent
+
+
+def test_singleton_lock_rejects_second_instance():
+    """El lock de instancia local: el primero toma el puerto, el segundo no arranca."""
+    import main as main_mod
+
+    first = main_mod._acquire_singleton()
+    assert first is not None
+    try:
+        second = main_mod._acquire_singleton()
+        assert second is None, "un segundo bot no deberia arrancar"
+    finally:
+        first.close()
+    # liberado: un arranque nuevo vuelve a tomar el puerto
+    third = main_mod._acquire_singleton()
+    assert third is not None
+    third.close()
+
+
+async def test_net_watch_job_reconnects_and_notifies():
+    """Vigilante de conexion: offline no hace nada; al volver descarta el
+    backlog y avisa que esos comandos se perdieron (no se ejecutan con retraso)."""
+    b = make_bot()
+    b.config.allowed_chat_id = 44
+    fb = b._app.bot
+    fb.pending_updates = [
+        _FakeBacklogUpd(44, "/pause"),
+        _FakeBacklogUpd(44, "/volume 30"),
+        _FakeBacklogUpd(44, "hola"),
+        _FakeBacklogUpd(99, "/next"),  # de otro chat: no se reporta
+    ]
+    ctx = SimpleNamespace(bot=fb, application=SimpleNamespace(updater=None))
+    b._net_offline = True
+
+    # offline: el probe falla y el job no hace nada
+    fb.get_me_ok = False
+    await b._net_watch_job(ctx)
+    assert b._net_offline is True
+    assert fb.sent == [], fb.sent
+
+    # vuelve la conexion: se descarta el backlog y se avisa
+    fb.get_me_ok = True
+    await b._net_watch_job(ctx)
+    assert b._net_offline is False
+    dropped = [m[1] for m in fb.sent if "La conexion del bot se perdio" in str(m[1])]
+    assert dropped, fb.sent
+    assert "/pause" in dropped[0] and "/volume 30" in dropped[0]
+    assert "/next" not in dropped[0]
+    assert "hola" not in dropped[0]
+
+    # sin backlog (y online): no vuelve a avisar
+    fb.sent.clear()
+    fb.pending_updates = []
+    await b._net_watch_job(ctx)
+    assert fb.sent == [], fb.sent
 
 
 def run():
     test_control_keyboard_and_status()
-    test_artist_from_title()
+    test_artist_seed_literal_or_channel()
+    test_radio_gate_strict_excludes_covers()
+    asyncio.run(test_wizard_two_steps_and_anchor_literal())
+    asyncio.run(test_wizard_abort_with_cancel())
+    asyncio.run(test_cmd_play_routes())
     asyncio.run(test_toggle_and_volume())
     asyncio.run(test_card_created_and_edited())
     asyncio.run(test_dispatch_vol())
     asyncio.run(test_dispatch_unknown_action())
     asyncio.run(test_card_photo_created_and_media_edited())
     asyncio.run(test_card_text_fallback_without_thumbnail())
+    asyncio.run(test_stream_for_caches_and_reuses())
+    asyncio.run(test_stream_for_dedupes_inflight())
+    asyncio.run(test_anticipate_urls_serial_and_clear())
+    asyncio.run(test_cache_expired_retries_once())
+    asyncio.run(test_wizard_no_active_state_replies())
+    test_singleton_lock_rejects_second_instance()
+    asyncio.run(test_net_watch_job_reconnects_and_notifies())
     print("TARJETA TESTS OK")
 
 
