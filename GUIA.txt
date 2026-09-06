@@ -1,81 +1,125 @@
 GUÍA DE YT-REMOTE
 =================
 
-¿Qué es YT-Remote?
------------------
-Un bot de Telegram que reproduce videos de YouTube. Le mandas
-órdenes desde Telegram y los videos se reproducen en la PC
-donde esté corriendo el programa.
+¿QUÉ ES?
+--------
+YT-Remote es un bot de Telegram que controla la reproducción de videos
+de YouTube en tu PC. Le mandas órdenes desde Telegram y los videos
+se reproducen en la computadora donde esté corriendo el programa.
 
-¿Cómo se usa? En 3 pasos y listo:
 
-PASO 1 - Crear tu bot y conseguir el TOKEN
-------------------------------------------
+PASO 1 - CREAR TU BOT
+---------------------
 1. Abre Telegram y busca a @BotFather.
-2. Escríbele el comando:   /newbot
+2. Escríbele:   /newbot
 3. Elige un nombre para el bot (el que quieras).
 4. Elige un nombre de usuario (debe terminar en "bot").
 5. @BotFather te da un código tipo:   1234567890:AAHxh......
    Ese código es tu TOKEN. Guárdalo.
 
-PASO 2 - Conseguir tu ID (para que te reconozca)
-------------------------------------------------
+
+PASO 2 - CONSEGUIR TU ID
+-------------------------
 1. En Telegram busca a @userinfobot.
 2. Escríbele cualquier mensaje (por ejemplo: hola).
-3. Te va a mostrar tu número de ID, tipo:   123456789
+3. Te muestra tu número de ID, tipo:   123456789
    Ese es tu ID. Guárdalo.
 
-PASO 3 - Configurar y arrancar
-------------------------------
+
+PASO 3 - ARRANCAR
+------------------
 1. Doble clic en  ytremote.bat
-2. Si es la primera vez, te va a preguntar por tu TOKEN y tu ID.
-   Pégalos como te indica (también los puedes pegar en el archivo .env
-   si sabes lo que haces, pero no es necesario).
+2. La primera vez te pide tu TOKEN y tu ID. Pégalos como indica.
 3. El bot arranca solo. Déjalo abierto.
-4. Crea un grupo en Telegram, agrega tu bot, y en ese grupo
-   escríbele:   /start
+4. Crea un grupo en Telegram, agrega el bot y escribe:   /start
    El bot se configura solo para funcionar ahí.
 
-USO EN EL GRUPO
----------------
-Después de /start, el bot te muestra los comandos que puedes usar
-según tu rol (admin, dj o user).
 
-Comandos de usuarios (user, dj y admin):
-- /play  metalica nothing else matters   -> busca y muestra resultados
-- /play  https://youtu.be/xxxxx           -> reproduce ese link directo
-- /queue                                 -> muestra la cola de temas
-- /now                                   -> qué está sonando
+CÓMO BUSCAR Y REPRODUCIR
+--------------------------
+Escribe:   /buscar  Kent Leroy - Dame Jesús
 
-Comandos de control (dj y admin):
-- /pause  /resume  /next  /prev  /stop   -> controles de reproducción
-- /volume 70                             -> cambia el volumen
+Lo que va ANTES del guion medio (el "-") es el ARTISTA. El bot toma
+ese texto como punto de referencia para reproducir canciones del mismo
+cantante una tras otra. Lo que va DESPUÉS del guion es la canción
+que quieres escuchar primero.
 
-Comandos de administración (solo admin):
-- /adduser  <id>  <rol>                  -> da acceso con un rol
-- /removeuser  <id>                      -> quita acceso
+Si no usas el guion, todo el texto se toma como el nombre del artista.
+Ej:   /buscar Mafe Restrepo   reproduce temas de Mafe Restrepo.
 
-Roles y permisos:
-- admin: hace todo
-- dj: reproduce, pausa, salta, cola y volumen
-- user: solo pide canciones
+Si pegas un link de YouTube directo, el bot reproduce ese video sin
+buscar nada.
 
-Nota: por defecto solo el dueño (tú) es admin. Para darle acceso a
-otros, usa /adduser con su ID de Telegram y el rol (admin, dj o user).
 
-EL COMANDO /buscar (BUSQUEDA EN UN PASO)
------------------------------------------
-Escribe `/buscar <artista> - <cancion>` y reproduce el tema de una vez.
-Lo que va ANTES del primer guion (la parte de la izquierda) es el ARTISTA
-(cantante, banda, grupo o canal) y se usa como ancla de la radio: el
-siguiente tema saldrá exactamente de ese artista, aunque la búsqueda se
-haga con el nombre completo de la canción. Si no escribes el guion, todo
-el texto se toma como el artista. También puedes pegar el link de un video
-de YouTube directamente.
+LA TARJETA DE REPRODUCCIÓN
+---------------------------
+Cuando empieza a sonar algo, el bot muestra una tarjeta con botones
+que te permiten controlar la reproducción sin escribir comandos:
 
-PROBLEMAS
----------
-- Si al hacer doble clic no pasa nada, vuelve a descargar la versión
-  completa desde el repositorio (falta algún archivo interno).
-- Si el bot no responde en el grupo, revisa que en el grupo hayas
-  agregado el bot y le hayas mandado /start.
+Fila 1:
+  ⏮  — vuelve a la canción anterior
+  ▶/⏸ — pausa o reanuda
+  ⏭  — pasa a la siguiente canción
+  ⏹  — detiene la reproducción
+
+Fila 2:
+  🔊−10  — baja el volumen 10 puntos
+  🔊 70   — volumen actual
+  🔊+10  — sube el volumen 10 puntos
+  📋     — muestra la lista de canciones
+
+
+COMPORTAMIENTO DE LA RADIO
+--------------------------
+Cuando termina una canción, el bot reproduce automáticamente otra del
+mismo artista que elegiste al buscar. Cada vez que pulses ⏭ salta
+a la siguiente canción del mismo artista.
+
+El bot no cambia de cantante solo. Si quieres escuchar otro artista,
+usa /buscar con el nombre del nuevo artista.
+
+Con artistas que tienen muchas canciones en YouTube, la radio puede
+sonar largo rato sin repetirse. Si el catálogo del artista se agota,
+el bot te avisa.
+
+
+COMANDOS DISPONIBLES
+--------------------
+
+Todos los usuarios:
+  /buscar <artista> - <canción>  busca y reproduce de un artista
+  /buscar <artista>              busca un artista (sin canción)
+  /buscar <link>                 reproduce un link de YouTube directo
+  /lista                         muestra la lista; /lista N salta al tema N
+  /now                           qué está sonando ahora
+
+Solo dj y admin:
+  /pause                         pausa la reproducción
+  /resume                        reanuda
+  /next                          siguiente canción
+  /stop                          detiene y limpia todo
+  /volume <0-100>                ajusta el volumen
+
+Solo admin:
+  /adduser <id> <rol>            da acceso a alguien (rol: admin, dj, user)
+  /removeuser <id>               quita acceso
+
+
+ROLES Y PERMISOS
+----------------
+  admin  — puede hacer todo, incluyendo dar permisos a otros
+  dj     — reproduce, pausa, salta, cambia volumen
+  user   — solo puede pedir canciones y ver la lista
+
+Por defecto solo el dueño (vos) sos admin. Para darle acceso a otros,
+necesitás su ID de Telegram y usás /adduser.
+
+
+PROBLEMAS COMUNES
+-----------------
+- Si al hacer doble clic no pasa nada, volvé a descargar la versión
+  completa desde el repositorio.
+- Si el bot no responde en el grupo, проверь que hayas agregado el bot
+  y le hayas enviado /start.
+- Si un video no se puede reproducir, puede que esté restringido o
+  no esté disponible en tu país.
