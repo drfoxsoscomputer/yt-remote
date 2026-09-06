@@ -56,3 +56,7 @@ class RoleManager:
 
     def all_users(self) -> dict[str, str]:
         return dict(self._roles)
+
+    def get_all_with_role(self, role: str) -> list[int]:
+        """Devuelve todos los user IDs que tienen ese rol exacto."""
+        return [int(uid) for uid, r in self._roles.items() if r == role]

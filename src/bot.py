@@ -139,8 +139,9 @@ class YTRemoteBot:
         app = Application.builder().token(self.config.token).build()
 
         # /buscar es el nombre principal; /play queda como alias.
-        app.add_handler(CommandHandler("buscar", self._require_chat(self.cmd_play)))
-        app.add_handler(CommandHandler("play", self._require_chat(self.cmd_play)))
+        app.add_handler(CommandHandler("buscar", self._require_chat(self._require("dj", self.cmd_play))))
+        app.add_handler(CommandHandler("play", self._require_chat(self._require("dj", self.cmd_play))))
+        app.add_handler(CommandHandler("solicitar", self._require_chat(self.cmd_solicitar)))
         app.add_handler(CommandHandler("start", self._require_chat(self.cmd_start)))
         app.add_handler(
             CommandHandler(
@@ -207,11 +208,8 @@ class YTRemoteBot:
             try:
                 await bot.set_my_commands(
                     [
-                        BotCommand("buscar", "Buscar <artista> - <cancion> o link"),
-                        BotCommand("lista", "Ver la lista; /lista N reproduce el tema N"),
-                        BotCommand("next", "Saltar al siguiente tema"),
-                        BotCommand("stop", "Detener y limpiar la cola"),
-                        BotCommand("volume", "Ajustar el volumen (0-100)"),
+                        BotCommand("start", "Info del bot"),
+                        BotCommand("buscar", "Buscar <artista> o link para reproducir"),
                         BotCommand("adduser", "Dar acceso con un rol (admin)"),
                         BotCommand("removeuser", "Quitar acceso (admin)"),
                     ]
@@ -923,17 +921,12 @@ class YTRemoteBot:
 
         lines: list[str] = []
 
-        # user
-        lines.append("• /buscar <artista> - <cancion> — buscar y reproducir en 1 paso")
-        lines.append("• /buscar <artista> — buscar un artista")
-        lines.append("• /buscar <link> — reproducir un link de YouTube directo")
-        lines.append("• /lista — ver la lista; /lista N reproduce el tema N")
-
         if level >= 1:  # dj
-            lines.append("• /volume <0-100> — ajustar el volumen")
+            lines.append("• /buscar — buscar y reproducir un artista o link")
 
         if level >= 2:  # admin
-            lines.append("• /adduser <id> <rol> — dar acceso (admin, dj, user)")
+            lines.append("• /buscar — buscar y reproducir un artista o link")
+            lines.append("• /adduser <id> <rol> — dar acceso (dj, admin)")
             lines.append("• /removeuser <id> — quitar acceso")
 
         return "\n".join(lines)
@@ -1276,6 +1269,15 @@ class YTRemoteBot:
         en su lugar para reflejar siempre el estado actual.
         """
         query = update.callback_query
+        user = query.from_user
+        user_id = user.id if user else None
+        role = self.roles.get_role(user_id) if user_id else "user"
+
+        CONTROL_ACTIONS = {"pp", "prev", "next", "stop", "vol-10", "vol+10", "vol-info"}
+        if action in CONTROL_ACTIONS and user_id is not None and not self.roles.has_role(user_id, "dj"):
+            await query.answer("No tenes permiso para eso.", show_alert=True)
+            return
+
         self._card_chat_id = update.effective_chat.id
         self._card_message_id = query.message.message_id
         chat_id = self._card_chat_id
@@ -1760,3 +1762,26 @@ class YTRemoteBot:
             await self._reply(update, f"Usuario {user_id} removido.")
         else:
             await self._reply(update, f"El usuario {user_id} no estaba registrado.")
+
+    async def cmd_solicitar(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        user = update.effective_user
+        if user is None:
+            return
+        if self.roles.get_role(user.id) != "user":
+            await self._reply(update, "Ya tenes un rol asignado.")
+            return
+        admin_ids = self.roles.get_all_with_role("admin")
+        for admin_id in admin_ids:
+            await context.bot.send_message(
+                chat_id=admin_id,
+                text=(
+                    f"📩 Solicitud de acceso\n"
+                    f"Usuario: {user.full_name} (ID: {user.id})\n"
+                    f"Quiere ser DJ.\n\n"
+                    f"Para darle acceso: /adduser {user.id} dj"
+                ),
+            )
+        await self._reply(
+            update,
+            "Tu solicitud fue enviada a los admins. Te avisaran cuando te den acceso.",
+        )

@@ -86,30 +86,27 @@ el bot te avisa.
 COMANDOS DISPONIBLES
 --------------------
 
-Todos los usuarios:
+Solo dj y admin:
   /buscar <artista> - <canción>  busca y reproduce de un artista
   /buscar <artista>              busca un artista (sin canción)
   /buscar <link>                 reproduce un link de YouTube directo
-  /lista                         muestra la lista; /lista N salta al tema N
-
-Solo dj:
-  /next                          siguiente canción del mismo artista
-  /stop                          detiene y limpia todo
-  /volume <0-100>                ajusta el volumen
 
 Solo admin:
-  /pause                          pausa la reproducción
-  /resume                         reanuda
-  /now                            qué está sonando ahora
-  /adduser <id> <rol>            da acceso a alguien (rol: admin, dj, user)
+  /adduser <id> <rol>            da acceso (dj, admin)
   /removeuser <id>               quita acceso
+
+Todos (user, dj, admin):
+  /lista                          muestra la lista; /lista N salta al tema N
+
+Un user que quiera ser dj puede escribir /solicitar para pedirle al
+admin que le de acceso.
 
 
 ROLES Y PERMISOS
 ----------------
-  admin  — puede hacer todo
-  dj     — reproduce, siguiente, detiene, volumen
-  user   — solo puede pedir canciones y ver la lista
+  admin  — puede hacer todo + dar/quitar acceso
+  dj     — buscar, controlar musica (tarjeta y comandos)
+  user   — solo puede ver la lista con /lista o el boton 📋
 
 Por defecto solo el dueño (vos) sos admin. Para darle acceso a otros,
 necesitás su ID de Telegram y usás /adduser.

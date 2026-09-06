@@ -52,33 +52,30 @@ termina. Usá `/buscar` con otro nombre para cambiar de cantante.
 
 ## Comandos
 
-| Comando | Rol | Descripción |
+| Comando | Rol | Descripcion |
 |---------|-----|-------------|
-| `/buscar <artista> - <canción>` | user | Busca y reproduce del artista indicado |
-| `/buscar <artista>` | user | Busca un artista (sin canción específica) |
-| `/buscar <link>` | user | Reproduce un link de YouTube directo |
-| `/lista` | user | Ver la lista; `/lista N` salta al tema N |
-| `/next` | dj | Siguiente canción del mismo artista |
-| `/stop` | dj | Detener y limpiar todo |
-| `/volume <0-100>` | dj | Ajustar volumen |
-| `/adduser <id> <rol>` | admin | Dar acceso (rol: admin, dj, user) |
+| `/buscar <artista> - <cancion>` | dj, admin | Busca y reproduce del artista indicado |
+| `/buscar <artista>` | dj, admin | Busca un artista (sin cancion especifica) |
+| `/buscar <link>` | dj, admin | Reproduce un link de YouTube directo |
+| `/adduser <id> <rol>` | admin | Dar acceso (dj, admin) |
 | `/removeuser <id>` | admin | Quitar acceso |
-| `/pause` | admin | Pausar |
-| `/resume` | admin | Reanudar |
-| `/now` | admin | Qué está sonando |
+| `/solicitar` | user | Solicitar acceso de dj al admin |
 
-**Nota:** los comandos `/pause`, `/resume` y `/now` no aparecen en el menú "/" (son solo para admin). El control de reproducción se hace desde la tarjeta de botones.
+**Todos los roles** pueden tocar el boton 📋 (ver lista). Los demas
+botones de la tarjeta (▶ ⏮ ⏭ ⏹ 🔊) son solo para dj y admin.
 
 ## Roles
 
-| Rol | Qué puede hacer |
-|-----|---------------|
-| admin | Todo, incluyendo pausar, reanudar, ver ahora y dar/quitar permisos |
-| dj | Reproducir, siguiente, detener, ajustar volumen |
-| user | Solo pedir canciones y ver la lista |
+| Rol | Que puede hacer |
+|-----|----------------|
+| admin | Todo + dar/quitar acceso a otros |
+| dj | Buscar, controlar reproduccion (tarjeta y comandos) |
+| user | Solo ver la lista con /lista o el boton 📋 |
 
-Por defecto solo el dueño (vos) es admin. Usá `/adduser` con el ID de
-Telegram de la otra persona para darle acceso.
+Por defecto solo el dueno (vos) es admin. Usá `/adduser` con el ID de
+Telegram de la otra persona para darle acceso dj o admin.
+
+Un user puede escribir `/solicitar` para pedir acceso de dj al admin.
 
 ## Variables de entorno
 
