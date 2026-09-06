@@ -138,45 +138,12 @@ class YTRemoteBot:
     def build(self) -> Application:
         app = Application.builder().token(self.config.token).build()
 
-        # /buscar es el nombre principal; /play queda como alias.
+        # Comandos principales (el menu "/" se registra en post_init).
+        app.add_handler(CommandHandler("start", self._require_chat(self.cmd_start)))
         app.add_handler(CommandHandler("buscar", self._require_chat(self._require("dj", self.cmd_play))))
         app.add_handler(CommandHandler("play", self._require_chat(self._require("dj", self.cmd_play))))
         app.add_handler(CommandHandler("solicitar", self._require_chat(self.cmd_solicitar)))
-        app.add_handler(CommandHandler("start", self._require_chat(self.cmd_start)))
-        app.add_handler(
-            CommandHandler(
-                "pause", self._require_chat(self._require("admin", self.cmd_pause))
-            )
-        )
-        app.add_handler(
-            CommandHandler(
-                "resume", self._require_chat(self._require("admin", self.cmd_resume))
-            )
-        )
-        app.add_handler(
-            CommandHandler(
-                "next", self._require_chat(self._require("dj", self.cmd_next))
-            )
-        )
-        app.add_handler(
-            CommandHandler(
-                "prev", self._require_chat(self._require("dj", self.cmd_prev))
-            )
-        )
-        app.add_handler(
-            CommandHandler(
-                "stop", self._require_chat(self._require("dj", self.cmd_stop))
-            )
-        )
-        app.add_handler(
-            CommandHandler(
-                "volume", self._require_chat(self._require("dj", self.cmd_volume))
-            )
-        )
-        # /lista es el nombre principal; /queue queda como alias.
         app.add_handler(CommandHandler("lista", self._require_chat(self.cmd_queue)))
-        app.add_handler(CommandHandler("queue", self._require_chat(self.cmd_queue)))
-        app.add_handler(CommandHandler("now", self._require_chat(self._require("admin", self.cmd_now))))
         app.add_handler(
             CommandHandler(
                 "adduser", self._require_chat(self._require("admin", self.cmd_adduser))
@@ -209,8 +176,9 @@ class YTRemoteBot:
                 await bot.set_my_commands(
                     [
                         BotCommand("start", "Info del bot"),
-                        BotCommand("buscar", "Buscar <artista> o link para reproducir"),
-                        BotCommand("adduser", "Dar acceso con un rol (admin)"),
+                        BotCommand("buscar", "Buscar artista o link para reproducir (dj+)"),
+                        BotCommand("solicitar", "Pedir acceso de dj al admin"),
+                        BotCommand("adduser", "Dar acceso (admin)"),
                         BotCommand("removeuser", "Quitar acceso (admin)"),
                     ]
                 )
