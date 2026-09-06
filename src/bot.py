@@ -543,19 +543,29 @@ class YTRemoteBot:
         """Crea la tarjeta persistente del mini reproductor en un chat.
 
         Primera creacion: se usa una FOTO (miniatura) con caption + teclado en
-        un solo mensaje. Si el tema no tiene miniatura, se crea como texto.
+        un solo mensaje. Si el tema no tiene miniatura o falla el envio de foto,
+        se crea como texto con botones.
         """
         text = self._track_status_text()
         thumb = self._thumbnail_for(self.queue.current) if self.queue.current else ""
         try:
             if thumb:
-                msg = await self._app.bot.send_photo(
-                    chat_id,
-                    photo=thumb,
-                    caption=text,
-                    reply_markup=self._control_keyboard(),
-                )
-                self._card_is_photo = True
+                try:
+                    msg = await self._app.bot.send_photo(
+                        chat_id,
+                        photo=thumb,
+                        caption=text,
+                        reply_markup=self._control_keyboard(),
+                    )
+                    self._card_is_photo = True
+                except Exception as exc_photo:  # noqa: BLE001
+                    logger.warning("Fallo send_photo, cayendo a send_message: %s", exc_photo)
+                    msg = await self._app.bot.send_message(
+                        chat_id,
+                        text,
+                        reply_markup=self._control_keyboard(),
+                    )
+                    self._card_is_photo = False
             else:
                 msg = await self._app.bot.send_message(
                     chat_id,
@@ -1060,7 +1070,15 @@ class YTRemoteBot:
             await query.message.delete()
         except Exception as exc:  # noqa: BLE001
             logger.warning("No se pudo borrar el listado de resultados: %s", exc)
-            await query.edit_message_text("▶️ Listo, reproduciendo...")
+            try:
+                await query.edit_message_text("▶️ Listo, reproduciendo...")
+            except Exception as exc2:  # noqa: BLE001
+                logger.warning("No se pudo editar mensaje tras fallo de borrado: %s", exc2)
+
+        # Forzar creación de tarjeta fresca: limpiar estado previo por si quedó
+        # de una sesión anterior y coincidía con el chat actual.
+        self._card_chat_id = None
+        self._card_message_id = None
 
         # ANCLA DE LA RADIO: ya quedó fijada en el /buscar, con el texto que va
         # antes del guion. Aquí solo se propaga al item; el artista NUNCA se
