@@ -736,18 +736,22 @@ class YTRemoteBot:
             return item.channel
         return ""
 
-    async def _pick_next_candidate(self, current: QueueItem) -> tuple[QueueItem | None, bool]:
+    async def _pick_next_candidate(
+        self, current: QueueItem
+    ) -> tuple[QueueItem | None, bool, bool]:
         """Fase A: decide cual es el siguiente a reproducir.
 
         Prioridad:
         1. Si la cola (playlist del usuario) tiene items, ese es el siguiente.
         2. Si no, radio por semilla: busca "una parecida" al track actual.
 
-        Devuelve (candidato, vino_de_la_cola).
+        Devuelve (candidato, vino_de_la_cola, hubo_error_de_red). El tercer
+        flag distingue "la radio se acabo" (catalogo agotado) de "no pude
+        buscar" (red caida / yt-dlp fallo) para dar un mensaje util al user.
         """
         peeked = self.queue.peek(0)
         if peeked is not None:
-            return peeked, True
+            return peeked, True, False
 
         # Radio por semilla: buscar por el ARTISTA que el usuario escribió en la
         # lupa (el ancla de sesion) o, si arranco de un link/playlist, por el
@@ -755,26 +759,28 @@ class YTRemoteBot:
         # es un filtro estricto, no una derivacion de artista.
         seed = self._artist_seed(current)
         if not seed:
-            return None, False
+            return None, False, False
         # Pedir mas resultados: mas catalogo del artista para poder avanzar
         # sin repetir (la radio busca 50 y elige entre los no-recientes).
         try:
             results = await asyncio.to_thread(search, seed, 50)
-        except Exception:
-            return None, False
+        except Exception as exc:
+            logging.getLogger(__name__).warning(
+                "Error en busqueda de radio '%s': %s", seed, exc
+            )
+            return None, False, True
 
-        def _candidate(r) -> tuple[QueueItem, bool]:
-            # El candidato de radio guarda el ancla que lo genero (no su
-            # canal): es lo que mantiene la cadena de la radio.
+        def _candidate(r) -> tuple[QueueItem, bool, bool]:
             return (
                 QueueItem(
                     url=r.url,
                     title=r.title,
-                    duration_seconds=r.duration_seconds,
+                    duration_seconds=r.duration,
                     thumbnail=r.thumbnail,
                     channel=r.channel,
                     artist=seed,
                 ),
+                False,
                 False,
             )
 
@@ -785,7 +791,7 @@ class YTRemoteBot:
         # "Denicher Pol - Inexplicable" por suerte).
         anchor = self._normalizar(seed)
         if not anchor:
-            return None, False
+            return None, False, False
         for r in results:
             if r.url == current.url or self.queue.is_recent(r.url):
                 continue
@@ -798,14 +804,26 @@ class YTRemoteBot:
                 continue
             if anchor in self._normalizar(r.title) or anchor in self._normalizar(r.channel):
                 return _candidate(r)
-        return None, False
+        return None, False, False
 
-    def _radio_over_message(self) -> str:
-        """Aviso cuando la radio estricta no encuentra mas temas del artista."""
+    def _radio_over_message(self, por_error: bool = False) -> str:
+        """Aviso cuando la radio estricta no encuentra mas temas del artista.
+
+        Args:
+            por_error: si es True, el motivo fue un fallo de red y se sugiere
+                usar /lista en vez de asumir que se acabo el catalogo.
+        """
         ancla = self._radio_artist
         if ancla:
-            return f"Se acabó la radio de {ancla}: no hay mas canciones de este artista en YouTube."
-        return "No encontre otra cancion para la radio."
+            if por_error:
+                return (
+                    f"No pude buscar la siguiente cancion de {ancla} "
+                    f"(error de red). Usa /lista para elegir otro tema."
+                )
+            return f"Se acabo la radio de {ancla}: no hay mas canciones de este artista en YouTube. Usa /lista para elegir otro tema."
+        if por_error:
+            return "No pude buscar la siguiente cancion (error de red). Usa /lista para elegir otro tema."
+        return "No encontre otra cancion para la radio. Usa /lista para elegir."
 
     def _schedule_prefetch(self, current: QueueItem) -> None:
         """Anticipa el siguiente track (el mesonero no espera).
@@ -820,7 +838,7 @@ class YTRemoteBot:
 
         async def _flow() -> None:
             try:
-                candidate, from_queue = await self._pick_next_candidate(current)
+                candidate, from_queue, _ = await self._pick_next_candidate(current)
             except asyncio.CancelledError:
                 return
             if candidate is None:
@@ -876,16 +894,16 @@ class YTRemoteBot:
         current_item = self.queue.current
         if current_item is None:
             return
-        candidate, from_queue = None, False
+        candidate, from_queue, error = None, False, False
         if (
             self._prefetch_candidate is not None
             and self._prefetch_basis == current_item.url
         ):
             candidate, from_queue = self._prefetch_candidate
         else:
-            candidate, from_queue = await self._pick_next_candidate(current_item)
+            candidate, from_queue, error = await self._pick_next_candidate(current_item)
         if candidate is None:
-            await self._reply(None, self._radio_over_message())
+            await self._reply(None, self._radio_over_message(por_error=error))
             return
         if from_queue:
             self.queue.next()  # avanza el cursor de la playlist (bucle)
@@ -1358,16 +1376,16 @@ class YTRemoteBot:
                 return
 
             current_item = self.queue.current
-            candidate, from_queue = None, False
+            candidate, from_queue, error = None, False, False
             if (
                 self._prefetch_candidate is not None
                 and self._prefetch_basis == current_item.url
             ):
                 candidate, from_queue = self._prefetch_candidate
             else:
-                candidate, from_queue = await self._pick_next_candidate(current_item)
+                candidate, from_queue, error = await self._pick_next_candidate(current_item)
             if candidate is None:
-                await self._reply(update, self._radio_over_message())
+                await self._reply(update, self._radio_over_message(por_error=error))
                 return
             if from_queue:
                 self.queue.next()
@@ -1457,16 +1475,16 @@ class YTRemoteBot:
         # Sin stream cacheado aun: usar el candidato que la anticipacion decidio,
         # o buscar uno nuevo por semilla.
         current_item = self.queue.current
-        candidate, from_queue = None, False
+        candidate, from_queue, error = None, False, False
         if (
             self._prefetch_candidate is not None
             and self._prefetch_basis == current_item.url
         ):
             candidate, from_queue = self._prefetch_candidate
         else:
-            candidate, from_queue = await self._pick_next_candidate(current_item)
+            candidate, from_queue, error = await self._pick_next_candidate(current_item)
         if candidate is None:
-            await self._reply(update, self._radio_over_message())
+            await self._reply(update, self._radio_over_message(por_error=error))
             return
         # Navegacion pura: seteamos _current directo para evitar el doble push
         # al stack de navegacion (ya se guardo el item en _push_to_nav_back).

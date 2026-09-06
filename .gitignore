@@ -27,3 +27,19 @@ static/
 
 # Distribucion portable (se sube a GitHub release como asset)
 yt-remote-*.zip
+
+# pytest (instalado solo para testing local, no se sube)
+runtime/python/Scripts/py.test.exe
+runtime/python/Scripts/pytest.exe
+runtime/python/Lib/site-packages/pytest/
+runtime/python/Lib/site-packages/pytest_asyncio/
+runtime/python/Lib/site-packages/pygments/
+runtime/python/Lib/site-packages/colorama/
+runtime/python/Lib/site-packages/iniconfig/
+runtime/python/Lib/site-packages/packaging/
+runtime/python/Lib/site-packages/py.py
+runtime/python/Lib/site-packages/*pytest*.dist-info/
+runtime/python/Lib/site-packages/*pygments*.dist-info/
+runtime/python/Lib/site-packages/*colorama*.dist-info/
+runtime/python/Lib/site-packages/*iniconfig*.dist-info/
+runtime/python/Lib/site-packages/*packaging*.dist-info/

@@ -341,7 +341,7 @@ def test_radio_gate_strict_excludes_covers():
     try:
         for idx, (results, expected) in enumerate(cases):
             bot_mod.search = lambda q, n, _r=results: _r
-            candidate, from_queue = asyncio.run(b._pick_next_candidate(current))
+            candidate, from_queue, _ = asyncio.run(b._pick_next_candidate(current))
             got = candidate.url if candidate else None
             assert got == expected, f"caso {idx}: {got} != {expected}"
     finally:
@@ -499,7 +499,7 @@ async def test_cache_expired_retries_once():
     bot_mod.resolve_stream_url = fake
     try:
         async def _no_candidate(current=None):
-            return None, False
+            return None, False, False
 
         b._pick_next_candidate = _no_candidate  # evita radio/red real
         upd = FakeUpdate("ctl:next", chat_id=44)
@@ -618,9 +618,10 @@ async def test_nav_prev_next_cycle_radio():
         # que solo probamos el camino de la pila back/forward.
         b._radio_artist = ""
         # Repositorio de "candidatos" para cuando next tiene que elegir uno nuevo.
-        candidates = iter([QueueItem(url="B", title="B"), None])
+        candidates = iter([(QueueItem(url="B", title="B"), False), (None, False)])
         async def fake_pick(_current):
-            return next(candidates), False
+            item, err = next(candidates)
+            return item, False, err
         b._pick_next_candidate = fake_pick
 
         # 1) Suena A (simulamos un /buscar previo que eligió este tema).
@@ -666,7 +667,7 @@ async def test_nav_next_chooses_new_candidate_when_forward_empty():
 
         new_pick = QueueItem(url="B", title="B")
         async def fake_pick(_current):
-            return new_pick, False
+            return new_pick, False, False
         b._pick_next_candidate = fake_pick
 
         await b.cmd_next(FakeUpdate("ctl:next"), SimpleNamespace(args=[]))
@@ -715,9 +716,9 @@ async def test_nav_playlist_unaffected():
         ]
         b.queue.set_playlist(items)
         # Cursor esta en 0 (A suena). Mantenemos _items intactos.
-        fake_pick_items = [(items[1], True), (items[2], True)]
+        fake_pick_items = [(items[1], True, False), (items[2], True, False)]
         async def fake_pick(_):
-            return fake_pick_items.pop(0) if fake_pick_items else (None, False)
+            return fake_pick_items.pop(0) if fake_pick_items else (None, False, False)
         b._pick_next_candidate = fake_pick
 
         # next -> B (cursor avanza a 1)
