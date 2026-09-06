@@ -44,6 +44,8 @@ class QueueManager:
         self._cursor: int = 0
         self._current: QueueItem | None = None
         self._history: deque[str] = deque(maxlen=self._MAX_HISTORY)
+        # Pila de items reproducidos en modo radio: /prev vuelve al anterior.
+        self._history_items: deque[QueueItem] = deque(maxlen=self._MAX_HISTORY)
 
     @property
     def has_playlist(self) -> bool:
@@ -71,6 +73,8 @@ class QueueManager:
     def set_current(self, item: QueueItem | None) -> None:
         """Modo radio: marca el item suelto como actual (descarta la playlist)."""
         self._note_played(self._current)
+        if self._current is not None:
+            self._history_items.append(self._current)
         self._current = item
         self._items = []
         self._cursor = 0
@@ -96,7 +100,29 @@ class QueueManager:
             self._cursor = (self._cursor + 1) % len(self._items)
             return self._items[self._cursor]
         self._note_played(self._current)
+        if self._current is not None:
+            self._history_items.append(self._current)
         self._current = None
+        return None
+
+    def previous(self) -> QueueItem | None:
+        """Retrocede al item anterior.
+
+        Con playlist: retrocede el cursor con wrap (simetrico a next()).
+        Sin playlist (radio): vuelve a la cancion reproducida antes de la
+        actual (la saca del historico de items y la pone como actual).
+        Devuelve None si no hay item anterior.
+        """
+        if self._items:
+            current = self._items[self._cursor]
+            if len(self._items) > 1:
+                self._note_played(current)
+                self._cursor = (self._cursor - 1) % len(self._items)
+                return self._items[self._cursor]
+            return current
+        if self._history_items:
+            self._note_played(self._current)
+            return self._history_items.pop()
         return None
 
     def peek(self, index: int = 0) -> QueueItem | None:
@@ -132,3 +158,4 @@ class QueueManager:
         self._cursor = 0
         self._current = None
         self._history.clear()
+        self._history_items.clear()

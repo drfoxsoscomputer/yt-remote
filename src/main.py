@@ -23,7 +23,13 @@ def main() -> None:
     atexit.register(bot.player._quit)
 
     app = bot.build()
-    app.run_polling(allowed_updates=["message", "callback_query"])
+    # drop_pending_updates: los mensajes que llegaron mientras la PC estuvo
+    # apagada NO quedan en cola para ejecutarse (el backend los descarta).
+    # El aviso de que se perdieron lo manda el bot en post_init.
+    app.run_polling(
+        allowed_updates=["message", "callback_query"],
+        drop_pending_updates=True,
+    )
 
 
 if __name__ == "__main__":

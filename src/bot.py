@@ -7,7 +7,7 @@ Los comandos se enrutan por roles (admin > dj > user).
 import asyncio
 import logging
 
-from telegram import BotCommand, InlineKeyboardButton, InlineKeyboardMarkup, Update
+from telegram import BotCommand, InlineKeyboardButton, InlineKeyboardMarkup, InputMediaPhoto, Update
 from telegram.constants import ParseMode
 from telegram.ext import (
     Application,
@@ -51,6 +51,18 @@ class YTRemoteBot:
         self._prefetch_basis: str | None = None
         self._prefetch_candidate: tuple[QueueItem, bool] | None = None
         self._prefetch_resolved: tuple[tuple[QueueItem, bool], tuple[str, str | None]] | None = None
+        # Mini reproductor persistente: un solo mensaje editable con botones.
+        # El bot rastrea pausa y volumen porque el IPC de mpv no devuelve
+        # respuestas a comandos (la respuesta se pierde en el handle efimero).
+        self._card_chat_id: int | None = None
+        self._card_message_id: int | None = None
+        self._card_is_photo: bool = False
+        self._paused: bool = False
+        self._volume: int = 100
+        # True mientras se ejecuta una accion disparada por un boton de la
+        # tarjeta: los reply/errores van como toast (answer) y no se envian
+        # fotos de confirmacion, porque la tarjeta se re-renderiza al final.
+        self._from_card: bool = False
         self._register_owner()
 
     def _register_owner(self) -> None:
@@ -69,6 +81,8 @@ class YTRemoteBot:
     def build(self) -> Application:
         app = Application.builder().token(self.config.token).build()
 
+        # /buscar es el nombre principal; /play queda como alias.
+        app.add_handler(CommandHandler("buscar", self._require_chat(self.cmd_play)))
         app.add_handler(CommandHandler("play", self._require_chat(self.cmd_play)))
         app.add_handler(CommandHandler("start", self._require_chat(self.cmd_start)))
         app.add_handler(
@@ -101,6 +115,8 @@ class YTRemoteBot:
                 "volume", self._require_chat(self._require("dj", self.cmd_volume))
             )
         )
+        # /lista es el nombre principal; /queue queda como alias.
+        app.add_handler(CommandHandler("lista", self._require_chat(self.cmd_queue)))
         app.add_handler(CommandHandler("queue", self._require_chat(self.cmd_queue)))
         app.add_handler(CommandHandler("now", self._require_chat(self.cmd_now)))
         app.add_handler(
@@ -120,13 +136,16 @@ class YTRemoteBot:
         self._app = app
 
         async def post_init(_app: Application) -> None:
+            # Aviso de comandos perdidos: se lee el backlog ANTES de que el
+            # polling lo consuma (post_init corre antes del start).
+            await self._notify_pending_dropped(_app.bot)
             # Menú de comandos: al escribir "/" Telegram muestra esta lista.
             bot = _app.bot
             try:
                 await bot.set_my_commands(
                     [
-                        BotCommand("play", "Busca y reproduce un video o link de YouTube"),
-                        BotCommand("queue", "Ver la cola; /queue N reproduce el tema N"),
+                        BotCommand("buscar", "Busca y reproduce un video o link de YouTube"),
+                        BotCommand("lista", "Ver la lista; /lista N reproduce el tema N"),
                         BotCommand("now", "Que esta sonando"),
                         BotCommand("pause", "Pausar la reproduccion"),
                         BotCommand("resume", "Reanudar la reproduccion"),
@@ -152,6 +171,55 @@ class YTRemoteBot:
             )
         app.run_polling  # noqa: B018  (validar metodo disponible)
         return app
+
+    async def _notify_pending_dropped(self, bot) -> None:
+        """Informa al chat permitido que los comandos enviados mientras el
+        bot estuvo apagado se DESCARTARON (no quedaron en cola y no se ejecutan).
+
+        Se llama en post_init, antes de que el polling consuma el backlog.
+        Lee sin confirmar (timeout=0), arma el reporte de los comandos viejos
+        y luego hace un offset=-1 para descartar TODO el backlog pendiente.
+        Si falla la lectura, el bot arranca igual (nadie queda bloqueado).
+        """
+        if self.config.allowed_chat_id is None:
+            return
+        try:
+            pending = await bot.get_updates(timeout=0)
+        except Exception as exc:  # noqa: BLE001 - no debe tumbar el arranque
+            logger.warning("No se pudo leer el backlog acumulado: %s", exc)
+            return
+        try:
+            # Sin confirmar el offset, Telegram REENVIARIA todo en el proximo
+            # poll; un offset=-1 descarta el backlog completo (lo pendiente NO
+            # se ejecuta; se avisa abajo que se perdio).
+            await bot.get_updates(offset=-1, timeout=0)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("No se pudo descartar el backlog: %s", exc)
+
+        commands = []
+        for upd in pending:
+            msg = upd.message
+            if msg is None or msg.chat_id != self.config.allowed_chat_id:
+                continue
+            text = (msg.text or "").strip()
+            if text.startswith("/"):
+                commands.append(text)
+        if not commands:
+            return
+
+        shown = commands[:5]
+        extra = len(commands) - len(shown)
+        report = (
+            "🔌 El bot estuvo apagado y lo que enviaste NO quedo en cola ni "
+            "se ejecuto. Se descartaron estos comandos:\n"
+            + "\n".join(f"• {c}" for c in shown)
+            + (f"\n…y {extra} más." if extra else "")
+            + "\n\nEnvialos de nuevo si todavia los necesitas."
+        )
+        try:
+            await bot.send_message(self.config.allowed_chat_id, report)
+        except Exception as exc:  # noqa: BLE001 - no debe tumbar el arranque
+            logger.warning("No se pudo notificar el backlog descartado: %s", exc)
 
     def _require(self, role: str, handler):
         """Envuelve un handler exigiendo un rol minimo."""
@@ -204,6 +272,18 @@ class YTRemoteBot:
             return
         if update.callback_query:
             query = update.callback_query
+            if self._from_card:
+                # Desde un boton de la tarjeta el mensaje ya va a ser
+                # re-renderizado por el handler del control: el texto de
+                # estado/error se muestra como toast (response) y el bot
+                # no edita el mensaje.
+                try:
+                    await query.answer(
+                        text, show_alert=False
+                    )  # tooltip de respuesta
+                except Exception:
+                    pass
+                return
             try:
                 await query.answer()
             except Exception:
@@ -225,20 +305,153 @@ class YTRemoteBot:
     async def _send_track_card(
         self, update, caption: str, item: QueueItem | None
     ) -> None:
-        """Envia titulo + miniatura del tema (fallback a texto si falla la foto)."""
+        """Refresca la tarjeta persistente del mini reproductor.
+
+        Es la unica confirmacion visual: miniatura + estado + botones se
+        re-renderizan en el mismo mensaje (nada de fotos sueltas duplicadas).
+        El caption se usa solo como fallback si no hay item que reflejar.
+        """
+        if self._from_card:
+            # Desde un boton de la tarjeta, el cierre de _on_control ya
+            # re-renderiza la tarjeta en su lugar.
+            return
         if item is None:
             await self._reply(update, caption)
             return
-        thumbnail = self._thumbnail_for(item)
-        if thumbnail:
-            try:
-                await update.effective_chat.send_photo(  # type: ignore[union-attr]
-                    photo=thumbnail, caption=caption
+        chat = update.effective_chat
+        if chat is None:
+            return
+        await self._show_card(chat.id)
+
+    def _truncate(self, text: str, limit: int = 80) -> str:
+        """Trunca un texto con elipsis para que no rompa la tarjeta."""
+        text = " ".join(text.split())
+        if len(text) <= limit:
+            return text
+        return text[: limit - 1].rstrip() + "…"
+
+    def _track_status_text(self) -> str:
+        """Estado actual para la tarjeta persistente del mini reproductor.
+
+        Linea 1: estado (Sonando/Pausado). Linea 2: titulo (truncado). El
+        volumen no va en el texto: vive en la fila de botones de la tarjeta.
+        """
+        cur = self.queue.current
+        if cur is None:
+            return "No hay ninguna cancion sonando."
+        state = "⏸️ Pausado" if self._paused else "▶️ Sonando"
+        return f"{state}\n🎵 {self._truncate(cur.title)}"
+
+    def _control_keyboard(self) -> InlineKeyboardMarkup:
+        """Teclado del mini reproductor persistente.
+
+        Fila 1: ⏮ anterior | ▶/⏸ alternar play-pause (dinamico) | ⏭ siguiente | ⏹ detener
+        Fila 2: 🔊−10 | <volumen actual> | 🔊+10 | 📋 lista
+        """
+        play_pause = "▶️" if self._paused else "⏸️"
+        keyboard = [
+            [
+                InlineKeyboardButton("⏮", callback_data="ctl:prev"),
+                InlineKeyboardButton(play_pause, callback_data="ctl:pp"),
+                InlineKeyboardButton("⏭", callback_data="ctl:next"),
+                InlineKeyboardButton("⏹", callback_data="ctl:stop"),
+            ],
+            [
+                InlineKeyboardButton("🔊−10", callback_data="ctl:vol-10"),
+                InlineKeyboardButton(f"🔊 {self._volume}", callback_data="ctl:vol-info"),
+                InlineKeyboardButton("🔊+10", callback_data="ctl:vol+10"),
+                InlineKeyboardButton("📋", callback_data="ctl:lista"),
+            ],
+        ]
+        return InlineKeyboardMarkup(keyboard)
+
+    async def _render_card(
+        self, text: str, chat_id: int | None = None
+    ) -> None:
+        """Edita el mensaje persistente del mini reproductor (si existe).
+
+        Si la tarjeta es una FOTO, edita miniatura + texto + teclado juntos
+        (edit_message_media), asi al pasar de cancion cambia TODO el mensaje
+        y no queda la miniatura de la cancion anterior clavada. Si la tarjeta
+        es un mensaje de texto (sin miniatura disponible), edita solo el texto.
+
+        No envia una tarjeta nueva: para crear la primera usar _show_card.
+        """
+        if self._card_chat_id is None or self._card_message_id is None:
+            return
+        chat_id = chat_id or self._card_chat_id
+        bot = self._app.bot
+        thumb = self._thumbnail_for(self.queue.current) if self.queue.current else ""
+        try:
+            if self._card_is_photo:
+                if thumb:
+                    await bot.edit_message_media(
+                        media=InputMediaPhoto(media=thumb, caption=text),
+                        chat_id=chat_id,
+                        message_id=self._card_message_id,
+                        reply_markup=self._control_keyboard(),
+                    )
+                else:
+                    # Sin miniatura para el tema nuevo: se actualiza solo el
+                    # texto (no se puede poner un mensaje de texto sobre una
+                    # foto editando el media a vacio).
+                    await bot.edit_message_caption(
+                        caption=text,
+                        chat_id=chat_id,
+                        message_id=self._card_message_id,
+                        reply_markup=self._control_keyboard(),
+                    )
+            else:
+                await bot.edit_message_text(
+                    text,
+                    chat_id=chat_id,
+                    message_id=self._card_message_id,
+                    reply_markup=self._control_keyboard(),
                 )
+        except Exception as exc:  # noqa: BLE001 - no debe romper el control
+            if "message is not modified" in str(exc):
+                # Re-render con el mismo texto/teclado: es un no-op valido.
                 return
-            except Exception as exc:  # noqa: BLE001 - no debe romper el comando
-                logger.warning("No se pudo enviar la miniatura: %s", exc)
-        await self._reply(update, caption)
+            logger.warning("No se pudo editar la tarjeta: %s", exc)
+
+    async def _send_card(self, chat_id: int) -> None:
+        """Crea la tarjeta persistente del mini reproductor en un chat.
+
+        Primera creacion: se usa una FOTO (miniatura) con caption + teclado en
+        un solo mensaje. Si el tema no tiene miniatura, se crea como texto.
+        """
+        text = self._track_status_text()
+        thumb = self._thumbnail_for(self.queue.current) if self.queue.current else ""
+        try:
+            if thumb:
+                msg = await self._app.bot.send_photo(
+                    chat_id,
+                    photo=thumb,
+                    caption=text,
+                    reply_markup=self._control_keyboard(),
+                )
+                self._card_is_photo = True
+            else:
+                msg = await self._app.bot.send_message(
+                    chat_id,
+                    text,
+                    reply_markup=self._control_keyboard(),
+                )
+                self._card_is_photo = False
+            self._card_chat_id = chat_id
+            self._card_message_id = msg.message_id
+        except Exception as exc:  # noqa: BLE001 - no debe romper el control
+            logger.warning("No se pudo crear la tarjeta: %s", exc)
+
+    async def _show_card(self, chat_id: int) -> None:
+        """Muestra o refresca la tarjeta del mini reproductor en un chat."""
+        if self._card_chat_id is None or self._card_message_id is None:
+            await self._send_card(chat_id)
+            return
+        if self._card_chat_id != chat_id:
+            await self._send_card(chat_id)
+            return
+        await self._render_card(self._track_status_text(), chat_id)
 
     def _mpv_track_ended_callback(self) -> None:
         """Callback invocado por el reader thread cuando mpv detecta end-file.
@@ -286,19 +499,46 @@ class YTRemoteBot:
         return " ".join(cleaned.split()).strip()
 
     @staticmethod
-    def _artist_from_title(title: str) -> str:
-        """Extrae el artista del patron 'Artista - Titulo' al inicio.
+    def _artist_from_title(title: str, channel: str = "") -> str:
+        """Extrae el artista (cantante/grupo/banda) del titulo de una cancion.
 
-        El patron "X - Y" al comienzo del titulo es el tipico de la musica
-        ("KENT LEROY - Quiero Cantar del Amor (CD completo)" -> "KENT LEROY").
-        Devuelve "" si no se parece a ese patron.
+        Patrones soportados:
+        1. Normal "ARTISTA - Cancion": "KENT LEROY - Quiero Cantar del Amor" -> "KENT LEROY".
+        2. Invertido (estilo cristiano) "Cancion - Artista - Banda/Minist":
+           "IMPACTANTE - Mafe Restrepo - GP BAND - Generacion Pentecostal".
+           Con 3+ segmentos el artista es el segundo segmento.
+        3. Desempate por canal: si el canal del video (quien lo subio) coincide
+           con un segmento del titulo, ese segmento ES el grupo real (el canal
+           suele ser la iglesia/banda del tema, p.ej. "Generacion Pentecostal").
+
+        Prioridad: (3) desempate por canal > (1) formato normal > (2) invertido.
+        Devuelve "" si no se parece a ningun patron.
         """
         import re as _re
 
-        m = _re.match(r"^\s*([^\-–—]+?)\s*[–—-]\s+", title)
-        if not m:
+        cleaned = _re.sub(r"[\(\[].*?[\)\]]", "", title or "")
+        parts = [
+            p.strip().strip(" -–—")
+            for p in _re.split(r"[–—-]", cleaned)
+            if p.strip().strip(" -–—")
+        ]
+        if not parts:
             return ""
-        return " ".join(m.group(1).split()).strip(" -–—")
+
+        if channel:
+            norm_channel = YTRemoteBot._normalizar(channel)
+            if norm_channel:
+                for part in parts:
+                    if YTRemoteBot._normalizar(part) == norm_channel:
+                        return part
+
+        if len(parts) == 2:
+            return parts[0]
+
+        if len(parts) >= 3:
+            return parts[1]
+
+        return ""
 
     @staticmethod
     def _normalizar(s: str) -> str:
@@ -329,7 +569,7 @@ class YTRemoteBot:
             return self._radio_artist
         if item.artist:
             return item.artist
-        artist = self._artist_from_title(item.title)
+        artist = self._artist_from_title(item.title, item.channel)
         if artist:
             return artist
         return self._radio_seed(item.title)
@@ -506,8 +746,8 @@ class YTRemoteBot:
         lines: list[str] = []
 
         # user
-        lines.append("• /play <busqueda o link> — busca y reproduce")
-        lines.append("• /queue — ver la cola; /queue N reproduce el tema N")
+        lines.append("• /buscar <busqueda o link> — busca y reproduce (escribe PRIMERO el artista o grupo)")
+        lines.append("• /lista — ver la lista; /lista N reproduce el tema N")
         lines.append("• /now — que esta sonando")
 
         if level >= 1:  # dj
@@ -519,6 +759,11 @@ class YTRemoteBot:
         if level >= 2:  # admin
             lines.append("• /adduser <id> <rol> — dar acceso con un rol")
             lines.append("• /removeuser <id> — quitar acceso")
+
+        lines.append("")
+        lines.append("Consejo: escribe PRIMERO el artista y DESPUES la cancion,")
+        lines.append("ej: /buscar Mafe Restrepo Impactante. Si lo inviertes,")
+        lines.append("la radio del siguiente tema puede saltarse a otra cancion.")
 
         return "\n".join(lines)
 
@@ -563,7 +808,7 @@ class YTRemoteBot:
         text = (context.args or [])
         query = " ".join(text).strip()
         if not query:
-            await self._reply(update, "Uso: /play <busqueda o link de YouTube>")
+            await self._reply(update, "Uso: /buscar <busqueda o link de YouTube>")
             return
         # Nuevo /play = nueva intencion: se descarta el ancla anterior de la
         # radio. Se redefine cuando el usuario elige la cancion (on_callback)
@@ -601,7 +846,7 @@ class YTRemoteBot:
                 first = items[0]
                 # Ancla de la radio: se fija con el primer track de la
                 # playlist (su artista), para cuando se agote el bucle.
-                artist = self._artist_from_title(first.title)
+                artist = self._artist_from_title(first.title, first.channel)
                 if artist:
                     self._radio_artist = artist
                 started = await self._play_item(update, first, preserve_current=True)
@@ -609,7 +854,7 @@ class YTRemoteBot:
                     await self._reply(
                         update,
                         f"▶️ Playlist ({len(tracks)}): {first.title}\n"
-                        f"Bucle activo: suena en orden y se repite; /queue para verla.",
+                        f"Bucle activo: suena en orden y se repite; /lista para verla.",
                     )
                 return
 
@@ -646,15 +891,21 @@ class YTRemoteBot:
 
         reply_markup = InlineKeyboardMarkup(keyboard)
         # Listado de resultados sin miniatura: la miniatura se muestra al
-        # elegir un video (ver on_callback).
+        # elegir un video (es la tarjeta persistente del mini reproductor).
         await context.bot.send_message(
             update.effective_chat.id,
-            "Elegi un video:",
+            "Elegi un video:\n\n"
+            "Consejo: escribe PRIMERO el artista y DESPUES la cancion, "
+            "ej: /buscar Mafe Restrepo Impactante.",
             reply_markup=reply_markup,
         )
 
     async def on_callback(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         query = update.callback_query
+        if query.data and query.data.startswith("ctl:"):
+            # Un boton de la tarjeta persistente del mini reproductor.
+            await self._on_control(update, context, query.data.split(":", 1)[1])
+            return
         await query.answer()
         if not query.data or not query.data.startswith("pick:"):
             return
@@ -663,29 +914,23 @@ class YTRemoteBot:
             await query.edit_message_text("Esa busqueda ya expiro, busca de nuevo.")
             return
 
-        # Confirmar la eleccion pidiendo reproducir.
-        await query.edit_message_text(f"Reproduciendo: {result.title}")
-
-        # Mostrar la miniatura del video elegido mas su titulo.
-        if result.thumbnail:
-            try:
-                await context.bot.send_photo(
-                    update.effective_chat.id,
-                    photo=result.thumbnail,
-                    caption=f"Reproduciendo: {result.title}",
-                )
-            except Exception as exc:  # noqa: BLE001
-                logger.warning("No se pudo mostrar la miniatura elegida: %s", exc)
-                await update.effective_chat.send_message(
-                    f"▶️ Reproduciendo: {result.title}"
-                )
+        # Confirmar la eleccion: la tarjeta persistente (mini reproductor con
+        # miniatura + estado + botones) ES la unica confirmacion; _play_item
+        # la crea/actualiza al reproducir. Se quita el listado de resultados
+        # para no dejar el titulo duplicado en el chat.
+        try:
+            await query.message.delete()
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("No se pudo borrar el listado de resultados: %s", exc)
+            await query.edit_message_text("▶️ Listo, reproduciendo...")
 
         # ANCLA DE LA RADIO: la primera reproduccion del usuario es la que
         # define el artista. Se captura aca, UNA sola vez, de la cancion
-        # elegida ("KENT LEROY - Quiero Cantar del Amor" -> "KENT LEROY").
-        # Si esa cancion no trae "Artista - Cancion" en el titulo, se usa
-        # el texto del /play (el usuario lo escribio buscando a alguien).
-        artist = self._artist_from_title(result.title)
+        # elegida ("KENT LEROY - Quiero Cantar del Amor" -> "KENT LEROY";
+        # "IMPACTANTE - Mafe Restrepo - GP BAND - ..." -> "Mafe Restrepo").
+        # Si esa cancion no trae artista en el titulo, se usa el texto del
+        # /play (el usuario lo escribio buscando a alguien).
+        artist = self._artist_from_title(result.title, result.channel)
         if not artist and self._last_query:
             artist = self._last_query
         self._radio_artist = artist
@@ -740,12 +985,20 @@ class YTRemoteBot:
         try:
             await self.player.load(stream_url, audio_url)
             await self.player.play()
+            self._paused = False
             if not preserve_current:
                 self.queue.set_current(item)
         except RuntimeError as exc:
             await self._reply(update, f"No se pudo reproducir: {exc}")
             return False
         self._schedule_prefetch(item)
+        # La tarjeta del mini reproductor refleja el tema nuevo. En acciones
+        # del usuario se crea/edita en su chat; en el auto-advance (update
+        # None) se re-edita la ultima tarjeta con el titulo nuevo.
+        if update is not None:
+            await self._show_card(update.effective_chat.id)
+        elif self._card_chat_id is not None and self._card_message_id is not None:
+            await self._render_card(self._track_status_text(), self._card_chat_id)
         return True
 
     async def _load_url(
@@ -761,12 +1014,93 @@ class YTRemoteBot:
             await self._reply(update, f"▶️ Reproduciendo: {caption or url}")
 
     async def cmd_pause(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        if self.queue.current is None or not self.player.is_running:
+            await self._reply(update, "No hay ninguna reproduccion activa.")
+            return
         await self.player.pause()
+        self._paused = True
         await self._reply(update, "⏸️ Pausado")
 
     async def cmd_resume(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        if self.queue.current is None or not self.player.is_running:
+            await self._reply(update, "No hay ninguna reproduccion activa.")
+            return
         await self.player.play()
+        self._paused = False
         await self._reply(update, "▶️ Reanudando")
+
+    async def _toggle_play_pause(self) -> None:
+        """Alterna reproducir/pausar (boton ▶/⏸ de la tarjeta)."""
+        if self.queue.current is None or not self.player.is_running:
+            return
+        if self._paused:
+            await self.player.play()
+            self._paused = False
+        else:
+            await self.player.pause()
+            self._paused = True
+
+    async def _on_control(
+        self,
+        update: Update,
+        context: ContextTypes.DEFAULT_TYPE,
+        action: str,
+    ) -> None:
+        """Maneja los botones de la tarjeta persistente (callback ctl:*).
+
+        Cada accion reusa la logica de los comandos equivalentes, pero con
+        _from_card activo: no se mandan fotos de confirmacion y los mensajes
+        de estado/error van como toast. Al final la tarjeta se re-renderiza
+        en su lugar para reflejar siempre el estado actual.
+        """
+        query = update.callback_query
+        self._card_chat_id = update.effective_chat.id
+        self._card_message_id = query.message.message_id
+        chat_id = self._card_chat_id
+
+        self._from_card = True
+        reflect_status = True
+        try:
+            if action == "pp":
+                await self._toggle_play_pause()
+            elif action == "prev":
+                await self.cmd_prev(update, context)
+            elif action == "next":
+                await self.cmd_next(update, context)
+            elif action == "stop":
+                await self.cmd_stop(update, context)
+                self._paused = False
+            elif action in ("vol-10", "vol+10"):
+                delta = -10 if action == "vol-10" else 10
+                self._volume = max(0, min(100, self._volume + delta))
+                if self.player.is_running:
+                    await self.player.set_volume(self._volume)
+            elif action == "vol-info":
+                # Boton de estado: el volumen ya se lee en su etiqueta.
+                await query.answer(f"Volumen: {self._volume}%")
+                reflect_status = False
+            elif action == "lista":
+                # El boton 📋 muestra la lista encima de la tarjeta: se
+                # edita el mismo mensaje, ahora con el listado (los botones
+                # de control siguen pegados abajo).
+                text = self._queue_list_text() or "La lista esta vacia."
+                await self._render_card(text, chat_id)
+                reflect_status = False  # no pisa la lista recien mostrada
+            else:
+                return
+        finally:
+            self._from_card = False
+
+        # Estado final: el texto de la tarjeta refleja el cambio de la
+        # accion (nuevo tema, pausa, volumen, detenido, etc.).
+        if reflect_status:
+            await self._render_card(self._track_status_text(), chat_id)
+        try:
+            # Quita el spinner del boton. Si un _reply interno ya respondio
+            # con un toast, esto falla callado y conserva ese toast.
+            await query.answer()
+        except Exception:
+            pass
 
     async def cmd_next(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         """Salta YA al siguiente tema: corta el actual y reproduce el siguiente.
@@ -784,6 +1118,7 @@ class YTRemoteBot:
             try:
                 await self.player.load(stream_url, audio_url)
                 await self.player.play()
+                self._paused = False
             except RuntimeError as exc:
                 await self._reply(update, f"No se pudo saltar: {exc}")
                 return
@@ -817,8 +1152,25 @@ class YTRemoteBot:
         )
 
     async def cmd_prev(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-        await self.player.command("cycle", "ab-loop")  # placeholder; sin historial no aplica
-        await self._reply(update, "No hay cancion anterior en la cola.")
+        """Retrocede al tema anterior.
+
+        Con playlist fija: mueve el cursor una posicion atras (con wrap,
+        simetrico a /next). En modo radio: vuelve a la cancion reproducida
+        antes de la actual (historico de items). Si no hay anterior, avisa.
+        """
+        if self.queue.current is None:
+            await self._reply(update, "No hay ninguna cancion reproduciendose.")
+            return
+        item = self.queue.previous()
+        if item is None:
+            await self._reply(update, "No hay cancion anterior en la cola.")
+            return
+        from_playlist = self.queue.has_playlist
+        started = await self._play_item(update, item, preserve_current=from_playlist)
+        if started:
+            await self._send_track_card(
+                update, f"⏮️ Anterior: {item.title}", item
+            )
 
     async def cmd_stop(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         await self.player.stop()
@@ -826,15 +1178,27 @@ class YTRemoteBot:
         self._cancel_prefetch()
         self._queue_advance_needed = False
         self._radio_artist = ""
+        self._paused = False
+        await self._render_card(self._track_status_text())
         await self._reply(update, "⏹️ Detenido y cola limpia")
 
     async def cmd_volume(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-        try:
-            vol = int(context.args[0]) if context.args else 50
-        except (ValueError, IndexError):
+        if not context.args:
             await self._reply(update, "Uso: /volume <0-100>")
             return
+        try:
+            vol = int(context.args[0])
+        except ValueError:
+            await self._reply(update, "El volumen debe ser un numero entre 0 y 100.")
+            return
+        if not 0 <= vol <= 100:
+            await self._reply(update, "El volumen debe estar entre 0 y 100.")
+            return
+        if not self.player.is_running:
+            await self._reply(update, "No hay ninguna reproduccion activa: el reproductor no esta corriendo.")
+            return
         await self.player.set_volume(vol)
+        self._volume = vol
         await self._reply(update, f"🔊 Volumen: {vol}")
 
     async def cmd_queue(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -845,13 +1209,13 @@ class YTRemoteBot:
             except ValueError:
                 n = None
 
-        # Reproducir el tema de la posición elegida (/queue N). La cola es
+        # Reproducir el tema de la posición elegida (/lista N). La lista es
         # fija y queda intacta: jump_to solo mueve el cursor (bucle).
         if n is not None:
             cur = self.queue.current
             item = self.queue.jump_to(n)
             if item is None:
-                await self._reply(update, "Numero fuera de rango. /queue para ver la lista.")
+                await self._reply(update, "Numero fuera de rango. /lista para ver la lista.")
                 return
             if item is cur:
                 await self._reply(update, f"Ya esta sonando: {item.title}")
@@ -863,11 +1227,23 @@ class YTRemoteBot:
 
         # Lista visible: la playlist completa SIEMPRE con el actual marcado
         # [▶️] en su posición (los 25 temas se ven siempre, no se consumen).
+        # La lista la renderiza un helper reutilizado por el boton 📋 de la
+        # tarjeta persistente, para que ambos muestren el mismo formato.
+        text = self._queue_list_text()
+        if text is None:
+            await self._reply(update, "La lista esta vacia.")
+            return
+        await self._reply(update, text)
+
+    def _queue_list_text(self) -> str | None:
+        """Texto de la lista actual (None si esta vacia).
+
+        Compartido entre /lista y el boton 📋 de la tarjeta persistente.
+        """
         cur = self.queue.current
         items = self.queue.all()
         if cur is None and not items:
-            await self._reply(update, "La cola esta vacia.")
-            return
+            return None
         lines = []
         if items:
             for i, it in enumerate(items, start=1):
@@ -876,7 +1252,7 @@ class YTRemoteBot:
         else:
             if cur is not None:
                 lines.append(f"1. [▶️] {cur.title}")
-        await self._reply(update, "Cola:\n" + "\n".join(lines))
+        return "Lista:\n" + "\n".join(lines)
 
     async def cmd_now(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         cur = self.queue.current

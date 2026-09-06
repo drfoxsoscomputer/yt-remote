@@ -78,6 +78,11 @@ class Player:
             and self._track_active
         )
 
+    @property
+    def is_running(self) -> bool:
+        """True si hay un proceso mpv vivo (aunque no tenga track cargado)."""
+        return self._proc is not None and self._proc.poll() is None
+
     def _pipe_ready(self) -> bool:
         """True si el named pipe de mpv ya existe en el sistema."""
         return os.path.exists(MPV_PIPE)
