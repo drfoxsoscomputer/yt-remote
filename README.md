@@ -78,6 +78,21 @@ termina. Usá `/buscar` con otro nombre para cambiar de cantante.
 Por defecto solo el dueño (vos) es admin. Usá `/adduser` con el ID de
 Telegram de la otra persona para darle acceso.
 
+## Variables de entorno
+
+La primera vez que ejecutás `ytremote.bat`, el wizard te guía para crear
+el archivo `.env` con tus datos. También podés crearlo a mano copiando
+`.env.example` y completando:
+
+| Variable | Obligatoria | Cómo obtenerla |
+|----------|-------------|----------------|
+| `TELEGRAM_TOKEN` | sí | Crear bot con [@BotFather](https://t.me/BotFather) → `/newbot` |
+| `OWNER_ID` | sí | Tu ID numérico de Telegram con [@userinfobot](https://t.me/userinfobot) |
+| `ALLOWED_CHAT_ID` | no | Se configura solo con el primer `/start` del dueño |
+
+El `.env` **no se sube a GitHub** (está en `.gitignore`). El `.env.example`
+muestra el formato y es seguro versionarlo.
+
 ## Configuración extra
 
 Editá `config.json` para ajustar:
