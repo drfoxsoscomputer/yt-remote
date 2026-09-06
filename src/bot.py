@@ -924,28 +924,17 @@ class YTRemoteBot:
         lines: list[str] = []
 
         # user
-        lines.append("• /buscar <artista> - <cancion> — buscar y reproducir en 1 paso (lo que va antes del guion es el artista)")
-        lines.append("• /buscar <artista> — buscar un artista; el texto completo es el artista")
+        lines.append("• /buscar <artista> - <cancion> — buscar y reproducir en 1 paso")
+        lines.append("• /buscar <artista> — buscar un artista")
         lines.append("• /buscar <link> — reproducir un link de YouTube directo")
         lines.append("• /lista — ver la lista; /lista N reproduce el tema N")
 
         if level >= 1:  # dj
-            lines.append("• /next — siguiente tema del mismo artista")
-            lines.append("• /stop — detener y limpiar")
             lines.append("• /volume <0-100> — ajustar el volumen")
 
         if level >= 2:  # admin
-            lines.append("• /pause /resume — pausar y reanudar (admin)")
-            lines.append("• /now — que esta sonando (admin)")
             lines.append("• /adduser <id> <rol> — dar acceso (admin, dj, user)")
             lines.append("• /removeuser <id> — quitar acceso")
-
-        lines.append("")
-        lines.append("Tarjeta de reproduccion: cada cancion muestra botones para")
-        lines.append("pausar, siguiente, anterior, volumen y lista. ⏭ salta a la")
-        lines.append("siguiente cancion del mismo artista. La radio continua sola")
-        lines.append("al terminar cada tema. Para cambiar de artista, usa /buscar")
-        lines.append("con el nombre del nuevo artista.")
 
         return "\n".join(lines)
 
