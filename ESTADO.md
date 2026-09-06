@@ -17,12 +17,11 @@ Bot de Telegram que controla la reproduccion de YouTube (video en la PC donde co
 - `src/player.py` — clase Player, IPC de mpv por named pipe `\\.\pipe\mpv-ytremote`. Usa `--idle=yes` para mantener el pipe vivo.
 - `src/queue_manager.py` — QueueManager + QueueItem (deque FIFO).
 - `src/config.py` — load_config(); lee token PRIMERO de .env, fallback config.json; resuelve mpv_path relativo al PROJECT_ROOT; error claro si falta token; lee OWNER_ID y ALLOWED_CHAT_ID.
-- `src/setup_cli.py` — utilidades para ytremote.bat: is_configured(), write_env(), set/get_allowed_chat_id(). Escribe el .env sin tocar archivos a mano.
-- `src/roles.py` — RoleManager (admin/dj/user); has_role por rango; persiste data/roles.json.
+- `src/setup_cli.py` — utilidades para ytremote.bat: is_configured(), write_env(), set/get_allowed_chat_id(), y el comando `launch` (wizard interactivo con acentos/ñ + arranque del bot). Escribe el .env sin tocar archivos a mano.
 - `config.json` — NO sensibles: mpv_path, default_role, max_results; token placeholder.
 - `.env` — TOKEN REAL + OWNER_ID + ALLOWED_CHAT_ID (ignorado por git).
 - `.env.example` — plantilla segura de configuracion (versionada).
-- `ytremote.bat` — UNICO archivo de arranque: si .env vacio muestra formulario (pide token e ID, guiado); si listo, arranca el bot. Mensajes amigables, sin jerga tecnica.
+- `ytremote.bat` — lanzador minimo ASCII estilo Albion (4 lineas, sin BOM/acentos/chcp): `title` + llamada a `setup_cli.py launch` + pause. Todo el texto con acentos/ñ vive en Python (la consola cmd no los soporta en archivos de lote).
 - `GUIA.txt` — guia de usuario en texto plano (como crear bot, conseguir ID, uso, problemas).
 - `.gitignore` — ignora .env, venv, data/roles.json, __pycache__, *.log.
 - `runtime/` — Python 3.13.9 embebido + mpv portable (SE SUBEN al repo, por decision del usuario: todo incluido).
@@ -30,7 +29,7 @@ Bot de Telegram que controla la reproduccion de YouTube (video en la PC donde co
 ## Estado actual
 - RELEASE v0.1.0 PUBLICADO (2026-09-05), ZIP re-subido CORREGIDO: https://github.com/drfoxsoscomputer/yt-remote/releases/tag/v0.1.0. La historia se reescribió DOS veces con git filter-repo por claves placeholder que vienen DENTRO del código vendido de yt-dlp (shahid.py=claves AWS, cybrary/googledrive/stacommu/wrestleuniverse=`AIza...` = google_api_key). GitHub push protection bloqueó y secret scanning dejó 5 alertas abiertas; se forzó main a la historia limpia (0388cc1→7659e30). Verificado a nivel de BYTES (no de lo que muestra la consola): CERO patrones de credencial en el remoto (clone fresco), en todo el historial, en los textos del ZIP y en ESTADO. LECCION CLAVE: (1) revisar yt-dlp vendido por claves ANTES de commitear; (2) los valores que muestra la consola de tooling pueden venir ENMASCARADOS (`__VG_GOOGLE_API_KEY_...` en pantalla = `AIza...` en bytes reales) — verificar con conteos por regex con python, no con ojos; (3) usar filter-repo con `regex:` no con literales copiados de pantalla.
 - `.pyc` de los extractores con claves: borrados localmente (no estaban trackeados ni entran al ZIP).
-- Idiomas: GUIA.txt, README.md y .bat con acentos y ñ (español neutro); ytremote.bat UTF-8 con BOM + chcp 65001 (el BOM + acentos aún sin probar a fondo en cmd — pendiente micro-test).
+- Idiomas: GUIA.txt, README.md y .py con acentos y ñ (español neutro, sin voseo); los .bat son 100% ASCII (lanzador mínimo estilo Albion — cmd.exe no soporta UTF-8 en archivos de lote: BOM rompe `@echo off`, los acentos corrompen el parsing). Todo el texto con acentos/ñ de los .bat se movió al Python (setup_cli.py launch imprime el wizard; mpv-register/unregister delegan su mensaje de error a `python -c`). Verificado en consola real de Windows: los acentos salen perfectos porque Python 3.13 escribe con la API Unicode de la consola.
 - MODELO NUEVO (imita el flujo de YouTube): `/play` reproducе YA, sin cola manual. Un nuevo /play corta lo que suene (loadfile replace). Al terminar una canción el bot sigue solo con radio por semilla (busca "una parecida" al track actual).
 - Prefetch 2 fases (cero silencio): Fase A decide el candidato al reproducir (playlist > radio semilla); Fase B resuelve el stream ~45s antes del final (las URLs de googlevideo expiran) y lo cachea. El end-file salta al stream cacheado al instante. Un /play del usuario cancela el prefetch.
 - Playlists/mixes: /play con link de list/mix expande todos los tracks (expand_playlist con extract_flat) y arma una PLAYLIST FIJA (set_playlist): el primero suena YA, el cursor avanza en orden y da la vuelta (BUCLE) al llegar al final; nunca se consumen (la lista queda siempre completa en /queue). Un /play nuevo (playlist o cancion suelta) reemplaza la reproduccion entera.
@@ -66,7 +65,7 @@ Bot de Telegram que controla la reproduccion de YouTube (video en la PC donde co
 
 ## Pendientes / ToDo
 - [ ] CERRAR las 5 alertas de secret scanning (siguen `open` aunque las claves ya no existen): marcarlas resolved/false_positive vía API (requiere decisión del usuario).
-- [ ] PENDIENTE SIN PROBAR: ytremote.bat con BOM+acentos en cmd real (el test previo colgó por un loop de mi diseño, no por el .bat necesariamente) — rehacer con stdin de respuestas y stub de python.exe.
+- [ ] PENDIENTE SIN PROBAR: ytremote.bat en doble clic real con el wizard interactivo de setup_cli.py launch (verificado en sandbox con pipe + consola real; falta el doble clic del usuario).
 - [ ] FASE 2 (aprobada 2026-09-05): mini reproductor con botones en Telegram — /buscar (alias /play), /lista (alias /queue con botones "▶️ N"), tarjeta persistente editada con [⏮ ▶/⏸ ⏭ ⏹] + [🔊−10 🔊+10 📋], /prev REAL (quitar el placeholder `cycle ab-loop`), arreglar /volume (exigir arg, validar 0-100, avisar si mpv no esta vivo), y menu "/" (setMyCommands) SOLO con comandos instantaneos sin argumento; ayuda/docs con el orden completo. Actualizar README/GUIA al final.
 - [ ] PROBAR EN VIVO con Telegram: playlist fija (25 temas siempre visibles, bucle, /queue N salta sin perder la lista), radio por artista (elegir otro musico en /play y verificar que /next da canciones de ESE artista), y que /play nuevo corte el bucle.
 - [ ] Verificar el formulario real de ytremote.bat en una consola cmd de Windows (pedido de token/ID).

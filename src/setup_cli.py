@@ -70,6 +70,92 @@ def set_allowed_chat_id(chat_id: int | str | None) -> None:
     _write(env)
 
 
+def launch_wizard() -> int:
+    """Guía interactiva de primera configuración con caracteres acentuados.
+
+    Este texto vive en Python (y no en un .bat) porque la consola de
+    Windows no muestra bien los acentos y las ñ en archivos de lote. Una
+    vez configurado, arranca el bot de forma bloqueante.
+    """
+    import subprocess
+    import sys
+
+    runtime = PROJECT_ROOT / "runtime"
+    py_exe = runtime / "python" / "python.exe"
+    mpv_exe = runtime / "mpv" / "mpv.exe"
+    main_py = PROJECT_ROOT / "src" / "main.py"
+
+    if not py_exe.exists() or not mpv_exe.exists():
+        print()
+        print("=" * 50)
+        print("  YT-Remote")
+        print("=" * 50)
+        print()
+        print("Algo no está bien instalado en esta carpeta.")
+        print("Vuelve a descargar la versión completa desde el repositorio")
+        print("y descomprímela de nuevo. La guía está en GUIA.txt")
+        print()
+        input("Pulsa Enter para cerrar...")
+        return 1
+
+    if not is_configured():
+        while True:
+            print()
+            print("=" * 50)
+            print("  YT-Remote - Primera configuración")
+            print("=" * 50)
+            print()
+            print("Faltan tus datos. Solo se hace esto una vez.")
+            print()
+            print("El TOKEN es la llave de tu bot. Para conseguirlo:")
+            print("  1. Abre Telegram y busca a @BotFather")
+            print("  2. Escríbele  /newbot   y sigue los pasos")
+            print("  3. Te dará un código tipo:  123456:AAHxh...")
+            print("     Ese es tu TOKEN. Pega el código completo aquí.")
+            print()
+            token = input("  Pega tu TOKEN aquí: ").strip()
+            if not token or token == "TU_TOKEN_AQUI":
+                print()
+                print("[Error] El TOKEN no puede estar vacío. Vuelve a intentar.")
+                print()
+                continue
+
+            print()
+            print("Tu ID numérico de Telegram (para que te reconozca como dueño):")
+            print("  1. Abre Telegram y busca a @userinfobot")
+            print("  2. Escríbele cualquier mensaje (por ejemplo: hola)")
+            print("  3. Te dirá tu ID, tipo:  123456789")
+            print("     Ese es tu ID. Escríbelo aquí.")
+            print()
+            owner = input("  Escribe tu ID aquí: ").strip()
+            if not owner:
+                print()
+                print("[Error] El ID no puede estar vacío. Vuelve a intentar.")
+                print()
+                continue
+
+            try:
+                write_env(token, owner)
+            except (ValueError, OSError):
+                print()
+                print("[Error] No se pudieron guardar los datos. Revisa la guía GUIA.txt")
+                print("y verifica que la carpeta no tenga permisos de solo lectura.")
+                print()
+                input("Pulsa Enter para cerrar...")
+                return 1
+            print()
+            print("¡Listo! Tus datos quedaron guardados.")
+            print("Arrancando el bot...")
+            print()
+            break
+
+    print("Iniciando YT-Remote...")
+    rc = subprocess.call([str(py_exe), str(main_py)])
+    print()
+    print("El bot se detuvo.")
+    return rc
+
+
 def main(argv: list[str] | None = None) -> int:
     """Punto de entrada invocado desde ytremote.bat.
 
@@ -77,6 +163,7 @@ def main(argv: list[str] | None = None) -> int:
       - is-configured         imprime SI o NO segun .env este configurado.
       - save <token> <owner>  guarda token y dueno en .env.
       - set-chat <id>         guarda el chat permitido.
+      - launch                guia interactiva con acentos y luego arranca el bot.
     """
     import sys
 
@@ -93,6 +180,8 @@ def main(argv: list[str] | None = None) -> int:
             return 1
     elif cmd == "set-chat":
         set_allowed_chat_id(args[1] if len(args) > 1 else None)
+    elif cmd == "launch":
+        return launch_wizard()
     return 0
 
 
