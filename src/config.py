@@ -38,7 +38,6 @@ class Config:
         max_results: int,
         owner_id: int | None = None,
         allowed_chat_id: int | None = None,
-        mini_app_port: int = 8765,
     ) -> None:
         self.token = token
         self.mpv_path = mpv_path
@@ -46,7 +45,6 @@ class Config:
         self.max_results = max_results
         self.owner_id = owner_id
         self.allowed_chat_id = allowed_chat_id
-        self.mini_app_port = mini_app_port
 
 
 def load_config() -> Config:
@@ -82,7 +80,6 @@ def load_config() -> Config:
         max_results=int(data.get("max_results", 5)),
         owner_id=owner_id,
         allowed_chat_id=allowed_chat_id,
-        mini_app_port=int(data.get("mini_app_port", 8765)),
     )
 
     if config.token in ("", "TU_TOKEN_AQUI"):

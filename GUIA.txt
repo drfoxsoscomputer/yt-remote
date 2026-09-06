@@ -63,30 +63,15 @@ Roles y permisos:
 Nota: por defecto solo el dueño (tú) es admin. Para darle acceso a
 otros, usa /adduser con su ID de Telegram y el rol (admin, dj o user).
 
-LA LUPA 🔍 (MINI APP WEB)
--------------------------
-Tocando el botón de la lupa durante la reproducción (fila superior de
-la tarjeta) se abre la Mini App de Telegram: un panel web que agrega
-controles visuales a los comandos del chat.
-
-Dentro de la Mini App hay tres pantallas:
-
-1. Buscar (artista y canción): eliges el artista con el teclado de la
-   Mini App, luego la canción, y el resultado se publica en el grupo
-   para elegir el video. Los resultados de la búsqueda, la cola y el
-   estado de cada canción se ven en tiempo real.
-
-2. Cola (dj y admin): lista los temas que están sonando y los que vienen.
-   Desde ahí puedes saltar a cualquier tema (▶), quitarlo (✕) o limpiar
-   la lista completa.
-
-3. Roles (solo admin): da y quita acceso con un rol (admin, dj o user)
-   sin escribir comandos.
-
-Qué pasa si no se puede abrir: si el bot no consigue el enlace de la
-Mini App (por ejemplo, sin internet al arrancar), la lupa sigue
-funcionando igual pero abre el asistente del chat: primero escribe el
-artista y luego la canción.
+EL COMANDO /buscar (BUSQUEDA EN UN PASO)
+-----------------------------------------
+Escribe `/buscar <artista> - <cancion>` y reproduce el tema de una vez.
+Lo que va ANTES del primer guion (la parte de la izquierda) es el ARTISTA
+(cantante, banda, grupo o canal) y se usa como ancla de la radio: el
+siguiente tema saldrá exactamente de ese artista, aunque la búsqueda se
+haga con el nombre completo de la canción. Si no escribes el guion, todo
+el texto se toma como el artista. También puedes pegar el link de un video
+de YouTube directamente.
 
 PROBLEMAS
 ---------

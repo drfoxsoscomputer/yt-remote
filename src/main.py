@@ -48,9 +48,6 @@ def main() -> None:
     # Al salir el bot, matar tambien mpv: si no, cada cierre deja un proceso
     # mpv huerfano con su ventana abierta (se acumulan en segundo plano).
     atexit.register(bot.player._quit)
-    # La Mini App deja correr el tunnel cloudflared y el servidor HTTP local:
-    # se apagan al cerrar para no quedar huerfanos en segundo plano.
-    atexit.register(bot._stop_mini_app)
 
     app = bot.build()
     # drop_pending_updates: los mensajes que llegaron mientras la PC estuvo
