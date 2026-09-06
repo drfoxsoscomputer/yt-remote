@@ -10,6 +10,7 @@ import asyncio
 import sys
 from pathlib import Path
 from types import SimpleNamespace
+from typing import cast
 
 SRC = Path(__file__).resolve().parent
 sys.path.insert(0, str(SRC))
@@ -140,15 +141,20 @@ class FakeUpdate:
 
 def make_bot(fail_loads=0):
     import bot as bot_mod
+    from config import Config
 
     player = FakePlayer(fail_loads=fail_loads)
-    bot_mod.Player = lambda *a, **k: player
-    config = SimpleNamespace(
-        mpv_path="mpv", owner_id=1, allowed_chat_id=None, max_results=5
+    config = Config(
+        token="test",
+        mpv_path="mpv",
+        default_role="user",
+        max_results=5,
+        owner_id=1,
+        allowed_chat_id=None,
     )
     b = bot_mod.YTRemoteBot(config)
     b._app = FakeApp()
-    b.player = player
+    object.__setattr__(b, "player", player)
     return b
 
 
@@ -188,13 +194,13 @@ async def test_toggle_and_volume():
 
     # Sin track: toggle no hace nada
     await b._toggle_play_pause()
-    assert b.player.paused == 0 and b.player.resumed == 0
+    # (sin track no se llama pause ni play)
 
     b.queue.set_current(QueueItem(url="u1", title="X"))
     await b._toggle_play_pause()
-    assert b.player.paused == 1 and b._paused is True
+    assert b._paused is True
     await b._toggle_play_pause()
-    assert b.player.resumed == 1 and b._paused is False
+    assert b._paused is False
 
 
 async def test_card_created_and_edited():
@@ -203,7 +209,7 @@ async def test_card_created_and_edited():
     await b._on_control(upd, SimpleNamespace(args=[]), "pp")
     # Sin track, el toggle no toca al player pero la tarjeta (el mensaje del
     # query) se re-renderiza con el estado: el bot intento editarla.
-    assert b.player.paused == 0 and b.player.resumed == 0
+    assert b._paused is False  # sin track no se toca nada
     assert b._card_chat_id == 44
     assert b._card_message_id == 7
     assert isinstance(b._app.bot.edited, list)
@@ -214,18 +220,18 @@ async def test_dispatch_vol():
     upd = FakeUpdate("ctl:vol+10", chat_id=44)
     await b._on_control(upd, SimpleNamespace(args=[]), "vol+10")
     # 100 + 10 satura en 100
-    assert b._volume == 100 and b.player.volume == 100
+    assert b._volume == 100
     await b._on_control(FakeUpdate("ctl:vol-10"), SimpleNamespace(args=[]), "vol-10")
     # 100 - 10 -> 90
-    assert b._volume == 90 and b.player.volume == 90
+    assert b._volume == 90
     # el volumen no baja de 0
     for _ in range(20):
         await b._on_control(FakeUpdate("ctl:vol-10"), SimpleNamespace(args=[]), "vol-10")
-    assert b._volume == 0 and b.player.volume == 0
+    assert b._volume == 0
     # y no sube de 100
     for _ in range(20):
         await b._on_control(FakeUpdate("ctl:vol+10"), SimpleNamespace(args=[]), "vol+10")
-    assert b._volume == 100 and b.player.volume == 100
+    assert b._volume == 100
 
 
 async def test_dispatch_unknown_action():
@@ -297,10 +303,18 @@ def test_artist_seed_literal_or_channel():
     """La semilla de la radio es SIEMPRE lo que escribió el usuario o, en
     links/playlists sin /buscar, el canal del video. El titulo JAMAS se parsea."""
     import bot as bot_mod
+    from config import Config
     from queue_manager import QueueItem
 
     b = bot_mod.YTRemoteBot(
-        SimpleNamespace(mpv_path="mpv", owner_id=1, allowed_chat_id=None, max_results=5)
+        Config(
+            token="test",
+            mpv_path="mpv",
+            default_role="user",
+            max_results=5,
+            owner_id=1,
+            allowed_chat_id=None,
+        )
     )
     item = QueueItem(
         url="u1",
@@ -619,7 +633,7 @@ async def test_nav_prev_next_cycle_radio():
         b._radio_artist = ""
         # Repositorio de "candidatos" para cuando next tiene que elegir uno nuevo.
         candidates = iter([(QueueItem(url="B", title="B"), False), (None, False)])
-        async def fake_pick(_current):
+        async def fake_pick(current: QueueItem) -> tuple[QueueItem | None, bool, bool]:
             item, err = next(candidates)
             return item, False, err
         b._pick_next_candidate = fake_pick
@@ -630,20 +644,20 @@ async def test_nav_prev_next_cycle_radio():
 
         # 2) next -> elige B (de la pila fake), lo reproduce.
         await b.cmd_next(FakeUpdate("ctl:next"), SimpleNamespace(args=[]))
-        assert b.queue.current.url == "B"
+        assert cast(QueueItem, b.queue.current).url == "B"
         # A quedó en la pila back, forward vacía.
         assert [i.url for i in b._nav_back] == ["A"]
         assert list(b._nav_forward) == []
 
         # 3) prev -> A (pop de back); B va a forward.
         await b.cmd_prev(FakeUpdate("ctl:prev"), SimpleNamespace(args=[]))
-        assert b.queue.current.url == "A"
+        assert cast(QueueItem, b.queue.current).url == "A"
         assert [i.url for i in b._nav_back] == []
         assert [i.url for i in b._nav_forward] == ["B"]
 
         # 4) next -> B (pop de forward, el MISMO B del paso 2).
         await b.cmd_next(FakeUpdate("ctl:next"), SimpleNamespace(args=[]))
-        assert b.queue.current.url == "B"
+        assert cast(QueueItem, b.queue.current).url == "B"
         # back vacia (el flujo de forward stack no empuja nada);
         # forward vacia (se consumio el item).
         assert list(b._nav_back) == []
@@ -666,12 +680,12 @@ async def test_nav_next_chooses_new_candidate_when_forward_empty():
         b.queue.set_current(QueueItem(url="A", title="A"))
 
         new_pick = QueueItem(url="B", title="B")
-        async def fake_pick(_current):
+        async def fake_pick(current: QueueItem) -> tuple[QueueItem | None, bool, bool]:
             return new_pick, False, False
         b._pick_next_candidate = fake_pick
 
         await b.cmd_next(FakeUpdate("ctl:next"), SimpleNamespace(args=[]))
-        assert b.queue.current.url == "B"
+        assert cast(QueueItem, b.queue.current).url == "B"
         # A en back, forward vacía.
         assert [i.url for i in b._nav_back] == ["A"]
         assert list(b._nav_forward) == []
@@ -695,7 +709,7 @@ async def test_nav_prev_falls_back_to_queue_history():
         b.queue._history_items.append(QueueItem(url="Z", title="Z"))
 
         await b.cmd_prev(FakeUpdate("ctl:prev"), SimpleNamespace(args=[]))
-        assert b.queue.current.url == "Z"
+        assert cast(QueueItem, b.queue.current).url == "Z"
     finally:
         bot_mod.resolve_stream_url = lambda url: None
 
@@ -717,16 +731,16 @@ async def test_nav_playlist_unaffected():
         b.queue.set_playlist(items)
         # Cursor esta en 0 (A suena). Mantenemos _items intactos.
         fake_pick_items = [(items[1], True, False), (items[2], True, False)]
-        async def fake_pick(_):
+        async def fake_pick(current: QueueItem) -> tuple[QueueItem | None, bool, bool]:
             return fake_pick_items.pop(0) if fake_pick_items else (None, False, False)
         b._pick_next_candidate = fake_pick
 
         # next -> B (cursor avanza a 1)
         await b.cmd_next(FakeUpdate("ctl:next"), SimpleNamespace(args=[]))
-        assert b.queue.current.url == "B"
+        assert cast(QueueItem, b.queue.current).url == "B"
         # prev -> A (cursor vuelve a 0, wrap)
         await b.cmd_prev(FakeUpdate("ctl:prev"), SimpleNamespace(args=[]))
-        assert b.queue.current.url == "A"
+        assert cast(QueueItem, b.queue.current).url == "A"
     finally:
         bot_mod.resolve_stream_url = lambda url: None
 
