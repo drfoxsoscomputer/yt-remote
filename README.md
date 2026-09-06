@@ -3,28 +3,36 @@
 Bot de Telegram para controlar la reproducción de videos de YouTube en tu PC.
 Búsqueda por chat, tarjeta de control con botones, radio automática por artista.
 
-## Instalación
+**Versión actual:** v0.1.0
 
-1. Copia o clona esta carpeta a tu PC
-2. Doble clic en `ytremote.bat`. La primera vez te guía para configurar
+## Descarga e instalación
+
+Descargá el ZIP desde GitHub, descomprimilo en cualquier carpeta y listo.
+No necesitás instalar Python, mpv ni nada externo: todo viene incluido
+dentro de la carpeta (es portable de verdad).
+
+1. Descargá el ZIP desde la página de releases de GitHub
+2. Descomprimilo donde quieras
+3. Doble clic en `ytremote.bat`. La primera vez te guía para configurar
    tu TOKEN y tu ID de Telegram (se guardan en `.env`, no se suben a GitHub)
-3. Ejecuta `ytremote.bat` para arrancar y déjalo abierto
-4. En un grupo de Telegram agrega el bot y escribe `/start`
+4. Dejá la ventana abierta
+5. En un grupo de Telegram agregá el bot y escribí `/start`
 
 ## Cómo buscar
 
 ```
-/buscar Kent Leroy - Dame Jesús
+/buscar Marcos Witt - Dios de lo Impossible
 ```
 
-Lo que va **antes del guion** es el **artista** (el bot reproduce canciones de ese cantante). Lo que va después es la primera canción.
+Lo que va **antes del guion** es el **artista** (el bot reproduce canciones
+de ese cantante). Lo que va después es la primera canción.
 
-Si no usas el guion, todo el texto se busca como nombre de artista:
+Si no usás el guion, todo el texto se busca como nombre de artista:
 ```
-/buscar Mafe Restrepo
+/buscar Jesus Adrian Romero
 ```
 
-Si pegas un link de YouTube, reproduce directo sin buscar.
+Si pegás un link de YouTube, reproduce directo sin buscar.
 
 ## Tarjeta de reproducción
 
@@ -39,7 +47,8 @@ Cuando suena algo aparece una tarjeta con botones:
 | 🔊−10 / 🔊+10 | Bajar o subir volumen 10 puntos |
 | 📋 | Ver la lista |
 
-La radio pasa automáticamente a la siguiente canción del mismo artista cuando termina. Usa `/buscar` con otro nombre para cambiar de cantante.
+La radio pasa automáticamente a la siguiente canción del mismo artista cuando
+termina. Usá `/buscar` con otro nombre para cambiar de cantante.
 
 ## Comandos
 
@@ -66,7 +75,8 @@ La radio pasa automáticamente a la siguiente canción del mismo artista cuando 
 | dj | Reproducir, pausar, saltar, ajustar volumen |
 | user | Solo pedir canciones y ver la lista |
 
-Por defecto solo el dueño (vos) es admin. Usá `/adduser` con el ID de Telegram de la otra persona para darle acceso.
+Por defecto solo el dueño (vos) es admin. Usá `/adduser` con el ID de
+Telegram de la otra persona para darle acceso.
 
 ## Configuración extra
 
