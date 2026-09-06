@@ -6,14 +6,25 @@ Los comandos se enrutan por roles (admin > dj > user).
 
 import asyncio
 import logging
+import os
 
-from telegram import BotCommand, InlineKeyboardButton, InlineKeyboardMarkup, InputMediaPhoto, Update
+from telegram import (
+    BotCommand,
+    InlineKeyboardButton,
+    InlineKeyboardMarkup,
+    InputMediaPhoto,
+    Update,
+    WebAppInfo,
+)
 from telegram.constants import ParseMode
+from telegram.error import NetworkError, TimedOut
 from telegram.ext import (
     Application,
     CallbackQueryHandler,
     CommandHandler,
     ContextTypes,
+    MessageHandler,
+    filters,
 )
 
 from config import Config
@@ -43,7 +54,16 @@ class YTRemoteBot:
         # reproduccion del usuario (al elegir la cancion del /play). /next y
         # el auto-advance lo reusan tal cual, sin re-derivar en cada salto.
         self._radio_artist: str = ""
-        self._last_query: str = ""
+        # Estado del wizard de busqueda (lupa): user_id -> "artist" | "song".
+        # Es solo una bandera del paso en curso; no almacena texto, el artista
+        # literal se fija cuando el usuario completa el Paso 2.
+        self._wizard_state: dict[int | None, str] = {}
+        # Artista literal que escribio el usuario en el Paso 1 (user_id -> texto).
+        self._wizard_artist: dict[int | None, str] = {}
+        # Vigilante de conexion: True mientras el polling esta caido por red
+        # (sin internet / Telegram inalcanzable). Al volver, se descarta el
+        # backlog acumulado y se avisa al usuario que esos comandos se perdieron.
+        self._net_offline: bool = False
         # cache: callback_data -> SearchResult para los botones de busqueda
         self._search_cache: dict[str, SearchResult] = {}
         # Prefetch (auto-continuacion): candidato a siguiente + stream resuelto
@@ -51,6 +71,15 @@ class YTRemoteBot:
         self._prefetch_basis: str | None = None
         self._prefetch_candidate: tuple[QueueItem, bool] | None = None
         self._prefetch_resolved: tuple[tuple[QueueItem, bool], tuple[str, str | None]] | None = None
+        # Cache de streams (modelo "mesonero"): URL de YouTube -> stream directo
+        # resuelto con yt-dlp. Se llena por adelantado (listado de /buscar,
+        # candidato de /next, historial de /prev) para que cada boton casi no
+        # espere. La resolucion es idempotente y serial (una a la vez, para no
+        # pegarle a YouTube en rafagas y evitar el bloqueo "not a bot").
+        self._stream_cache: dict[str, tuple[str, str | None]] = {}
+        self._resolving: set[str] = set()
+        self._anticipate_queue: asyncio.Queue[str] | None = None
+        self._anticipate_task: asyncio.Task | None = None
         # Mini reproductor persistente: un solo mensaje editable con botones.
         # El bot rastrea pausa y volumen porque el IPC de mpv no devuelve
         # respuestas a comandos (la respuesta se pierde en el handle efimero).
@@ -63,6 +92,11 @@ class YTRemoteBot:
         # tarjeta: los reply/errores van como toast (answer) y no se envian
         # fotos de confirmacion, porque la tarjeta se re-renderiza al final.
         self._from_card: bool = False
+        # Web App (Mini App) de busqueda/roles/cola. La URL publica del tunnel
+        # se descubre en post_init; hasta que no este lista, los botones de la
+        # tarjeta caen al wizard de chat (fallback que nunca deja mudo al bot).
+        self._app_url: str | None = None
+        self._mini_app: tuple | None = None
         self._register_owner()
 
     def _register_owner(self) -> None:
@@ -73,6 +107,242 @@ class YTRemoteBot:
         if not self.roles.has_role(self.config.owner_id, "admin"):
             self.roles.set_role(self.config.owner_id, "admin")
             logger.info("Dueno %s registrado como admin.", self.config.owner_id)
+
+    def _webapp_url(self, view: str) -> str | None:
+        """URL publica de una vista de la Web App (None si no hay tunnel)."""
+        if self._app_url is None:
+            return None
+        return f"{self._app_url}?view={view}"
+
+    def _search_button(self) -> InlineKeyboardButton:
+        """Boton de busqueda: Web App si el tunnel esta arriba, si no wizard.
+
+        SIN tunnel la Web App no es visible hacia Telegram (no hay URL
+        publica), asi que el boton cae al wizard de 2 pasos del chat, que es
+        el flujo original y nunca deja mudo al bot.
+        """
+        url = self._webapp_url("search")
+        if url:
+            return InlineKeyboardButton("🔍 Buscar", web_app=WebAppInfo(url=url))
+        return InlineKeyboardButton("🔍 Buscar", callback_data="ctl:buscar")
+
+    def _roles_button(self) -> InlineKeyboardButton | None:
+        """Boton de roles (solo con tunnel y rol admin, se filtra aparte)."""
+        url = self._webapp_url("roles")
+        if not url:
+            return None
+        return InlineKeyboardButton("👥 Roles", web_app=WebAppInfo(url=url))
+
+    def _queue_button(self) -> InlineKeyboardButton | None:
+        """Boton de cola (solo con tunnel; el rol se filtra aparte)."""
+        url = self._webapp_url("queue")
+        if not url:
+            return None
+        return InlineKeyboardButton("📋 Cola", web_app=WebAppInfo(url=url))
+
+    async def _start_mini_app(self) -> None:
+        """Arranca servidor HTTP + tunnel cloudflared (quick, sin cuenta).
+
+        Corre en background desde post_init: el tunnel tarda unos segundos en
+        entregar la URL publica. Si no la da (sin internet, binario ausente),
+        el bot sigue normal con el wizard de chat como fallback.
+        """
+        try:
+            from mini_app import start_mini_app
+
+            async def on_api(data: dict) -> dict:
+                return await self._on_api(data)
+
+            server, tunnel, public = await asyncio.to_thread(
+                start_mini_app,
+                self.config.token,
+                self.config.mini_app_port,
+                on_api,
+            )
+            server.set_loop(asyncio.get_running_loop())
+            self._mini_app = (server, tunnel)
+            if public is None:
+                logger.warning(
+                    "Mini App sin tunnel: el bot sigue con el wizard de chat."
+                )
+                return
+            self._app_url = public
+            logger.info("Mini App publica lista: %s", public)
+        except Exception as exc:  # noqa: BLE001 - nunca tumbar el arranque
+            logger.warning("No se pudo arrancar la Mini App: %s", exc)
+            self._mini_app = None
+
+    def _stop_mini_app(self) -> None:
+        """Detiene tunnel y servidor HTTP al cerrar el bot."""
+        if self._mini_app is None:
+            return
+        server, tunnel = self._mini_app
+        try:
+            tunnel.stop()
+        except Exception:  # noqa: BLE001 - no debe romper el cierre
+            pass
+        try:
+            server.stop()
+        except Exception:  # noqa: BLE001
+            pass
+        self._mini_app = None
+
+    async def _on_api(
+        self, data: dict
+    ) -> dict:
+        """Maneja las peticiones POST /api de la Web App.
+
+        data trae {initData validado -> user, auth_date, mode, payload}.
+        La autenticacion (HMAC del initData) ya la hizo el servidor; aqui
+        se decide el modo y se exige el rol del usuario de Telegram.
+        """
+        mode = data.get("mode")
+        payload = data.get("payload") or {}
+        user = data.get("user") or {}
+        user_id = user.get("id")
+        if user_id is None:
+            return {"ok": False, "error": "Sesion de Telegram invalida."}
+        role = self.roles.get_role(user_id)
+        chat_id = self.config.allowed_chat_id
+        if chat_id is None:
+            return {"ok": False, "error": "El bot no tiene chat permitido configurado."}
+        bot = self._app.bot
+
+        if mode == "search":
+            return await self._api_search(payload, user_id, bot, chat_id)
+        if mode == "roles":
+            return await self._api_roles(payload, role)
+        if mode == "queue":
+            return await self._api_queue(payload, role, user_id)
+        return {"ok": False, "error": f"Modo desconocido: {mode}"}
+
+    async def _api_search(self, payload, user_id, bot, chat_id) -> dict:
+        """Busqueda artist + cancion (rol user en adelante).
+
+        Reusa la misma busqueda que /buscar pero sin wizard: recibe artista y
+        cancion desde la Web App, fija la ancla de la radio al artista literal
+        y publica el listado de resultados en el chat (como el wizard, para
+        que elegir un tema llegue igual a la cola).
+        """
+        artist = (payload.get("artist") or "").strip()
+        song = (payload.get("song") or "").strip()
+        if not artist or not song:
+            return {"ok": False, "error": "Faltan el artista o la cancion."}
+        self._wizard_state.pop(user_id, None)
+        self._wizard_artist.pop(user_id, None)
+        self._radio_artist = artist
+        await self._run_search_from_chat(bot, chat_id, f"{artist} {song}".strip())
+        return {"ok": True}
+
+    async def _api_roles(self, payload, role) -> dict:
+        """Listar y editar roles (solo admin)."""
+        if role != "admin":
+            return {"ok": False, "error": "Solo el administrador puede editar roles."}
+        action = payload.get("action")
+        if action == "list":
+            users = [
+                {"user_id": int(uid), "role": r}
+                for uid, r in sorted(self.roles.all_users().items())
+            ]
+            return {"ok": True, "users": users}
+        user_id = payload.get("user_id")
+        try:
+            user_id = int(user_id)
+        except (TypeError, ValueError):
+            return {"ok": False, "error": "ID de usuario invalido."}
+        if action == "set":
+            new_role = (payload.get("role") or "").lower()
+            if new_role not in VALID_ROLES:
+                return {"ok": False, "error": f"Roles validos: {sorted(VALID_ROLES)}"}
+            self.roles.set_role(user_id, new_role)
+            return {"ok": True}
+        if action == "remove":
+            if user_id == self.config.owner_id:
+                return {"ok": False, "error": "El dueno no puede quitarse."}
+            self.roles.remove_user(user_id)
+            return {"ok": True}
+        return {"ok": False, "error": f"Accion de roles desconocida: {action}"}
+
+    async def _api_queue(self, payload, role, user_id) -> dict:
+        """Ver cola (user) y editar (dj/admin): saltar, quitar, limpiar."""
+        action = payload.get("action")
+        if action == "list":
+            cur = self.queue.current
+            items = [
+                {
+                    "position": i,
+                    "title": it.title,
+                    "current": it is cur,
+                }
+                for i, it in enumerate(self.queue.all(), start=1)
+            ]
+            return {
+                "ok": True,
+                "items": items,
+                "now": {"title": cur.title} if cur else None,
+            }
+        if not self.roles.has_role(user_id, "dj"):
+            return {"ok": False, "error": "Solo DJ o administrador pueden editar la cola."}
+        try:
+            position = int(payload.get("position"))
+        except (TypeError, ValueError):
+            position = None
+        if action == "jump":
+            if position is None:
+                return {"ok": False, "error": "Posicion invalida."}
+            item = self.queue.jump_to(position)
+            if item is None:
+                return {"ok": False, "error": "Posicion fuera de rango."}
+            if item is self.queue.current:
+                return {"ok": True}
+            # Reproducir sin update: la tarjeta se re-renderiza al final.
+            started = await self._play_item(None, item, preserve_current=True)
+            return {"ok": started, "error": "" if started else "No se pudo reproducir el tema."}
+        if action == "remove":
+            if position is None:
+                return {"ok": False, "error": "Posicion invalida."}
+            removed = self.queue.remove(position)
+            if removed is None:
+                return {"ok": False, "error": "Posicion fuera de rango."}
+            return {"ok": True, "title": removed.title}
+        if action == "clear":
+            await self.player.stop()
+            self.queue.clear()
+            self._cancel_prefetch()
+            self._radio_artist = ""
+            await self._render_card(self._track_status_text())
+            return {"ok": True}
+        return {"ok": False, "error": f"Accion de cola desconocida: {action}"}
+
+    async def _run_search_from_chat(
+        self, bot, chat_id: int, query: str
+    ) -> None:
+        """Busca y publica el listado en un chat (sin update de Telegram)."""
+        results = await asyncio.to_thread(search, query, self.config.max_results)
+        if not results:
+            try:
+                await bot.send_message(chat_id, "No encontre resultados.")
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("No se pudo avisar 'sin resultados': %s", exc)
+            return
+        self._clear_stream_cache()
+        self._search_cache.clear()
+        keyboard = []
+        for i, r in enumerate(results):
+            cb = f"pick:{i}"
+            self._search_cache[cb] = r
+            keyboard.append(
+                [InlineKeyboardButton(f"{i+1}. {r.title} ({r.duration})", callback_data=cb)]
+            )
+        self._anticipate_urls([r.url for r in results])
+        try:
+            await bot.send_message(
+                chat_id,
+                "Elige un video:",
+                reply_markup=InlineKeyboardMarkup(keyboard),
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("No se pudo publicar resultados: %s", exc)
 
     @property
     def app(self) -> Application:
@@ -130,12 +400,27 @@ class YTRemoteBot:
                 self._require_chat(self._require("admin", self.cmd_removeuser)),
             )
         )
+        # Cancela el wizard de busqueda en curso (no aparece en el menu "/").
+        app.add_handler(CommandHandler("cancelar", self._require_chat(self.cmd_cancelar)))
+        # Paso del wizard: texto libre del usuario que está en medio de la
+        # busqueda de 2 pasos (artista -> cancion). Los comandos lo abortan:
+        # filters.COMMAND queda excluido y cada comando corre normal despues.
+        app.add_handler(
+            MessageHandler(filters.TEXT & ~filters.COMMAND, self._require_chat(self.on_wizard_text))
+        )
 
         app.add_handler(CallbackQueryHandler(self._require_chat(self.on_callback)))
 
         self._app = app
 
         async def post_init(_app: Application) -> None:
+            # Marca de arranque: si ves DOS de estas sin haber reiniciado, hay
+            # mas de una instancia del bot con el mismo token (una segunda
+            # instancia pierde mensajes en silencio).
+            logger.info(
+                "BOT ARRANCADO (pid=%s)",
+                os.getpid(),
+            )
             # Aviso de comandos perdidos: se lee el backlog ANTES de que el
             # polling lo consuma (post_init corre antes del start).
             await self._notify_pending_dropped(_app.bot)
@@ -144,7 +429,6 @@ class YTRemoteBot:
             try:
                 await bot.set_my_commands(
                     [
-                        BotCommand("buscar", "Busca y reproduce un video o link de YouTube"),
                         BotCommand("lista", "Ver la lista; /lista N reproduce el tema N"),
                         BotCommand("now", "Que esta sonando"),
                         BotCommand("pause", "Pausar la reproduccion"),
@@ -158,6 +442,10 @@ class YTRemoteBot:
                 )
             except Exception as exc:  # noqa: BLE001 - no debe tumbar el arranque
                 logger.warning("No se pudo registrar los comandos: %s", exc)
+            # Web App: arranca en background (el tunnel tarda en dar URL) y
+            # refresca los botones web_app apenas esta disponible. Si falla,
+            # los botones caen al wizard de chat (fallback de buena fe).
+            _app.create_task(self._start_mini_app())
 
         app.post_init = post_init
 
@@ -169,6 +457,11 @@ class YTRemoteBot:
                 interval=5,
                 first=10,
             )
+            # Vigilante de conexion: detecta la caida de red del polling y,
+            # al volver, descarta el backlog acumulado con aviso al usuario.
+            app.job_queue.run_repeating(self._net_watch_job, interval=15, first=15)
+        # Errores de red del polling marcan el bot como offline.
+        app.add_error_handler(self._on_bot_error)
         app.run_polling  # noqa: B018  (validar metodo disponible)
         return app
 
@@ -220,6 +513,93 @@ class YTRemoteBot:
             await bot.send_message(self.config.allowed_chat_id, report)
         except Exception as exc:  # noqa: BLE001 - no debe tumbar el arranque
             logger.warning("No se pudo notificar el backlog descartado: %s", exc)
+
+    def _on_bot_error(self, update: object, context) -> None:
+        """Marca el bot como OFFLINE cuando el polling falla por red.
+
+        Errores de red (sin internet, Telegram inalcanzable) ponen la bandera
+        que el vigilante (_net_watch_job) usa para saber que hay que avisar
+        cuando la conexion vuelva. Los demas errores del poller no la tocan.
+        """
+        error = context.error
+        if isinstance(error, (NetworkError, TimedOut)):
+            self._net_offline = True
+            logger.warning("Red del bot caida (%s). Se avisara al volver.", type(error).__name__)
+        else:
+            logger.error("Error del bot: %r", error)
+
+    async def _net_watch_job(self, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """Vigilante de conexion: al detectar que la red volvio, descarta el
+        backlog acumulado (los comandos enviados sin conexion NO se ejecutan)
+        y avisa al usuario que se perdieron, igual que el aviso de arranque.
+
+        Mientras esta offline no hace nada (solo sondea); los comandos que
+        llegaron quedan en Telegram hasta que se decide: o se ejecutan o se
+        descartan con aviso. Aqui se descartan SIEMPRE: un /stop viejo no debe
+        cortar la musica minutos despues de la caida.
+        """
+        if not self._net_offline:
+            return
+        try:
+            await context.bot.get_me()
+        except Exception:  # noqa: BLE001 - todavia sin conexion
+            return
+        # La conexion volvio: la bandera se apaga en la pausa del updater para
+        # que un error a mitad del flush no quede como "offline" para siempre.
+        updater = getattr(context.application, "updater", None)
+        applied = False
+        if updater is not None:
+            try:
+                await updater.stop()
+                applied = True
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("No se pudo pausar el updater: %s", exc)
+        try:
+            self._net_offline = False
+            pending = await context.bot.get_updates(timeout=0)
+            try:
+                # offset=-1 descarta TODO el backlog sin ejecutarlo.
+                await context.bot.get_updates(offset=-1, timeout=0)
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("No se pudo descartar el backlog: %s", exc)
+            await self._notify_connection_lost(context.bot, pending)
+        finally:
+            if applied and updater is not None:
+                try:
+                    await updater.start_polling(
+                        drop_pending_updates=False,
+                        allowed_updates=["message", "callback_query"],
+                    )
+                except Exception as exc:  # noqa: BLE001
+                    logger.error("No se pudo reanudar el updater: %s", exc)
+
+    async def _notify_connection_lost(self, bot, pending) -> None:
+        """Avisa por escrito que los comandos mandados sin conexion se perdieron."""
+        if self.config.allowed_chat_id is None:
+            return
+        commands = []
+        for upd in pending:
+            msg = upd.message
+            if msg is None or msg.chat_id != self.config.allowed_chat_id:
+                continue
+            text = (msg.text or "").strip()
+            if text.startswith("/"):
+                commands.append(text)
+        if not commands:
+            return
+        shown = commands[:5]
+        extra = len(commands) - len(shown)
+        report = (
+            "🔌 La conexion del bot se perdio un rato y lo que enviaste en "
+            "ese momento NO se ejecuto. Se descartaron estos comandos:\n"
+            + "\n".join(f"• {c}" for c in shown)
+            + (f"\n…y {extra} más." if extra else "")
+            + "\n\nEnvialos de nuevo si todavia los necesitas."
+        )
+        try:
+            await bot.send_message(self.config.allowed_chat_id, report)
+        except Exception as exc:  # noqa: BLE001 - no debe tumbar nada
+            logger.warning("No se pudo notificar la conexion perdida: %s", exc)
 
     def _require(self, role: str, handler):
         """Envuelve un handler exigiendo un rol minimo."""
@@ -345,12 +725,20 @@ class YTRemoteBot:
     def _control_keyboard(self) -> InlineKeyboardMarkup:
         """Teclado del mini reproductor persistente.
 
-        Fila 1: ⏮ anterior | ▶/⏸ alternar play-pause (dinamico) | ⏭ siguiente | ⏹ detener
+        Fila 1: 🔍 buscar (Web App si hay tunnel, si no wizard) | ⏮ anterior |
+                ▶/⏸ alternar play-pause | ⏭ siguiente | ⏹ detener
         Fila 2: 🔊−10 | <volumen actual> | 🔊+10 | 📋 lista
         """
         play_pause = "▶️" if self._paused else "⏸️"
+        search_url = self._webapp_url("search")
+        search_btn = (
+            InlineKeyboardButton("🔍", web_app=WebAppInfo(url=search_url))
+            if search_url
+            else InlineKeyboardButton("🔍", callback_data="ctl:buscar")
+        )
         keyboard = [
             [
+                search_btn,
                 InlineKeyboardButton("⏮", callback_data="ctl:prev"),
                 InlineKeyboardButton(play_pause, callback_data="ctl:pp"),
                 InlineKeyboardButton("⏭", callback_data="ctl:next"),
@@ -480,65 +868,63 @@ class YTRemoteBot:
         self._prefetch_candidate = None
         self._prefetch_resolved = None
 
-    def _radio_seed(self, title: str) -> str:
-        """A partir del titulo actual arma una semilla de busqueda limpia.
+    async def _stream_for(self, url: str) -> tuple[str, str | None] | None:
+        """Stream directo para una URL: del cache si ya se resolvio; si no,
+        resuelve en caliente (~1 s) y lo guarda. Idempotente: si otra tarea
+        ya lo esta resolviendo, espera a esa en vez de duplicar el trabajo."""
+        cached = self._stream_cache.get(url)
+        if cached is not None:
+            return cached
+        if url in self._resolving:
+            while url in self._resolving and url not in self._stream_cache:
+                await asyncio.sleep(0.1)
+            return self._stream_cache.get(url)
+        self._resolving.add(url)
+        try:
+            resolved = await asyncio.to_thread(resolve_stream_url, url)
+        finally:
+            self._resolving.discard(url)
+        if resolved:
+            self._stream_cache[url] = resolved
+        return resolved
 
-        Quita lo que sobra para buscar "una parecida": corchetes, parentesis,
-        remixes, videos oficiales, lyric, etc. Ej:
-        "Metallica - Nothing Else Matters (Official Video)" -> "Metallica - Nothing Else Matters"
-        """
-        import re as _re
+    async def _anticipate_worker(self) -> None:
+        """Consume la cola de anticipacion resolviendo un stream por vez."""
+        queue = self._anticipate_queue
+        if queue is None:
+            return
+        while True:
+            url = await queue.get()
+            if url in self._stream_cache or url in self._resolving:
+                continue
+            try:
+                await self._stream_for(url)
+            except asyncio.CancelledError:
+                return
+            except Exception:  # noqa: BLE001 - un fallo no corta la cadena
+                logger.warning("No se pudo anticipar el stream de %s", url)
 
-        cleaned = _re.sub(r"[\(\[].*?[\)\]]", "", title)
-        cleaned = _re.sub(
-            r"\b(official video|official music video|official audio|lyric|lyrics|hq|hd|remix|mtv)\b",
-            "",
-            cleaned,
-            flags=_re.IGNORECASE,
-        )
-        return " ".join(cleaned.split()).strip()
+    def _anticipate_urls(self, urls: list[str]) -> None:
+        """Encarga la resolucion por adelantado de varias URLs (el mesonero)."""
+        if not urls:
+            return
+        if self._anticipate_queue is None:
+            self._anticipate_queue = asyncio.Queue()
+            self._anticipate_task = asyncio.create_task(self._anticipate_worker())
+        for url in urls:
+            if url not in self._stream_cache and url not in self._resolving:
+                self._anticipate_queue.put_nowait(url)
 
-    @staticmethod
-    def _artist_from_title(title: str, channel: str = "") -> str:
-        """Extrae el artista (cantante/grupo/banda) del titulo de una cancion.
-
-        Patrones soportados:
-        1. Normal "ARTISTA - Cancion": "KENT LEROY - Quiero Cantar del Amor" -> "KENT LEROY".
-        2. Invertido (estilo cristiano) "Cancion - Artista - Banda/Minist":
-           "IMPACTANTE - Mafe Restrepo - GP BAND - Generacion Pentecostal".
-           Con 3+ segmentos el artista es el segundo segmento.
-        3. Desempate por canal: si el canal del video (quien lo subio) coincide
-           con un segmento del titulo, ese segmento ES el grupo real (el canal
-           suele ser la iglesia/banda del tema, p.ej. "Generacion Pentecostal").
-
-        Prioridad: (3) desempate por canal > (1) formato normal > (2) invertido.
-        Devuelve "" si no se parece a ningun patron.
-        """
-        import re as _re
-
-        cleaned = _re.sub(r"[\(\[].*?[\)\]]", "", title or "")
-        parts = [
-            p.strip().strip(" -–—")
-            for p in _re.split(r"[–—-]", cleaned)
-            if p.strip().strip(" -–—")
-        ]
-        if not parts:
-            return ""
-
-        if channel:
-            norm_channel = YTRemoteBot._normalizar(channel)
-            if norm_channel:
-                for part in parts:
-                    if YTRemoteBot._normalizar(part) == norm_channel:
-                        return part
-
-        if len(parts) == 2:
-            return parts[0]
-
-        if len(parts) >= 3:
-            return parts[1]
-
-        return ""
+    def _clear_stream_cache(self) -> None:
+        """Vuelve a vaciar el cache de streams (nueva busqueda o /stop)."""
+        self._stream_cache.clear()
+        self._resolving.clear()
+        if self._anticipate_queue is not None:
+            while not self._anticipate_queue.empty():
+                try:
+                    self._anticipate_queue.get_nowait()
+                except asyncio.QueueEmpty:
+                    break
 
     @staticmethod
     def _normalizar(s: str) -> str:
@@ -553,26 +939,18 @@ class YTRemoteBot:
         return _re.sub(r"[^a-z0-9]", "", s)
 
     def _artist_seed(self, item: QueueItem) -> str:
-        """Semilla de busqueda por el ARTISTA real (NUNCA el canal/uploader).
+        """Semilla de la radio: el artista EXACTO que escribió el usuario.
 
-        El artista se fija UNA sola vez: en la primera reproduccion del
-        usuario (cuando elige la cancion, ver on_callback). Aca NO se
-        re-deriva en cada /next:
-
-        1. Ancla de sesion (_radio_artist): el artista elegido en /play.
-        2. Artista propagado por la radio (candidate.artist): respaldo si la
-           sesion arranco sin ancla explicita (ej. playlist/link directo).
-        3. Si no hay ninguno: artista parseado del titulo ("KENT LEROY - ...").
-        4. Ultimo recurso: titulo limpio (_radio_seed).
+        Se fija una sola vez, en el wizard (o, para playlist/link directo,
+        con el canal del video: quien sube suele ser el artista o su sello).
+        Nunca se re-deriva desde títulos. Si no hay ancla ni canal, la radio
+        se detiene con aviso en vez de improvisar con cualquier cancion.
         """
         if self._radio_artist:
             return self._radio_artist
-        if item.artist:
-            return item.artist
-        artist = self._artist_from_title(item.title, item.channel)
-        if artist:
-            return artist
-        return self._radio_seed(item.title)
+        if item.channel:
+            return item.channel
+        return ""
 
     async def _pick_next_candidate(self, current: QueueItem) -> tuple[QueueItem | None, bool]:
         """Fase A: decide cual es el siguiente a reproducir.
@@ -587,9 +965,10 @@ class YTRemoteBot:
         if peeked is not None:
             return peeked, True
 
-        # Radio por semilla: buscar por el ARTISTA real (cantante/grupo/banda),
-        # NUNCA por el canal que subio el video (suele ser un re-uploader o
-        # un canal de charlas/sermones, no el musico).
+        # Radio por semilla: buscar por el ARTISTA que el usuario escribió en la
+        # lupa (el ancla de sesion) o, si arranco de un link/playlist, por el
+        # canal del video. Sobre el titulo del candidato NO se parsea nada:
+        # es un filtro estricto, no una derivacion de artista.
         seed = self._artist_seed(current)
         if not seed:
             return None, False
@@ -601,9 +980,8 @@ class YTRemoteBot:
             return None, False
 
         def _candidate(r) -> tuple[QueueItem, bool]:
-            # El candidato de radio guarda el ARTISTA que lo genero (no su
-            # canal): es el ANCLA que mantiene la cadena aunque este video
-            # sea un re-upload en otro canal o su titulo venga al reves.
+            # El candidato de radio guarda el ancla que lo genero (no su
+            # canal): es lo que mantiene la cadena de la radio.
             return (
                 QueueItem(
                     url=r.url,
@@ -616,40 +994,35 @@ class YTRemoteBot:
                 False,
             )
 
-        import re as _re
-
-        # Pasada 1: preferir resultados cuyo TITULO mencione al artista
-        # (normalizado). Es lo que garantiza "otra cancion de ESE artista"
-        # aunque la busqueda traiga mezclado algo de otro genero.
+        # Unica pasada, estricta: el candidato tiene que MENCIONAR al artista
+        # en su titulo (normalizado) o ser del MISMO canal. Todo lo demas
+        # queda fuera, aunque suene parecido (nada de covers importados de
+        # otros artistas: si el usuario escribió "GP Band", nunca entra un
+        # "Denicher Pol - Inexplicable" por suerte).
         anchor = self._normalizar(seed)
-        if anchor:
-            for r in results:
-                if (
-                    r.url != current.url
-                    and not self.queue.is_recent(r.url)
-                    and anchor in self._normalizar(r.title)
-                ):
-                    return _candidate(r)
-        # Pasada 2: lo que parece musica (titulo con 'Artista - Cancion').
+        if not anchor:
+            return None, False
         for r in results:
-            if (
-                r.url != current.url
-                and not self.queue.is_recent(r.url)
-                and bool(_re.search(r"[–\-—]", r.title))
-            ):
-                return _candidate(r)
-        # Pasada 3: cualquier no-reciente (para no apagar la radio).
-        for r in results:
-            if r.url != current.url and not self.queue.is_recent(r.url):
+            if r.url == current.url or self.queue.is_recent(r.url):
+                continue
+            if anchor in self._normalizar(r.title) or anchor in self._normalizar(r.channel):
                 return _candidate(r)
         return None, False
 
+    def _radio_over_message(self) -> str:
+        """Aviso cuando la radio estricta no encuentra mas temas del artista."""
+        ancla = self._radio_artist
+        if ancla:
+            return f"Se acabó la radio de {ancla}: no hay mas canciones de este artista en YouTube."
+        return "No encontre otra cancion para la radio."
+
     def _schedule_prefetch(self, current: QueueItem) -> None:
-        """Programa el prefetch del siguiente track en 2 fases.
+        """Anticipa el siguiente track (el mesonero no espera).
 
         Fase A (inmediata): decide el candidato (playlist o radio por semilla).
-        Fase B (programada): ~45s antes de que termine el actual, resuelve el
-        stream del candidato y lo cachea para que el salto sea instantaneo.
+        Fase B (inmediata tambien): resuelve el stream del candidato enseguida
+        y lo deja cacheado, para que /next y el auto-advance no esperen nada.
+        Si la URL cacheada vence antes de usarse, se re-resuelve al vuelo.
         """
         self._cancel_prefetch()
         self._prefetch_basis = current.url
@@ -666,13 +1039,8 @@ class YTRemoteBot:
             if self._prefetch_basis != current.url or self._prefetch_basis is None:
                 return
             self._prefetch_candidate = (candidate, from_queue)
-
-            # Fase B: resolver el stream cerca del final, no al inicio
-            # (las URLs de googlevideo expiran con el tiempo).
-            wait = max(0, current.duration_seconds - 45)
             try:
-                if wait:
-                    await asyncio.sleep(wait)
+                resolved = await self._stream_for(candidate.url)
             except asyncio.CancelledError:
                 return
             if (
@@ -680,10 +1048,6 @@ class YTRemoteBot:
                 or self.queue.current is not current
             ):
                 return
-            try:
-                resolved = await asyncio.to_thread(resolve_stream_url, candidate.url)
-            except Exception:
-                resolved = None
             if resolved:
                 self._prefetch_resolved = ((candidate, from_queue), resolved)
 
@@ -716,13 +1080,21 @@ class YTRemoteBot:
             await self._reply(None, f"▶️ Siguiente: {candidate.title}")
             return
 
-        # Sin prefetch listo: resolver el siguiente ahora mismo.
+        # Sin prefetch listo: reusar el candidato ya decidido (Fase A) si sigue
+        # vigente; solo si falla, re-derivar ahora mismo.
         current_item = self.queue.current
         if current_item is None:
             return
-        candidate, from_queue = await self._pick_next_candidate(current_item)
+        candidate, from_queue = None, False
+        if (
+            self._prefetch_candidate is not None
+            and self._prefetch_basis == current_item.url
+        ):
+            candidate, from_queue = self._prefetch_candidate
+        else:
+            candidate, from_queue = await self._pick_next_candidate(current_item)
         if candidate is None:
-            await self._reply(None, "La cola quedo vacia.")
+            await self._reply(None, self._radio_over_message())
             return
         if from_queue:
             self.queue.next()  # avanza el cursor de la playlist (bucle)
@@ -746,7 +1118,7 @@ class YTRemoteBot:
         lines: list[str] = []
 
         # user
-        lines.append("• /buscar <busqueda o link> — busca y reproduce (escribe PRIMERO el artista o grupo)")
+        lines.append("• toca 🔍 en la tarjeta o en /start — busca y reproduce en 2 pasos (artista, cancion)")
         lines.append("• /lista — ver la lista; /lista N reproduce el tema N")
         lines.append("• /now — que esta sonando")
 
@@ -761,11 +1133,29 @@ class YTRemoteBot:
             lines.append("• /removeuser <id> — quitar acceso")
 
         lines.append("")
-        lines.append("Consejo: escribe PRIMERO el artista y DESPUES la cancion,")
-        lines.append("ej: /buscar Mafe Restrepo Impactante. Si lo inviertes,")
-        lines.append("la radio del siguiente tema puede saltarse a otra cancion.")
+        lines.append("¿Cómo buscar? Toca 🔍 y escribe el ARTISTA tal cual: la radio")
+        lines.append("del siguiente tema saldrá exactamente de lo que escribas.")
+        lines.append("Toca 🔍 y sigue los 2 pasos (artista -> cancion); aborta con /cancelar.")
 
         return "\n".join(lines)
+
+    def _start_keyboard(self, user_id: int | None = None) -> InlineKeyboardMarkup:
+        """Botones del mensaje de bienvenida.
+
+        La lupa abre la Web App (o el wizard de chat si el tunnel no esta
+        arriba). Con tunnel activo se suman los botones de cola (dj/admin)
+        y de roles (admin) — el servidor valida el rol en cada peticion,
+        asi que el boton visible no es garantia de permiso si se filtra.
+        """
+        buttons = [[self._search_button()]]
+        role = self.roles.get_role(user_id) if user_id is not None else "user"
+        queue = self._queue_button()
+        if queue and role in ("dj", "admin"):
+            buttons.append([queue])
+        roles = self._roles_button()
+        if roles and role == "admin":
+            buttons.append([roles])
+        return InlineKeyboardMarkup(buttons)
 
     async def cmd_start(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         chat = update.effective_chat
@@ -795,92 +1185,103 @@ class YTRemoteBot:
                 setup.set_allowed_chat_id(allowed)
                 self.config.allowed_chat_id = allowed
                 logger.info("Grupo permitido configurado: %s", allowed)
-                await self._reply(update, "Configurado: este chat quedo habilitado para el bot.\n\n" + "Comandos disponibles para tu rol (admin):\n" + self.help_for_role("admin"))
+                await self._reply(update, "Configurado: este chat quedo habilitado para el bot.\n\n" + "Comandos disponibles para tu rol (admin):\n" + self.help_for_role("admin"), reply_markup=self._start_keyboard(user.id if user else None))
                 return
 
         if not self._chat_allowed(update):
             await self._reply(update, "Este bot no esta habilitado en este chat.")
             return
 
-        await self._reply(update, "YT-Remote activo.\n\n" + f"Comandos disponibles para tu rol ({user_role}):\n" + self.help_for_role(user_role))
+        await self._reply(update, "YT-Remote activo.\n\n" + f"Comandos disponibles para tu rol ({user_role}):\n" + self.help_for_role(user_role), reply_markup=self._start_keyboard(user.id if user else None))
 
     async def cmd_play(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """Reproduce un link directo o playlist, o abre el wizard de 2 pasos.
+
+        /buscar y /play quedan como alias ocultos (la entrada visible es el
+        boton 🔍 de la tarjeta y de /start):
+        - Sin texto: abre el wizard (artista -> cancion).
+        - Texto libre: se toma como el ARTISTA y se pide solo la cancion.
+        - Link de YouTube: reproduce directo (video o playlist/mix).
+        """
         text = (context.args or [])
         query = " ".join(text).strip()
         if not query:
-            await self._reply(update, "Uso: /buscar <busqueda o link de YouTube>")
+            await self._wizard_begin(update, context)
             return
-        # Nuevo /play = nueva intencion: se descarta el ancla anterior de la
-        # radio. Se redefine cuando el usuario elige la cancion (on_callback)
-        # o en la playlist (primer track).
+        if not is_youtube_link(query):
+            # El usuario ya escribió el artista: el wizard salta directo a
+            # pedir la cancion. Nunca se deriva el artista desde titulos.
+            await self._wizard_begin(update, context, hint=query)
+            return
+        await self._play_link_or_playlist(update, context, query)
+
+    async def _play_link_or_playlist(
+        self, update: Update, context: ContextTypes.DEFAULT_TYPE, query: str
+    ) -> None:
+        """Reproduce un link de YouTube (video directo o playlist/mix).
+
+        Nueva intencion: se descarta el ancla anterior de la radio. En una
+        playlist, la radio se ancla conservadoramente al canal del primer
+        track (quien sube suele ser el artista o su sello); nunca se inventa
+        un artista a partir del titulo.
+        """
         self._radio_artist = ""
-        self._last_query = query
-
-        if is_youtube_link(query):
-            # Playlist o mix: expandir y encolar todos sus tracks. El primero
-            # suena YA y el resto queda en queue_manager para el prefetch.
-            if is_playlist_url(query):
-                await context.bot.send_message(
-                    update.effective_chat.id,
-                    "Expandiendo playlist/mix, un momento...",
-                )
-                tracks = await asyncio.to_thread(
-                    expand_playlist, query, 50
-                )
-                if not tracks:
-                    await self._reply(update, "No se pudo expandir esa lista.")
-                    return
-                # Playlist fija: se encola completa y el primero se reproduce
-                # ya. El cursor avanza en orden y da la vuelta (bucle).
-                items = [
-                    QueueItem(
-                        url=t.url,
-                        title=t.title,
-                        duration_seconds=t.duration_seconds,
-                        thumbnail=t.thumbnail,
-                        channel=t.channel,
-                    )
-                    for t in tracks
-                ]
-                self.queue.set_playlist(items)
-                first = items[0]
-                # Ancla de la radio: se fija con el primer track de la
-                # playlist (su artista), para cuando se agote el bucle.
-                artist = self._artist_from_title(first.title, first.channel)
-                if artist:
-                    self._radio_artist = artist
-                started = await self._play_item(update, first, preserve_current=True)
-                if started:
-                    await self._reply(
-                        update,
-                        f"▶️ Playlist ({len(tracks)}): {first.title}\n"
-                        f"Bucle activo: suena en orden y se repite; /lista para verla.",
-                    )
-                return
-
+        if is_playlist_url(query):
             await context.bot.send_message(
-                update.effective_chat.id, "Reproduciendo link directo..."
+                update.effective_chat.id,
+                "Expandiendo playlist/mix, un momento...",
             )
-            item = QueueItem(
-                url=query, title=query, thumbnail=thumbnail_from_url(query)
-            )
-            started = await self._play_item(update, item)
-            if not started:
+            tracks = await asyncio.to_thread(expand_playlist, query, 50)
+            if not tracks:
+                await self._reply(update, "No se pudo expandir esa lista.")
                 return
+            items = [
+                QueueItem(
+                    url=t.url,
+                    title=t.title,
+                    duration_seconds=t.duration_seconds,
+                    thumbnail=t.thumbnail,
+                    channel=t.channel,
+                )
+                for t in tracks
+            ]
+            self.queue.set_playlist(items)
+            first = items[0]
+            self._radio_artist = first.channel or ""
+            started = await self._play_item(update, first, preserve_current=True)
+            if started:
+                await self._reply(
+                    update,
+                    f"▶️ Playlist ({len(tracks)}): {first.title}\n"
+                    f"Bucle activo: suena en orden y se repite; /lista para verla.",
+                )
+            return
 
-        # Busqueda por nombre -> mostrar botones con thumbnail
+        await context.bot.send_message(
+            update.effective_chat.id, "Reproduciendo link directo..."
+        )
+        item = QueueItem(url=query, title=query, thumbnail=thumbnail_from_url(query))
+        started = await self._play_item(update, item)
+        if not started:
+            return
+
+    async def _run_search(
+        self, update: Update, context: ContextTypes.DEFAULT_TYPE, query: str
+    ) -> None:
+        """Busca en YouTube y muestra el listado de resultados con botones."""
         await context.bot.send_message(
             update.effective_chat.id, "Buscando...", parse_mode=ParseMode.HTML
         )
         # yt-dlp es lento y bloqueante: ejecutarlo en un thread para no
         # congelar el bot mientras busca.
-        results = await asyncio.to_thread(
-            search, query, self.config.max_results
-        )
+        results = await asyncio.to_thread(search, query, self.config.max_results)
         if not results:
             await self._reply(update, "No encontre resultados.")
             return
 
+        # Nueva busqueda reemplaza el cache de streams: queda solo con las
+        # URLs de los resultados que van a anticiparse abajo.
+        self._clear_stream_cache()
         self._search_cache.clear()
         keyboard = []
         for i, r in enumerate(results):
@@ -889,16 +1290,132 @@ class YTRemoteBot:
             label = f"{i+1}. {r.title} ({r.duration})"
             keyboard.append([InlineKeyboardButton(label, callback_data=cb)])
 
+        # El mesonero: se anticipan los streams de los resultados en la cola
+        # de resolucion serial, para que elegir uno suene casi al instante.
+        self._anticipate_urls([r.url for r in results])
+
         reply_markup = InlineKeyboardMarkup(keyboard)
         # Listado de resultados sin miniatura: la miniatura se muestra al
         # elegir un video (es la tarjeta persistente del mini reproductor).
         await context.bot.send_message(
             update.effective_chat.id,
-            "Elegi un video:\n\n"
-            "Consejo: escribe PRIMERO el artista y DESPUES la cancion, "
-            "ej: /buscar Mafe Restrepo Impactante.",
+            "Elige un video:",
             reply_markup=reply_markup,
         )
+
+    async def _wizard_send(
+        self, update: Update, context: ContextTypes.DEFAULT_TYPE, text: str
+    ) -> None:
+        """Envia el prompt del wizard como un mensaje NUEVO en el chat.
+
+        No pasa por _reply: desde la lupa de la tarjeta el update es un
+        callback (con _from_card activo) y _reply solo haria un toast invisible
+        o editaria la tarjeta del reproductor. El wizard siempre pide en un
+        mensaje propio y deja la tarjeta intacta.
+        """
+        chat = update.effective_chat
+        if chat is None:
+            return
+        await context.bot.send_message(chat.id, text)
+
+    async def _wizard_begin(
+        self, update: Update, context: ContextTypes.DEFAULT_TYPE, hint: str = ""
+    ) -> None:
+        """Inicia la busqueda de 2 pasos (artista -> cancion) desde la lupa.
+
+        Solo se escribe el nombre: el artista quedara fijado tal cual lo
+        escriba el usuario, nunca derivado de un titulo. Con hint (artista
+        que llego escrito en /buscar) se salta directo a pedir la cancion.
+        """
+        uid = update.effective_user.id if update.effective_user else None
+        chat_id = update.effective_chat.id if update.effective_chat else None
+        logger.info(
+            "Wizard iniciado (uid=%s chat=%s hint=%r)", uid, chat_id, hint[:40] if hint else ""
+        )
+        if hint:
+            self._wizard_state[uid] = "song"
+            self._wizard_artist[uid] = hint
+            await self._wizard_send(
+                update,
+                context,
+                f"🔍 Paso 2 de 2: escribe el NOMBRE DE LA CANCION\nde {hint}.",
+            )
+            return
+        if uid is not None:
+            self._wizard_artist.pop(uid, None)
+        self._wizard_state[uid] = "artist"
+        await self._wizard_send(
+            update,
+            context,
+            "🔍 Paso 1 de 2: escribe el NOMBRE DEL ARTISTA.\n"
+            "Puedes abortar en cualquier momento con /cancelar.",
+        )
+
+    async def on_wizard_text(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """Paso del wizard de busqueda (artista -> cancion).
+
+        Sin wizard activo el mensaje de texto se ignora (los comandos se
+        manejan aparte y abortan el wizard: cada uno sigue su flujo normal).
+        Si en un paso se pega un link, se reproduce directo y se cierra.
+        """
+        user = update.effective_user
+        uid = user.id if user else None
+        chat_id = update.effective_chat.id if update.effective_chat else None
+        if uid is None or uid not in self._wizard_state:
+            # Nunca responder en silencio: si el estado del wizard no existe
+            # (se perdio en un reinicio, otro chat, o hay dos instancias del
+            # bot), el texto se ignora CON aviso claro al usuario y evidencia
+            # en el log, en vez de "no hace nada" sin explicacion.
+            logger.warning(
+                "Texto sin wizard activo: %r (uid=%s chat=%s)",
+                (update.message.text or "").strip()[:40],
+                uid,
+                chat_id,
+            )
+            await self._reply(
+                update,
+                "No hay una busqueda activa. Toca la lupa 🔍 de la tarjeta "
+                "o usa /buscar.",
+            )
+            return
+        text = (update.message.text or "").strip()
+        if is_youtube_link(text):
+            self._wizard_state.pop(uid, None)
+            self._wizard_artist.pop(uid, None)
+            await self._play_link_or_playlist(update, context, text)
+            return
+        if not text:
+            await self._reply(
+                update, "Tienes que escribir un nombre (o pegar un link de YouTube)."
+            )
+            return
+
+        step = self._wizard_state[uid]
+        if step == "artist":
+            self._wizard_artist[uid] = text
+            self._wizard_state[uid] = "song"
+            await self._reply(
+                update,
+                f"🔍 Paso 2 de 2: escribe el NOMBRE DE LA CANCION\nde {text}.",
+            )
+            return
+
+        # Paso 2: el artista es EXACTAMENTE lo que escribió el usuario.
+        artist = self._wizard_artist.pop(uid, None) or ""
+        self._wizard_state.pop(uid, None)
+        self._radio_artist = artist
+        await self._run_search(update, context, f"{artist} {text}".strip())
+
+    async def cmd_cancelar(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """Aborta el wizard de busqueda en curso (si hay uno)."""
+        user = update.effective_user
+        uid = user.id if user else None
+        if uid is not None:
+            if uid not in self._wizard_state:
+                return
+            self._wizard_state.pop(uid, None)
+            self._wizard_artist.pop(uid, None)
+        await self._reply(update, "Busqueda cancelada.")
 
     async def on_callback(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         query = update.callback_query
@@ -924,16 +1441,10 @@ class YTRemoteBot:
             logger.warning("No se pudo borrar el listado de resultados: %s", exc)
             await query.edit_message_text("▶️ Listo, reproduciendo...")
 
-        # ANCLA DE LA RADIO: la primera reproduccion del usuario es la que
-        # define el artista. Se captura aca, UNA sola vez, de la cancion
-        # elegida ("KENT LEROY - Quiero Cantar del Amor" -> "KENT LEROY";
-        # "IMPACTANTE - Mafe Restrepo - GP BAND - ..." -> "Mafe Restrepo").
-        # Si esa cancion no trae artista en el titulo, se usa el texto del
-        # /play (el usuario lo escribio buscando a alguien).
-        artist = self._artist_from_title(result.title, result.channel)
-        if not artist and self._last_query:
-            artist = self._last_query
-        self._radio_artist = artist
+        # ANCLA DE LA RADIO: ya quedó fijada por el wizard, con el artista
+        # exacto que escribió el usuario. Aquí solo se propaga al item; el
+        # artista NUNCA se re-deriva desde títulos ni desde el canal.
+        artist = self._radio_artist
 
         item = QueueItem(
             url=result.url,
@@ -968,9 +1479,10 @@ class YTRemoteBot:
         """
         self._cancel_prefetch()
 
-        # Resolver el link de YouTube a URLs de stream directo que mpv
-        # pueda reproducir sin necesitar yt-dlp propio.
-        resolved = await asyncio.to_thread(resolve_stream_url, item.url)
+        # Resolver el stream: del cache del mesonero si ya se anticipo; si no,
+        # resolver en caliente. Si la URL cacheada vencio, mpv la rechaza y se
+        # re-resuelve UNA vez abajo (sin TTL preventivos ni esperas).
+        resolved = await self._stream_for(item.url)
         if not resolved:
             await self._reply(update, "No se pudo resolver el video. Espera un momento e intenta de nuevo.")
             return False
@@ -982,15 +1494,28 @@ class YTRemoteBot:
         except RuntimeError as exc:
             await self._reply(update, f"Problema al iniciar el reproductor: {exc}")
             return False
-        try:
-            await self.player.load(stream_url, audio_url)
-            await self.player.play()
-            self._paused = False
-            if not preserve_current:
-                self.queue.set_current(item)
-        except RuntimeError as exc:
-            await self._reply(update, f"No se pudo reproducir: {exc}")
-            return False
+
+        for attempt in range(2):
+            try:
+                await self.player.load(stream_url, audio_url)
+                await self.player.play()
+                self._paused = False
+                if not preserve_current:
+                    self.queue.set_current(item)
+                break
+            except RuntimeError as exc:
+                if attempt == 1 or item.url not in self._stream_cache:
+                    await self._reply(update, f"No se pudo reproducir: {exc}")
+                    return False
+                # URL cacheada vencida: descartar esa entrada, re-resolver y
+                # reintentar una vez.
+                logger.info("Stream cacheado expirado, re-resolviendo: %s", item.url)
+                self._stream_cache.pop(item.url, None)
+                resolved = await self._stream_for(item.url)
+                if not resolved:
+                    await self._reply(update, f"No se pudo reproducir: {exc}")
+                    return False
+                stream_url, audio_url = resolved
         self._schedule_prefetch(item)
         # La tarjeta del mini reproductor refleja el tema nuevo. En acciones
         # del usuario se crea/edita en su chat; en el auto-advance (update
@@ -1060,9 +1585,21 @@ class YTRemoteBot:
 
         self._from_card = True
         reflect_status = True
+        # Quita el spinner YA: las acciones re-renderizan la tarjeta o mandan
+        # toast despues; el boton no debe quedar clavado esperando al render.
+        # (vol-info re-responde despues con su toast, y eso gana sobre este.)
+        try:
+            await query.answer()
+        except Exception:
+            pass
         try:
             if action == "pp":
                 await self._toggle_play_pause()
+            elif action == "buscar":
+                # La lupa de la tarjeta: abre el wizard de 2 pasos sin tocar
+                # lo que este sonando (la tarjeta no se re-renderiza encima).
+                await self._wizard_begin(update, context)
+                reflect_status = False
             elif action == "prev":
                 await self.cmd_prev(update, context)
             elif action == "next":
@@ -1095,12 +1632,6 @@ class YTRemoteBot:
         # accion (nuevo tema, pausa, volumen, detenido, etc.).
         if reflect_status:
             await self._render_card(self._track_status_text(), chat_id)
-        try:
-            # Quita el spinner del boton. Si un _reply interno ya respondio
-            # con un toast, esto falla callado y conserva ese toast.
-            await query.answer()
-        except Exception:
-            pass
 
     async def cmd_next(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         """Salta YA al siguiente tema: corta el actual y reproduce el siguiente.
@@ -1132,14 +1663,22 @@ class YTRemoteBot:
             )
             return
 
-        # Sin prefetch: decidir el siguiente ahora mismo (cola o radio).
+        # Sin stream cacheado aun: usar el candidato que la anticipacion (Fase A)
+        # ya decidio al reproducir, sin volver a buscar 50 resultados.
         current_item = self.queue.current
         if current_item is None:
             await self._reply(update, "No hay ninguna cancion reproduciendose.")
             return
-        candidate, from_queue = await self._pick_next_candidate(current_item)
+        candidate, from_queue = None, False
+        if (
+            self._prefetch_candidate is not None
+            and self._prefetch_basis == current_item.url
+        ):
+            candidate, from_queue = self._prefetch_candidate
+        else:
+            candidate, from_queue = await self._pick_next_candidate(current_item)
         if candidate is None:
-            await self._reply(update, "No tengo nada siguiente para reproducir.")
+            await self._reply(update, self._radio_over_message())
             return
         if from_queue:
             self.queue.next()  # avanza el cursor de la playlist (bucle)
@@ -1176,6 +1715,7 @@ class YTRemoteBot:
         await self.player.stop()
         self.queue.clear()
         self._cancel_prefetch()
+        self._clear_stream_cache()
         self._queue_advance_needed = False
         self._radio_artist = ""
         self._paused = False

@@ -153,6 +153,27 @@ class QueueManager:
         """La playlist completa (siempre todos los items, sin consumir)."""
         return list(self._items)
 
+    def remove(self, position: int) -> QueueItem | None:
+        """Quita el item de la posicion (1-based) de la playlist fija.
+
+        Regla del cursor: si el item removido estaba antes del actual, el
+        cursor retrocede una posicion (los items se corren); si era el actual
+        o estaba despues, el cursor se queda (el que seguia ocupa el slot).
+        Si era el ultimo siendo el actual, el cursor se clampa al final.
+        Devuelve None si la posicion esta fuera de rango o no hay playlist.
+        """
+        if not self._items or position < 1 or position > len(self._items):
+            return None
+        if position < self._cursor + 1:
+            self._cursor = max(0, self._cursor - 1)
+        removed = self._items.pop(position - 1)
+        if not self._items:
+            self._cursor = 0
+            self._current = None
+        else:
+            self._cursor = min(self._cursor, len(self._items) - 1)
+        return removed
+
     def clear(self) -> None:
         self._items = []
         self._cursor = 0
