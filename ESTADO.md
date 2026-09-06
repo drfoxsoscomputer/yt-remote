@@ -15,7 +15,7 @@ Bot de Telegram que controla la reproduccion de YouTube (video en la PC donde co
 
 ## Estructura
 - `src/main.py` — entrada; sys.path al parent y run_polling.
-- `src/bot.py` — YTRemoteBot: comandos `/buscar`, `/lista`, `/now`, `/pause`, `/resume`, `/next`, `/prev`, `/stop`, `/volume`, `/adduser`, `/removeuser`; wrapper `_require(rol)`; tarjeta persistente con botones; callbacks con thumbnails y `_search_cache`.
+- `src/bot.py` — YTRemoteBot: comandos `/buscar` (dj+), `/lista`, `/now`, `/pause`, `/resume`, `/next`, `/prev`, `/stop`, `/volume`, `/adduser`, `/removeuser`, `/solicitar`; wrapper `_require(rol)`; tarjeta persistente con botones; callbacks con thumbnails y `_search_cache`.
 - `src/search.py` — `is_youtube_link()` + `search()` via yt-dlp; `SearchResult`.
 - `src/player.py` — clase Player, IPC de mpv por named pipe `\\.\pipe\mpv-ytremote`. Usa `--idle=yes` para mantener el pipe vivo.
 - `src/queue_manager.py` — QueueManager + QueueItem (deque FIFO + historico anti-ping-pong maxlen 500).
@@ -58,9 +58,12 @@ ZIP portable de 48 MB adjunto al release. Quien clone o descargue el ZIP no nece
 - [x] **Bounds check visible de /volume**: valida 0-100 y avisa en cliente.
 - [x] **Pruebas en vivo con Telegram**: 15 tests humanos OK.
 - [x] **`requirements.txt`**: eliminado (todo vive en runtime/).
-- [x] **Menu de comandos**: `/now`, `/pause`, `/resume` fuera del menu, solo admin.
-- [ ] **Comando `/skipartist`**: descartado (no tiene solucion buena — cambiar de artista requiere /buscar nuevo).
-- [ ] **Botones de la tarjeta**: verificar rol dj/admin en los botones de control (▶/⏸ ⏮ ⏭ ⏹) para users normales. Hoy un user puede tocarlos aunque no tenga rol.
+- [x] **Menu de comandos**: `/now`, `/pause`, `/resume`, `/lista`, `/next`, `/stop`, `/volume` fuera del menu.
+- [x] **Modelo de roles simplificado**: user = nada (solo ver lista), dj = buscar + controlar musica, admin = todo.
+- [x] **Comando `/solicitar`**: user pide acceso dj al admin.
+- [x] **Botones de la tarjeta**: user ve todos pero no puede usarlos (excepto 📋). Solo dj/admin usan los controles.
+- [x] **Documentacion actualizada**: README.md y GUIA.txt reflejan el nuevo modelo de roles.
+- [ ] **Pruebas en vivo con Telegram**: verificar que user no pueda usar botones de control, /buscar requiere dj, /solicitar llega al admin.
 
 ## Decisiones recientes
 - **v0.2.0 release con ZIP portable** (2026-09-06): el usuario descarga el ZIP desde GitHub Releases, descomprime y doble clic. Sin git, sin Python, sin nada instalado. Numero de version siguiendo semver: bump minor (0.1.0 → 0.2.0) por features nuevos (no fixes).

@@ -122,6 +122,7 @@ class FakeUpdate:
             def __init__(self, parent):
                 self.parent = parent
                 self.message = SimpleNamespace(message_id=message_id)
+                self.from_user = SimpleNamespace(id=77)
 
             async def answer(self, *args, **kwargs):
                 self.parent.answered = args
@@ -155,6 +156,7 @@ def make_bot(fail_loads=0):
     b = bot_mod.YTRemoteBot(config)
     b._app = FakeApp()
     object.__setattr__(b, "player", player)
+    b.roles.set_role(77, "dj")
     return b
 
 
