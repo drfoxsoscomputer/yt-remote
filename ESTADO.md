@@ -53,12 +53,14 @@ ZIP portable de 48 MB adjunto al release. Quien clone o descargue el ZIP no nece
 - **Hardening**: drop_pending_updates en run_polling, vigilante de red con `_on_bot_error` + `_net_watch_job` (15s), singleton lock en puerto 47631, retry de `send_photo`.
 
 ## Pendientes / ToDo
-- [x] **Tests `test_card.py`**: 22 errores LSP corregidos (player.py: self._loaded + property loaded; test_card.py: Config real, fake_pick stubs con tipo completo, assertions basadas en estado interno del bot, cast en queue.current). py_compile OK + tests OK.
-- [ ] **Manejo de errores de red en `_pick_next_candidate`**: si yt-dlp falla por rate limit o sin internet, la radio queda muda. Pendiente: try/except con fallback a "no pude buscar el siguiente, usá /lista".
-- [x] **Bounds check visible de /volume**: ya valida 0-100 y avisa "entre 0 y 100" en cliente.
-- [ ] **Probar en vivo con Telegram**: tarjeta-foto unica, radio por artista, cache mesonero (todo verificado en sandbox; falta la prueba real del usuario).
-- [ ] **Comando `/skipartist`**: para forzar cambio de artista sin /buscar nuevo.
-- [ ] **`requirements.txt`**: existe en la raiz pero no se usa (todo viene en runtime/). Evaluar borrarlo o documentarlo.
+- [x] **Tests `test_card.py`**: 22 errores LSP corregidos. py_compile OK + tests OK.
+- [x] **Manejo de errores de red en `_pick_next_candidate`**: flag de error + `_radio_over_message(por_error)` sugiere /lista en fallos de red.
+- [x] **Bounds check visible de /volume**: valida 0-100 y avisa en cliente.
+- [x] **Pruebas en vivo con Telegram**: 15 tests humanos OK.
+- [x] **`requirements.txt`**: eliminado (todo vive en runtime/).
+- [x] **Menu de comandos**: `/now`, `/pause`, `/resume` fuera del menu, solo admin.
+- [ ] **Comando `/skipartist`**: descartado (no tiene solucion buena — cambiar de artista requiere /buscar nuevo).
+- [ ] **Botones de la tarjeta**: verificar rol dj/admin en los botones de control (▶/⏸ ⏮ ⏭ ⏹) para users normales. Hoy un user puede tocarlos aunque no tenga rol.
 
 ## Decisiones recientes
 - **v0.2.0 release con ZIP portable** (2026-09-06): el usuario descarga el ZIP desde GitHub Releases, descomprime y doble clic. Sin git, sin Python, sin nada instalado. Numero de version siguiendo semver: bump minor (0.1.0 → 0.2.0) por features nuevos (no fixes).
