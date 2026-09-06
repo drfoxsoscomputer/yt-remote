@@ -37,7 +37,7 @@ class QueueManager:
     """
 
     # Cuantas URLs reproducidas recordamos (radio: no repetir recientes).
-    _MAX_HISTORY = 20
+    _MAX_HISTORY = 500
 
     def __init__(self) -> None:
         self._items: list[QueueItem] = []
