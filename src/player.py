@@ -50,6 +50,8 @@ class Player:
         # -> False) y los metodos load/play (-> True). Permite a is_playing
         # distinguir "proceso vivo" de "hay un track realmente reproduciendose".
         self._track_active = False
+        # Historial de load() para debugging/testing: lista de (url, audio_url).
+        self._loaded: list[tuple[str, str | None]] = []
         # Se dispara cuando mpv termina de cargar un track (evento
         # file-loaded). load() lo espera ANTES del audio-add: si el comando
         # llega mientras el video se esta cargando, mpv descarta la pista de
@@ -82,6 +84,11 @@ class Player:
     def is_running(self) -> bool:
         """True si hay un proceso mpv vivo (aunque no tenga track cargado)."""
         return self._proc is not None and self._proc.poll() is None
+
+    @property
+    def loaded(self) -> list[tuple[str, str | None]]:
+        """Lista de (url, audio_url) cargados. Para debugging/testing."""
+        return self._loaded
 
     def _pipe_ready(self) -> bool:
         """True si el named pipe de mpv ya existe en el sistema."""
@@ -330,6 +337,7 @@ class Player:
         y queda video sin sonido.
         """
         self._file_loaded_event.clear()
+        self._loaded.append((url, audio_url))
         await self.command("loadfile", url, "replace")
         if audio_url:
             try:
