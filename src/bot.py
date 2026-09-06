@@ -144,12 +144,12 @@ class YTRemoteBot:
         app.add_handler(CommandHandler("start", self._require_chat(self.cmd_start)))
         app.add_handler(
             CommandHandler(
-                "pause", self._require_chat(self._require("dj", self.cmd_pause))
+                "pause", self._require_chat(self._require("admin", self.cmd_pause))
             )
         )
         app.add_handler(
             CommandHandler(
-                "resume", self._require_chat(self._require("dj", self.cmd_resume))
+                "resume", self._require_chat(self._require("admin", self.cmd_resume))
             )
         )
         app.add_handler(
@@ -175,7 +175,7 @@ class YTRemoteBot:
         # /lista es el nombre principal; /queue queda como alias.
         app.add_handler(CommandHandler("lista", self._require_chat(self.cmd_queue)))
         app.add_handler(CommandHandler("queue", self._require_chat(self.cmd_queue)))
-        app.add_handler(CommandHandler("now", self._require_chat(self.cmd_now)))
+        app.add_handler(CommandHandler("now", self._require_chat(self._require("admin", self.cmd_now))))
         app.add_handler(
             CommandHandler(
                 "adduser", self._require_chat(self._require("admin", self.cmd_adduser))
@@ -209,9 +209,6 @@ class YTRemoteBot:
                     [
                         BotCommand("buscar", "Buscar <artista> - <cancion> o link"),
                         BotCommand("lista", "Ver la lista; /lista N reproduce el tema N"),
-                        BotCommand("now", "Que esta sonando"),
-                        BotCommand("pause", "Pausar la reproduccion"),
-                        BotCommand("resume", "Reanudar la reproduccion"),
                         BotCommand("next", "Saltar al siguiente tema"),
                         BotCommand("stop", "Detener y limpiar la cola"),
                         BotCommand("volume", "Ajustar el volumen (0-100)"),
@@ -931,15 +928,15 @@ class YTRemoteBot:
         lines.append("• /buscar <artista> — buscar un artista; el texto completo es el artista")
         lines.append("• /buscar <link> — reproducir un link de YouTube directo")
         lines.append("• /lista — ver la lista; /lista N reproduce el tema N")
-        lines.append("• /now — que esta sonando")
 
         if level >= 1:  # dj
-            lines.append("• /pause /resume — pausar y reanudar")
             lines.append("• /next — siguiente tema del mismo artista")
             lines.append("• /stop — detener y limpiar")
             lines.append("• /volume <0-100> — ajustar el volumen")
 
         if level >= 2:  # admin
+            lines.append("• /pause /resume — pausar y reanudar (admin)")
+            lines.append("• /now — que esta sonando (admin)")
             lines.append("• /adduser <id> <rol> — dar acceso (admin, dj, user)")
             lines.append("• /removeuser <id> — quitar acceso")
 
