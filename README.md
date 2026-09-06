@@ -58,21 +58,23 @@ termina. Usá `/buscar` con otro nombre para cambiar de cantante.
 | `/buscar <artista>` | user | Busca un artista (sin canción específica) |
 | `/buscar <link>` | user | Reproduce un link de YouTube directo |
 | `/lista` | user | Ver la lista; `/lista N` salta al tema N |
-| `/now` | user | Qué está sonando |
-| `/pause` | dj | Pausar |
-| `/resume` | dj | Reanudar |
-| `/next` | dj | Siguiente canción |
+| `/next` | dj | Siguiente canción del mismo artista |
 | `/stop` | dj | Detener y limpiar todo |
 | `/volume <0-100>` | dj | Ajustar volumen |
 | `/adduser <id> <rol>` | admin | Dar acceso (rol: admin, dj, user) |
 | `/removeuser <id>` | admin | Quitar acceso |
+| `/pause` | admin | Pausar |
+| `/resume` | admin | Reanudar |
+| `/now` | admin | Qué está sonando |
+
+**Nota:** los comandos `/pause`, `/resume` y `/now` no aparecen en el menú "/" (son solo para admin). El control de reproducción se hace desde la tarjeta de botones.
 
 ## Roles
 
 | Rol | Qué puede hacer |
 |-----|---------------|
-| admin | Todo, incluyendo dar/quitar permisos |
-| dj | Reproducir, pausar, saltar, ajustar volumen |
+| admin | Todo, incluyendo pausar, reanudar, ver ahora y dar/quitar permisos |
+| dj | Reproducir, siguiente, detener, ajustar volumen |
 | user | Solo pedir canciones y ver la lista |
 
 Por defecto solo el dueño (vos) es admin. Usá `/adduser` con el ID de

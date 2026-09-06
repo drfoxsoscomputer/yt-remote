@@ -45,7 +45,7 @@ cantante una tras otra. Lo que va DESPUÉS del guion es la canción
 que quieres escuchar primero.
 
 Si no usas el guion, todo el texto se toma como el nombre del artista.
-Ej:   /buscar Mafe Restrepo   reproduce temas de Mafe Restrepo.
+Ej:   /buscar Jesus Adrian Romero   reproduce temas de Jesus Adrian Romero.
 
 Si pegas un link de YouTube directo, el bot reproduce ese video sin
 buscar nada.
@@ -91,24 +91,24 @@ Todos los usuarios:
   /buscar <artista>              busca un artista (sin canción)
   /buscar <link>                 reproduce un link de YouTube directo
   /lista                         muestra la lista; /lista N salta al tema N
-  /now                           qué está sonando ahora
 
-Solo dj y admin:
-  /pause                         pausa la reproducción
-  /resume                        reanuda
-  /next                          siguiente canción
+Solo dj:
+  /next                          siguiente canción del mismo artista
   /stop                          detiene y limpia todo
   /volume <0-100>                ajusta el volumen
 
 Solo admin:
+  /pause                          pausa la reproducción
+  /resume                         reanuda
+  /now                            qué está sonando ahora
   /adduser <id> <rol>            da acceso a alguien (rol: admin, dj, user)
   /removeuser <id>               quita acceso
 
 
 ROLES Y PERMISOS
 ----------------
-  admin  — puede hacer todo, incluyendo dar permisos a otros
-  dj     — reproduce, pausa, salta, cambia volumen
+  admin  — puede hacer todo
+  dj     — reproduce, siguiente, detiene, volumen
   user   — solo puede pedir canciones y ver la lista
 
 Por defecto solo el dueño (vos) sos admin. Para darle acceso a otros,
