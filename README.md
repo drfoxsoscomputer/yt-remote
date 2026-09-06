@@ -3,7 +3,7 @@
 Bot de Telegram para controlar la reproducción de videos de YouTube en tu PC.
 Búsqueda por chat, tarjeta de control con botones, radio automática por artista.
 
-**Versión actual:** v0.1.0
+**Versión actual:** v0.2.0
 
 ## Descarga e instalación
 
