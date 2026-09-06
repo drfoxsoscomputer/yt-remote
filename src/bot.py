@@ -789,6 +789,13 @@ class YTRemoteBot:
         for r in results:
             if r.url == current.url or self.queue.is_recent(r.url):
                 continue
+            # Tambien filtrar items que ya estan en la pila de navegacion
+            # (prev/next) o en los stacks de esta sesion, para que un
+            # next tras un prev no vuelva a algo que ya estaba sonando.
+            nav_urls = {i.url for i in self._nav_back}
+            nav_urls.update(i.url for i in self._nav_forward)
+            if r.url in nav_urls:
+                continue
             if anchor in self._normalizar(r.title) or anchor in self._normalizar(r.channel):
                 return _candidate(r)
         return None, False
