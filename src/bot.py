@@ -4,6 +4,8 @@ Controla un reproductor mpv local reproduciendo videos de YouTube.
 Los comandos se enrutan por roles (admin > dj > user).
 """
 
+from collections import deque
+
 import asyncio
 import logging
 import os
@@ -83,7 +85,42 @@ class YTRemoteBot:
         # tarjeta: los reply/errores van como toast (answer) y no se envian
         # fotos de confirmacion, porque la tarjeta se re-renderiza al final.
         self._from_card: bool = False
+        # Pila de navegación (estándar en reproductores): _nav_back guarda
+        # los temas que dejaron de sonar (para /prev), _nav_forward guarda los
+        # temas que se saltaron con /next (para /next tras un /prev). Se
+        # actualizan en _play_item y se limpian al cambiar de fuente.
+        self._nav_back: deque[QueueItem] = deque(maxlen=100)
+        self._nav_forward: deque[QueueItem] = deque(maxlen=100)
         self._register_owner()
+
+    def _push_to_nav_back(self) -> None:
+        """Guarda el item actual en la pila de navegación hacia atrás.
+
+        Se llama antes de cambiar a otro tema (via /next, /prev, /buscar, etc.).
+        Siempre limpia la pila forward porque una nueva elección rompe la
+        posibilidad de re‑avanzar.
+        """
+        if self.queue.current is not None:
+            self._nav_back.append(self.queue.current)
+        self._nav_forward.clear()
+
+    def _pop_from_nav_back(self) -> QueueItem | None:
+        """Poppea el último item guardado en la pila hacia atrás."""
+        if self._nav_back:
+            return self._nav_back.pop()
+        return None
+
+    def _pop_from_nav_forward(self) -> QueueItem | None:
+        """Poppea el último item guardado en la pila hacia adelante."""
+        if self._nav_forward:
+            return self._nav_forward.pop()
+        return None
+
+    def _clear_nav_stacks(self) -> None:
+        """Limpia ambas pilas. Se llama al cambiar de fuente (nueva búsqueda,
+        nuevo /play, detener, etc.) para que el historial no se mezcle."""
+        self._nav_back.clear()
+        self._nav_forward.clear()
 
     def _register_owner(self) -> None:
         """El dueno (OWNER_ID) queda como admin automaticamente."""
@@ -971,6 +1008,7 @@ class YTRemoteBot:
         un artista a partir del titulo.
         """
         self._radio_artist = ""
+        self._clear_nav_stacks()
         if is_playlist_url(query):
             await context.bot.send_message(
                 update.effective_chat.id,
@@ -1079,6 +1117,8 @@ class YTRemoteBot:
         # de una sesión anterior y coincidía con el chat actual.
         self._card_chat_id = None
         self._card_message_id = None
+        # Nueva intención: limpiar stacks de navegación.
+        self._clear_nav_stacks()
 
         # ANCLA DE LA RADIO: ya quedó fijada en el /buscar, con el texto que va
         # antes del guion. Aquí solo se propaga al item; el artista NUNCA se
@@ -1140,6 +1180,9 @@ class YTRemoteBot:
                 await self.player.play()
                 self._paused = False
                 if not preserve_current:
+                    # Guardar el item actual en la pila de navegación antes
+                    # de cambiar el cursor (solo en modo radio).
+                    self._push_to_nav_back()
                     self.queue.set_current(item)
                 break
             except RuntimeError as exc:
@@ -1270,11 +1313,114 @@ class YTRemoteBot:
     async def cmd_next(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         """Salta YA al siguiente tema: corta el actual y reproduce el siguiente.
 
-        Igual que en el auto-advance: si el prefetch ya resolvio el stream,
-        salta con cero silencio; si no, toma el proximo de la cola o hace
-        radio por semilla del track actual.
+        Modo playlist: avanza el cursor con wrap (bucle).
+        Modo radio: si hay algo en la pila forward (porque se hizo /prev),
+        reproduce ese item directamente. Si no, decide un candidato nuevo
+        (prefetch ya resuelto -> cero silencio; o prefetch candidato; o
+        busqueda nueva por semilla).
         """
+        if self.queue.current is None:
+            await self._reply(update, "No hay ninguna cancion reproduciendose.")
+            return
 
+        # Modo playlist: cursor con wrap (logica previa).
+        if self.queue.has_playlist:
+            self._push_to_nav_back()  # guardar el actual en la pila back
+            if self._prefetch_resolved is not None:
+                (candidate, from_queue), (stream_url, audio_url) = self._prefetch_resolved
+                self._prefetch_resolved = None
+                self._cancel_prefetch()
+                try:
+                    await self.player.load(stream_url, audio_url)
+                    await self.player.play()
+                    self._paused = False
+                except RuntimeError as exc:
+                    await self._reply(update, f"No se pudo saltar: {exc}")
+                    return
+                if from_queue:
+                    self.queue.next()
+                else:
+                    self.queue.set_current(candidate)
+                self._schedule_prefetch(candidate)
+                await self._send_track_card(
+                    update, f"⏭️ Siguiente: {candidate.title}", candidate
+                )
+                return
+
+            current_item = self.queue.current
+            candidate, from_queue = None, False
+            if (
+                self._prefetch_candidate is not None
+                and self._prefetch_basis == current_item.url
+            ):
+                candidate, from_queue = self._prefetch_candidate
+            else:
+                candidate, from_queue = await self._pick_next_candidate(current_item)
+            if candidate is None:
+                await self._reply(update, self._radio_over_message())
+                return
+            if from_queue:
+                self.queue.next()
+            started = await self._play_item(update, candidate, preserve_current=from_queue)
+            if not started:
+                await self._reply(update, "No se pudo reproducir el siguiente tema.")
+                return
+            await self._send_track_card(
+                update, f"⏭️ Siguiente: {candidate.title}", candidate
+            )
+            return
+
+        # Modo radio (sin playlist).
+        # 1) Si hay algo en el stack forward (por un /prev previo), reproducirlo.
+        if self._nav_forward:
+            item = self._nav_forward.pop()
+            # Navegación pura: no alteramos los stacks de navegación más de
+            # lo necesario. Seteamos el queue._current directo para que el
+            # anti-ping-pong (history) no se accione aquí (solo al elegir
+            # un tema nuevo desde búsqueda). El _note_played se omite aquí
+            # intencionalmente: el flujo de navegación no entra al histórico
+            # de "ya reproducidos" de la radio.
+            self._cancel_prefetch()
+            resolved = await self._stream_for(item.url)
+            if not resolved:
+                await self._reply(update, "No se pudo resolver el video. Espera un momento e intenta de nuevo.")
+                return
+            stream_url, audio_url = resolved
+            try:
+                await self.player.start()
+            except RuntimeError as exc:
+                await self._reply(update, f"Problema al iniciar el reproductor: {exc}")
+                return
+            for attempt in range(2):
+                try:
+                    await self.player.load(stream_url, audio_url)
+                    await self.player.play()
+                    self._paused = False
+                    self.queue._current = item
+                    self.queue._items = []
+                    self.queue._cursor = 0
+                    break
+                except RuntimeError as exc:
+                    if attempt == 1 or item.url not in self._stream_cache:
+                        await self._reply(update, f"No se pudo reproducir: {exc}")
+                        return
+                    logger.info("Stream cacheado expirado, re-resolviendo: %s", item.url)
+                    self._stream_cache.pop(item.url, None)
+                    resolved = await self._stream_for(item.url)
+                    if not resolved:
+                        await self._reply(update, f"No se pudo reproducir: {exc}")
+                        return
+                    stream_url, audio_url = resolved
+            self._schedule_prefetch(item)
+            if update is not None:
+                await self._show_card(update.effective_chat.id)
+            await self._send_track_card(
+                update, f"⏭️ Siguiente: {item.title}", item
+            )
+            return
+
+        # 2) Sin pila forward: comportamiento estandar (prefetch o candidato nuevo).
+        self._push_to_nav_back()
         # Prefetch ya resuelto -> salto instantaneo (cero silencio).
         if self._prefetch_resolved is not None:
             (candidate, from_queue), (stream_url, audio_url) = self._prefetch_resolved
@@ -1287,22 +1433,20 @@ class YTRemoteBot:
             except RuntimeError as exc:
                 await self._reply(update, f"No se pudo saltar: {exc}")
                 return
-            if from_queue:
-                self.queue.next()  # avanza el cursor de la playlist (bucle)
-            else:
-                self.queue.set_current(candidate)
+            # En radio, from_queue siempre es False. Navegacion pura: seteamos
+            # _current directo para no duplicar el push al stack (ya lo hicimos).
+            self.queue._current = candidate
+            self.queue._items = []
+            self.queue._cursor = 0
             self._schedule_prefetch(candidate)
             await self._send_track_card(
                 update, f"⏭️ Siguiente: {candidate.title}", candidate
             )
             return
 
-        # Sin stream cacheado aun: usar el candidato que la anticipacion (Fase A)
-        # ya decidio al reproducir, sin volver a buscar 50 resultados.
+        # Sin stream cacheado aun: usar el candidato que la anticipacion decidio,
+        # o buscar uno nuevo por semilla.
         current_item = self.queue.current
-        if current_item is None:
-            await self._reply(update, "No hay ninguna cancion reproduciendose.")
-            return
         candidate, from_queue = None, False
         if (
             self._prefetch_candidate is not None
@@ -1314,12 +1458,41 @@ class YTRemoteBot:
         if candidate is None:
             await self._reply(update, self._radio_over_message())
             return
-        if from_queue:
-            self.queue.next()  # avanza el cursor de la playlist (bucle)
-        started = await self._play_item(update, candidate, preserve_current=from_queue)
-        if not started:
-            await self._reply(update, "No se pudo reproducir el siguiente tema.")
+        # Navegacion pura: seteamos _current directo para evitar el doble push
+        # al stack de navegacion (ya se guardo el item en _push_to_nav_back).
+        self.queue._current = candidate
+        self.queue._items = []
+        self.queue._cursor = 0
+        resolved = await self._stream_for(candidate.url)
+        if not resolved:
+            await self._reply(update, "No se pudo resolver el video. Espera un momento e intenta de nuevo.")
             return
+        stream_url, audio_url = resolved
+        try:
+            await self.player.start()
+        except RuntimeError as exc:
+            await self._reply(update, f"Problema al iniciar el reproductor: {exc}")
+            return
+        for attempt in range(2):
+            try:
+                await self.player.load(stream_url, audio_url)
+                await self.player.play()
+                self._paused = False
+                break
+            except RuntimeError as exc:
+                if attempt == 1 or candidate.url not in self._stream_cache:
+                    await self._reply(update, f"No se pudo reproducir: {exc}")
+                    return
+                logger.info("Stream cacheado expirado, re-resolviendo: %s", candidate.url)
+                self._stream_cache.pop(candidate.url, None)
+                resolved = await self._stream_for(candidate.url)
+                if not resolved:
+                    await self._reply(update, f"No se pudo reproducir: {exc}")
+                    return
+                stream_url, audio_url = resolved
+        self._schedule_prefetch(candidate)
+        if update is not None:
+            await self._show_card(update.effective_chat.id)
         await self._send_track_card(
             update, f"⏭️ Siguiente: {candidate.title}", candidate
         )
@@ -1327,29 +1500,136 @@ class YTRemoteBot:
     async def cmd_prev(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         """Retrocede al tema anterior.
 
-        Con playlist fija: mueve el cursor una posicion atras (con wrap,
-        simetrico a /next). En modo radio: vuelve a la cancion reproducida
-        antes de la actual (historico de items). Si no hay anterior, avisa.
+        Modo playlist: cursor con wrap (simetrico a /next).
+        Modo radio: si hay algo en la pila back, poppea y lo reproduce (el
+        actual pasa al forward stack para que /next pueda volver a el).
+        Fallback: si la pila back esta vacia, usa el historico de items
+        que dejaron de sonar (queue.previous()).
         """
         if self.queue.current is None:
             await self._reply(update, "No hay ninguna cancion reproduciendose.")
             return
-        item = self.queue.previous()
+
+        # Modo playlist: cursor con wrap (logica previa).
+        if self.queue.has_playlist:
+            item = self.queue.previous()
+            if item is None:
+                await self._reply(update, "No hay cancion anterior en la cola.")
+                return
+            from_playlist = True
+            started = await self._play_item(update, item, preserve_current=from_playlist)
+            if started:
+                await self._send_track_card(
+                    update, f"⏮️ Anterior: {item.title}", item
+                )
+            return
+
+        # Modo radio.
+        # Intentar sacar el item anterior de la pila de navegacion (nav_back).
+        # Si esta vacia, fallback al historial de items de la cola.
+        item: QueueItem | None = self._pop_from_nav_back()
+        used_nav_back = item is not None
+        if not used_nav_back:
+            # Fallback: usar el historico de items que dejaron de sonar.
+            # No es navegacion pura: el nav_back queda igual y el nav_forward
+            # tampoco se mezcla. _play_item (con set_current) hara un push
+            # normal a nav_back por nosotros.
+            item = self.queue.previous()
         if item is None:
             await self._reply(update, "No hay cancion anterior en la cola.")
             return
-        from_playlist = self.queue.has_playlist
-        started = await self._play_item(update, item, preserve_current=from_playlist)
-        if started:
+        if used_nav_back:
+            # Guardar el actual en forward: si el usuario hace /next despues,
+            # debe volver al item que se esta abandonando.
+            if self.queue.current is not None:
+                self._nav_forward.append(self.queue.current)
+            # Reproducir el item sin pasar por _play_item (que haria un push
+            # extra a back, duplicando el item). Manejo manual.
+            self._cancel_prefetch()
+            resolved = await self._stream_for(item.url)
+            if not resolved:
+                await self._reply(update, "No se pudo resolver el video. Espera un momento e intenta de nuevo.")
+                return
+            stream_url, audio_url = resolved
+            try:
+                await self.player.start()
+            except RuntimeError as exc:
+                await self._reply(update, f"Problema al iniciar el reproductor: {exc}")
+                return
+            for attempt in range(2):
+                try:
+                    await self.player.load(stream_url, audio_url)
+                    await self.player.play()
+                    self._paused = False
+                    self.queue._current = item
+                    self.queue._items = []
+                    self.queue._cursor = 0
+                    break
+                except RuntimeError as exc:
+                    if attempt == 1 or item.url not in self._stream_cache:
+                        await self._reply(update, f"No se pudo reproducir: {exc}")
+                        return
+                    logger.info("Stream cacheado expirado, re-resolviendo: %s", item.url)
+                    self._stream_cache.pop(item.url, None)
+                    resolved = await self._stream_for(item.url)
+                    if not resolved:
+                        await self._reply(update, f"No se pudo reproducir: {exc}")
+                        return
+                    stream_url, audio_url = resolved
+            self._schedule_prefetch(item)
+            if update is not None:
+                await self._show_card(update.effective_chat.id)
             await self._send_track_card(
                 update, f"⏮️ Anterior: {item.title}", item
             )
+            return
+        # Fallback: item del historico de cola. No llamamos a _play_item
+        # (que hace _push_to_nav_back y limpiaria nav_forward). En su lugar,
+        # hacemos el manejo manual directo para preservar los stacks de navegacion.
+        self._cancel_prefetch()
+        resolved = await self._stream_for(item.url)
+        if not resolved:
+            await self._reply(update, "No se pudo resolver el video. Espera un momento e intenta de nuevo.")
+            return
+        stream_url, audio_url = resolved
+        try:
+            await self.player.start()
+        except RuntimeError as exc:
+            await self._reply(update, f"Problema al iniciar el reproductor: {exc}")
+            return
+        for attempt in range(2):
+            try:
+                await self.player.load(stream_url, audio_url)
+                await self.player.play()
+                self._paused = False
+                self.queue._current = item
+                self.queue._items = []
+                self.queue._cursor = 0
+                break
+            except RuntimeError as exc:
+                if attempt == 1 or item.url not in self._stream_cache:
+                    await self._reply(update, f"No se pudo reproducir: {exc}")
+                    return
+                logger.info("Stream cacheado expirado, re-resolviendo: %s", item.url)
+                self._stream_cache.pop(item.url, None)
+                resolved = await self._stream_for(item.url)
+                if not resolved:
+                    await self._reply(update, f"No se pudo reproducir: {exc}")
+                    return
+                stream_url, audio_url = resolved
+        self._schedule_prefetch(item)
+        if update is not None:
+            await self._show_card(update.effective_chat.id)
+        await self._send_track_card(
+            update, f"⏮️ Anterior: {item.title}", item
+        )
 
     async def cmd_stop(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         await self.player.stop()
         self.queue.clear()
         self._cancel_prefetch()
         self._clear_stream_cache()
+        self._clear_nav_stacks()
         self._queue_advance_needed = False
         self._radio_artist = ""
         self._paused = False

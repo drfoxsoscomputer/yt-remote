@@ -2,6 +2,7 @@
 
 Cubre: teclado de control, texto de estado, toggle play/pause, vol+-10,
 dispatch de callbacks ctl:*, reuso del boton 📋 y render de la tarjeta.
+Navegación prev/next con stacks (modo radio) y tests del mesonero.
 Sin red ni mpv real: se stubbea Player y el bot de Telegram.
 """
 
@@ -565,6 +566,170 @@ async def test_net_watch_job_reconnects_and_notifies():
     assert fb.sent == [], fb.sent
 
 
+def test_nav_stacks_initial_state():
+    """Los stacks de navegación arrancan vacios."""
+    b = make_bot()
+    assert list(b._nav_back) == []
+    assert list(b._nav_forward) == []
+
+
+async def test_nav_push_to_back_clears_forward():
+    """_push_to_nav_back guarda el current y limpia el forward stack."""
+    from queue_manager import QueueItem
+
+    b = make_bot()
+    b.queue.set_current(QueueItem(url="a", title="A"))
+    b._nav_forward.append(QueueItem(url="z", title="Z"))
+    b._push_to_nav_back()
+    # el current se guardó en back
+    assert len(b._nav_back) == 1
+    assert b._nav_back[-1].url == "a"
+    # y el forward stack se limpió
+    assert list(b._nav_forward) == []
+
+
+async def test_nav_clear_stacks():
+    """_clear_nav_stacks limpia ambos stacks."""
+    from queue_manager import QueueItem
+
+    b = make_bot()
+    b._nav_back.append(QueueItem(url="a", title="A"))
+    b._nav_forward.append(QueueItem(url="b", title="B"))
+    b._clear_nav_stacks()
+    assert list(b._nav_back) == []
+    assert list(b._nav_forward) == []
+
+
+async def test_nav_prev_next_cycle_radio():
+    """Navegación estándar: A -> next -> B -> prev -> A -> next -> B.
+
+    Sin playlist (modo radio), prev y next usan los stacks para que el
+    comportamiento sea simétrico: el segundo next reproduce el MISMO B
+    que se reprodujo antes del prev, no un candidato distinto.
+    """
+    import bot as bot_mod
+    from queue_manager import QueueItem
+
+    # Sin red: el mesonero resuelve cualquier URL a un stream fijo.
+    bot_mod.resolve_stream_url = lambda url: ("stream-" + url, None)
+    try:
+        b = make_bot()
+        # Sin ancla de artista ni red: _pick_next_candidate devuelve None, asi
+        # que solo probamos el camino de la pila back/forward.
+        b._radio_artist = ""
+        # Repositorio de "candidatos" para cuando next tiene que elegir uno nuevo.
+        candidates = iter([QueueItem(url="B", title="B"), None])
+        async def fake_pick(_current):
+            return next(candidates), False
+        b._pick_next_candidate = fake_pick
+
+        # 1) Suena A (simulamos un /buscar previo que eligió este tema).
+        b._clear_nav_stacks()
+        b.queue.set_current(QueueItem(url="A", title="A"))
+
+        # 2) next -> elige B (de la pila fake), lo reproduce.
+        await b.cmd_next(FakeUpdate("ctl:next"), SimpleNamespace(args=[]))
+        assert b.queue.current.url == "B"
+        # A quedó en la pila back, forward vacía.
+        assert [i.url for i in b._nav_back] == ["A"]
+        assert list(b._nav_forward) == []
+
+        # 3) prev -> A (pop de back); B va a forward.
+        await b.cmd_prev(FakeUpdate("ctl:prev"), SimpleNamespace(args=[]))
+        assert b.queue.current.url == "A"
+        assert [i.url for i in b._nav_back] == []
+        assert [i.url for i in b._nav_forward] == ["B"]
+
+        # 4) next -> B (pop de forward, el MISMO B del paso 2).
+        await b.cmd_next(FakeUpdate("ctl:next"), SimpleNamespace(args=[]))
+        assert b.queue.current.url == "B"
+        # back vacia (el flujo de forward stack no empuja nada);
+        # forward vacia (se consumio el item).
+        assert list(b._nav_back) == []
+        assert list(b._nav_forward) == []
+    finally:
+        bot_mod.resolve_stream_url = lambda url: None
+
+
+async def test_nav_next_chooses_new_candidate_when_forward_empty():
+    """Si la pila forward está vacía, next elige un candidato nuevo y
+    deja el actual en la pila back para un eventual prev."""
+    import bot as bot_mod
+    from queue_manager import QueueItem
+
+    bot_mod.resolve_stream_url = lambda url: ("stream-" + url, None)
+    try:
+        b = make_bot()
+        b._radio_artist = ""
+        b._clear_nav_stacks()
+        b.queue.set_current(QueueItem(url="A", title="A"))
+
+        new_pick = QueueItem(url="B", title="B")
+        async def fake_pick(_current):
+            return new_pick, False
+        b._pick_next_candidate = fake_pick
+
+        await b.cmd_next(FakeUpdate("ctl:next"), SimpleNamespace(args=[]))
+        assert b.queue.current.url == "B"
+        # A en back, forward vacía.
+        assert [i.url for i in b._nav_back] == ["A"]
+        assert list(b._nav_forward) == []
+    finally:
+        bot_mod.resolve_stream_url = lambda url: None
+
+
+async def test_nav_prev_falls_back_to_queue_history():
+    """Si la pila back está vacía, prev usa el histórico de items de la cola.
+    El fallback no preserva nav_forward (es navegación desde cola, no navegación
+    entre tracks elegidos por el usuario)."""
+    import bot as bot_mod
+    from queue_manager import QueueItem
+
+    bot_mod.resolve_stream_url = lambda url: ("stream-" + url, None)
+    try:
+        b = make_bot()
+        b._radio_artist = ""
+        b._clear_nav_stacks()
+        b.queue.set_current(QueueItem(url="A", title="A"))
+        b.queue._history_items.append(QueueItem(url="Z", title="Z"))
+
+        await b.cmd_prev(FakeUpdate("ctl:prev"), SimpleNamespace(args=[]))
+        assert b.queue.current.url == "Z"
+    finally:
+        bot_mod.resolve_stream_url = lambda url: None
+
+
+async def test_nav_playlist_unaffected():
+    """En modo playlist el cursor con wrap sigue mandando, no la pila."""
+    import bot as bot_mod
+    from queue_manager import QueueItem
+
+    bot_mod.resolve_stream_url = lambda url: ("stream-" + url, None)
+    try:
+        b = make_bot()
+        b._clear_nav_stacks()
+        items = [
+            QueueItem(url="A", title="A"),
+            QueueItem(url="B", title="B"),
+            QueueItem(url="C", title="C"),
+        ]
+        b.queue.set_playlist(items)
+        # Cursor esta en 0 (A suena). Mantenemos _items intactos.
+        fake_pick_items = [(items[1], True), (items[2], True)]
+        async def fake_pick(_):
+            return fake_pick_items.pop(0) if fake_pick_items else (None, False)
+        b._pick_next_candidate = fake_pick
+
+        # next -> B (cursor avanza a 1)
+        await b.cmd_next(FakeUpdate("ctl:next"), SimpleNamespace(args=[]))
+        assert b.queue.current.url == "B"
+        # prev -> A (cursor vuelve a 0, wrap)
+        await b.cmd_prev(FakeUpdate("ctl:prev"), SimpleNamespace(args=[]))
+        assert b.queue.current.url == "A"
+    finally:
+        bot_mod.resolve_stream_url = lambda url: None
+
+
 def run():
     test_control_keyboard_and_status()
     test_artist_seed_literal_or_channel()
@@ -582,6 +747,13 @@ def run():
     asyncio.run(test_cache_expired_retries_once())
     test_singleton_lock_rejects_second_instance()
     asyncio.run(test_net_watch_job_reconnects_and_notifies())
+    test_nav_stacks_initial_state()
+    asyncio.run(test_nav_push_to_back_clears_forward())
+    asyncio.run(test_nav_clear_stacks())
+    asyncio.run(test_nav_prev_next_cycle_radio())
+    asyncio.run(test_nav_next_chooses_new_candidate_when_forward_empty())
+    asyncio.run(test_nav_prev_falls_back_to_queue_history())
+    asyncio.run(test_nav_playlist_unaffected())
     print("TARJETA TESTS OK")
 
 
