@@ -1274,11 +1274,10 @@ class YTRemoteBot:
 
         self._from_card = True
         reflect_status = True
-        # Quita el spinner YA: las acciones re-renderizan la tarjeta o mandan
-        # toast despues; el boton no debe quedar clavado esperando al render.
-        # (vol-info re-responde despues con su toast, y eso gana sobre este.)
+        # Mostrar "Cargando..." inmediatamente al tocar el boton para que
+        # el usuario sepa que se registro el toque y el bot esta procesando.
         try:
-            await query.answer()
+            await query.answer("Cargando...")
         except Exception:
             pass
         try:
