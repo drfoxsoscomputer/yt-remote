@@ -155,15 +155,15 @@ def test_control_keyboard_and_status():
     b = make_bot()
     kb = b._control_keyboard()
     rows = kb.inline_keyboard
-    # Fila 1: 🔍 lupa + 4 botones de control; fila 2: vol-10, estado, vol+10, lista
+    # Fila 1: 4 botones de control (sin lupa); fila 2: vol-10, estado, vol+10, lista
     labels1 = [btn.text for btn in rows[0]]
     labels2 = [btn.text for btn in rows[1]]
-    assert labels1 == ["🔍", "⏮", "⏸️", "⏭", "⏹"], labels1
+    assert labels1 == ["⏮", "⏸️", "⏭", "⏹"], labels1
     assert labels2 == ["🔊−10", "🔊 100", "🔊+10", "📋"], labels2
-    # En pausa el botón central (indice 2, tras la lupa) debe ser ▶️
+    # En pausa el botón central (indice 1, sin lupa) debe ser ▶️
     b._paused = True
     kb = b._control_keyboard()
-    assert [btn.text for btn in kb.inline_keyboard[0]][2] == "▶️"
+    assert [btn.text for btn in kb.inline_keyboard[0]][1] == "▶️"
 
     # Estado: sin track
     assert "No hay ninguna cancion sonando." in b._track_status_text()
@@ -233,23 +233,6 @@ async def test_dispatch_unknown_action():
     await b._on_control(upd, SimpleNamespace(args=[]), "???")
 
 
-async def test_wizard_from_card_button_sends_new_message():
-    """La lupa de la tarjeta (ctl:buscar) abre el wizard con un MENSAJE NUEVO
-    en el chat: ni un toast invisible (estaba convirtiendo el prompt en un
-    query.answer() sin efecto) ni una edicion de la tarjeta del reproductor."""
-    b = make_bot()
-    upd = FakeUpdate("ctl:buscar", chat_id=44)
-    ctx = SimpleNamespace(args=[], bot=b._app.bot)
-    await b._on_control(upd, ctx, "buscar")
-    prompts = [m for m in b._app.bot.sent if "Paso 1 de 2" in str(m[1])]
-    assert prompts, b._app.bot.sent
-    assert prompts[0][0] == 44, prompts
-    # La tarjeta no se reescribio con el texto del wizard
-    assert not [e for e in b._app.bot.edited if "Paso" in str(e)], b._app.bot.edited
-    # El wizard quedo esperando el artista
-    assert b._wizard_state.get(77) == "artist"
-
-
 async def test_card_photo_created_and_media_edited():
     """Tarea 1: la tarjeta se crea como FOTO (miniatura+caption+botones en un
     solo mensaje) y el siguiente tema se refleja con edit_message_media (muda
@@ -290,7 +273,7 @@ async def test_card_text_fallback_without_thumbnail():
 
 
 class FakeMessageUpdate:
-    """Mensaje de texto mínimo para el wizard (on_wizard_text / cmd_play)."""
+    """Mensaje de texto mínimo para cmd_play (/buscar)."""
 
     def __init__(self, text, user_id=77, chat_id=44):
         self.sent = []
@@ -311,7 +294,7 @@ class FakeMessageUpdate:
 
 def test_artist_seed_literal_or_channel():
     """La semilla de la radio es SIEMPRE lo que escribió el usuario o, en
-    links/playlists sin wizard, el canal del video. El titulo JAMAS se parsea."""
+    links/playlists sin /buscar, el canal del video. El titulo JAMAS se parsea."""
     import bot as bot_mod
     from queue_manager import QueueItem
 
@@ -364,75 +347,42 @@ def test_radio_gate_strict_excludes_covers():
         bot_mod.search = original
 
 
-async def test_wizard_two_steps_and_anchor_literal():
-    """El wizard: Paso 1 pide el artista, Paso 2 la cancion. Al terminar, el
-    artista de la radio es EXACTAMENTE lo que escribio el usuario y la
-    busqueda se lanza con 'artista cancion'."""
+async def test_cmd_play_routes():
+    """/buscar: sin texto muestra el uso; con link reproduce directo; con
+    'artista - cancion' el artista se fija como ancla ANTES de buscar y la
+    busqueda se lanza con 'artista cancion'; sin guion, todo el texto ES el
+    artista (la busqueda se lanza con el texto tal cual)."""
     b = make_bot()
     calls = []
+    played = []
 
     async def fake_run(update, context, query):
         calls.append(query)
 
-    b._run_search = fake_run
-
-    ctx = SimpleNamespace(args=[], bot=b._app.bot)
-    upd = FakeMessageUpdate("")
-    await b._wizard_begin(upd, ctx)
-    assert b._wizard_state.get(77) == "artist"
-    assert "Paso 1 de 2" in b._app.bot.sent[0][1]
-
-    upd2 = FakeMessageUpdate("GP Band")
-    await b.on_wizard_text(upd2, SimpleNamespace(args=[]))
-    assert b._wizard_state.get(77) == "song"
-    assert b._wizard_artist[77] == "GP Band"
-    assert "Paso 2 de 2" in upd2.sent[0][0]
-
-    upd3 = FakeMessageUpdate("Inexplicable")
-    await b.on_wizard_text(upd3, SimpleNamespace(args=[]))
-    assert 77 not in b._wizard_state
-    assert 77 not in b._wizard_artist
-    assert b._radio_artist == "GP Band", b._radio_artist
-    assert calls == ["GP Band Inexplicable"], calls
-
-
-async def test_wizard_abort_with_cancel():
-    b = make_bot()
-    ctx = SimpleNamespace(args=[], bot=b._app.bot)
-    upd = FakeMessageUpdate("")
-    await b._wizard_begin(upd, ctx)
-    assert b._wizard_state.get(77) == "artist"
-    assert "Paso 1 de 2" in b._app.bot.sent[0][1]
-    await b.cmd_cancelar(FakeMessageUpdate(""), SimpleNamespace(args=[]))
-    assert 77 not in b._wizard_state
-    assert 77 not in b._wizard_artist
-
-
-async def test_cmd_play_routes():
-    """/buscar sin texto abre el wizard (paso 1); con texto libre va como
-    artista directo (paso 2); con link reproduce directo."""
-    b = make_bot()
-    began = []
-
-    async def fake_begin(update, context, hint=""):
-        began.append(hint)
-
-    b._wizard_begin = fake_begin
-    played = []
-
     async def fake_play(update, context, query):
         played.append(query)
 
+    b._run_search = fake_run
     b._play_link_or_playlist = fake_play
 
-    await b.cmd_play(FakeMessageUpdate(""), SimpleNamespace(args=[]))
-    assert began == [""], began
-    await b.cmd_play(FakeMessageUpdate(""), SimpleNamespace(args=["Mafe Restrepo"]))
-    assert began == ["", "Mafe Restrepo"], began
-    await b.cmd_play(
-        FakeMessageUpdate(""), SimpleNamespace(args=["https://youtu.be/abc"])
-    )
+    empty_upd = FakeMessageUpdate("")
+    await b.cmd_play(empty_upd, SimpleNamespace(args=[]))
+    assert calls == [] and played == [], "sin texto no debe buscar ni reproducir"
+    assert "Uso:" in empty_upd.sent[-1][0], empty_upd.sent
+
+    await b.cmd_play(FakeMessageUpdate(""), SimpleNamespace(args=["https://youtu.be/abc"]))
     assert played == ["https://youtu.be/abc"], played
+    assert calls == [], "un link no debe pasar por la busqueda"
+
+    await b.cmd_play(
+        FakeMessageUpdate(""), SimpleNamespace(args=["GP", "Band", "-", "Inexplicable"])
+    )
+    assert calls == ["GP Band Inexplicable"], calls
+    assert b._radio_artist == "GP Band", b._radio_artist
+
+    await b.cmd_play(FakeMessageUpdate(""), SimpleNamespace(args=["Mafe Restrepo"]))
+    assert calls == ["GP Band Inexplicable", "Mafe Restrepo"], calls
+    assert b._radio_artist == "Mafe Restrepo", b._radio_artist
 
 
 async def _wait_until(pred, timeout=2.0):
@@ -560,15 +510,6 @@ async def test_cache_expired_retries_once():
         bot_mod.resolve_stream_url = original
 
 
-async def test_wizard_no_active_state_replies():
-    """Texto sin wizard activo NUNCA queda en silencio: avisa, no traga."""
-    b = make_bot()
-    upd = FakeMessageUpdate("gp band")
-    await b.on_wizard_text(upd, SimpleNamespace(args=[]))
-    assert upd.sent, f"deberia haber respondido, no callar: {upd.sent}"
-    assert "No hay una busqueda activa" in upd.sent[0][0], upd.sent
-
-
 def test_singleton_lock_rejects_second_instance():
     """El lock de instancia local: el primero toma el puerto, el segundo no arranca."""
     import main as main_mod
@@ -628,8 +569,6 @@ def run():
     test_control_keyboard_and_status()
     test_artist_seed_literal_or_channel()
     test_radio_gate_strict_excludes_covers()
-    asyncio.run(test_wizard_two_steps_and_anchor_literal())
-    asyncio.run(test_wizard_abort_with_cancel())
     asyncio.run(test_cmd_play_routes())
     asyncio.run(test_toggle_and_volume())
     asyncio.run(test_card_created_and_edited())
@@ -641,7 +580,6 @@ def run():
     asyncio.run(test_stream_for_dedupes_inflight())
     asyncio.run(test_anticipate_urls_serial_and_clear())
     asyncio.run(test_cache_expired_retries_once())
-    asyncio.run(test_wizard_no_active_state_replies())
     test_singleton_lock_rejects_second_instance()
     asyncio.run(test_net_watch_job_reconnects_and_notifies())
     print("TARJETA TESTS OK")
