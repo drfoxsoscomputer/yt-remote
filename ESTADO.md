@@ -53,7 +53,7 @@ ZIP portable de 48 MB adjunto al release. Quien clone o descargue el ZIP no nece
 - **Hardening**: drop_pending_updates en run_polling, vigilante de red con `_on_bot_error` + `_net_watch_job` (15s), singleton lock en puerto 47631, retry de `send_photo`.
 
 ## Pendientes / ToDo
-- [ ] **Tests**: `src/test_card.py` tiene 22 errores LSP (stubs no coinciden con firmas reales de Player, `_pick_next_candidate` con parametro renombrado). Antes de la proxima feature hay que dejarlo verde.
+- [x] **Tests `test_card.py`**: 22 errores LSP corregidos (player.py: self._loaded + property loaded; test_card.py: Config real, fake_pick stubs con tipo completo, assertions basadas en estado interno del bot, cast en queue.current). py_compile OK + tests OK.
 - [ ] **Manejo de errores de red en `_pick_next_candidate`**: si yt-dlp falla por rate limit o sin internet, la radio queda muda. Pendiente: try/except con fallback a "no pude buscar el siguiente, usá /lista".
 - [x] **Bounds check visible de /volume**: ya valida 0-100 y avisa "entre 0 y 100" en cliente.
 - [ ] **Probar en vivo con Telegram**: tarjeta-foto unica, radio por artista, cache mesonero (todo verificado en sandbox; falta la prueba real del usuario).
@@ -74,4 +74,4 @@ ZIP portable de 48 MB adjunto al release. Quien clone o descargue el ZIP no nece
 - YTRemoteBot instancia sin red y registra al dueno (OWNER_ID) como admin (verificado).
 - Sintaxis OK en todos los .py (`python -m py_compile`); dependencias importan en el Python embebido.
 - resolve_stream_url(): busca + resuelve + carga en mpv con streams separados (video VP9 + audio Opus via audio-add). Verificado: mpv reproduce con exito.
-- **Tests unitarios `test_card.py`**: ROTOS (22 errores LSP). Bloqueante para refactor seguro.
+- **Tests unitarios `test_card.py`**: VERDES (0 errores LSP). player.py expone `_loaded` y property `loaded` para que las assertions funcionen.
