@@ -48,6 +48,9 @@ def main() -> None:
     # Al salir el bot, matar tambien mpv: si no, cada cierre deja un proceso
     # mpv huerfano con su ventana abierta (se acumulan en segundo plano).
     atexit.register(bot.player._quit)
+    # Persistir el estado antes de salir: el debounce podria tener un
+    # flush pendiente y un Ctrl+C no lo ejecuta.
+    atexit.register(bot._persist_flush)
 
     app = bot.build()
     # drop_pending_updates: los mensajes que llegaron mientras la PC estuvo

@@ -57,8 +57,10 @@ def make_bot():
     """Crea un bot con role manager en memoria y player fake.
     _chat_allowed se monkey-patchea para que siempre devuelva True
     (aisla el test de la logica de chat/owner)."""
+    import tempfile
     import bot as bot_mod
     from config import Config
+    from persistence import StateStore
 
     config = Config(
         token="test",
@@ -76,6 +78,9 @@ def make_bot():
     object.__setattr__(b, "roles", InMemoryRoles())
     object.__setattr__(b, "_roles", b.roles)
     b._chat_allowed = lambda update: True
+    # Aislar la persistencia: nunca tocar el state.json real del proyecto.
+    tmp = tempfile.TemporaryDirectory()
+    b._state = StateStore(Path(tmp.name) / "state.json")
     return b
 
 
