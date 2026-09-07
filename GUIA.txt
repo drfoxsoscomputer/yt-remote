@@ -4,57 +4,57 @@ GUÍA DE YT-REMOTE
 ¿QUÉ ES?
 --------
 YT-Remote es un bot de Telegram que controla la reproducción de videos
-de YouTube en tu PC. Le mandas órdenes desde Telegram y los videos
+de YouTube en su PC. Le manda órdenes desde Telegram y los videos
 se reproducen en la computadora donde esté corriendo el programa.
 
 
-PASO 1 - CREAR TU BOT
+PASO 1 - CREAR SU BOT
 ---------------------
-1. Abre Telegram y busca a @BotFather.
-2. Escríbele:   /newbot
-3. Elige un nombre para el bot (el que quieras).
-4. Elige un nombre de usuario (debe terminar en "bot").
-5. @BotFather te da un código tipo:   1234567890:AAHxh......
-   Ese código es tu TOKEN. Guárdalo.
+1. Abra Telegram y busque a @BotFather.
+2. Escríbale:   /newbot
+3. Elija un nombre para el bot (el que quiera).
+4. Elija un nombre de usuario (debe terminar en "bot").
+5. @BotFather le da un código tipo:   1234567890:AAHxh......
+   Ese código es su TOKEN. Guárdelo.
 
 
-PASO 2 - CONSEGUIR TU ID
--------------------------
-1. En Telegram busca a @userinfobot.
-2. Escríbele cualquier mensaje (por ejemplo: hola).
-3. Te muestra tu número de ID, tipo:   123456789
-   Ese es tu ID. Guárdalo.
+PASO 2 - CONSEGUIR SU ID
+------------------------
+1. En Telegram busque a @userinfobot.
+2. Escríbale cualquier mensaje (por ejemplo: hola).
+3. Le muestra su número de ID, tipo:   123456789
+   Ese es su ID. Guárdelo.
 
 
 PASO 3 - ARRANCAR
-------------------
+-----------------
 1. Doble clic en  ytremote.bat
-2. La primera vez te pide tu TOKEN y tu ID. Pégalos como indica.
-3. El bot arranca solo. Déjalo abierto.
-4. Crea un grupo en Telegram, agrega el bot y escribe:   /start
+2. La primera vez le pide su TOKEN y su ID. Péguelos como indica.
+3. El bot arranca solo. Déjelo abierto.
+4. Cree un grupo en Telegram, agregue el bot y escriba:   /start
    El bot se configura solo para funcionar ahí.
 
 
 CÓMO BUSCAR Y REPRODUCIR
---------------------------
-Escribe:   /buscar  Kent Leroy - Dame Jesús
+-------------------------
+Escriba:   /buscar  Kent Leroy - Dame Jesús
 
 Lo que va ANTES del guion medio (el "-") es el ARTISTA. El bot toma
 ese texto como punto de referencia para reproducir canciones del mismo
 cantante una tras otra. Lo que va DESPUÉS del guion es la canción
-que quieres escuchar primero.
+que quiere escuchar primero.
 
-Si no usas el guion, todo el texto se toma como el nombre del artista.
+Si no usa el guion, todo el texto se toma como el nombre del artista.
 Ej:   /buscar Jesus Adrian Romero   reproduce temas de Jesus Adrian Romero.
 
-Si pegas un link de YouTube directo, el bot reproduce ese video sin
+Si pega un link de YouTube directo, el bot reproduce ese video sin
 buscar nada.
 
 
 LA TARJETA DE REPRODUCCIÓN
----------------------------
+--------------------------
 Cuando empieza a sonar algo, el bot muestra una tarjeta con botones
-que te permiten controlar la reproducción sin escribir comandos:
+que le permiten controlar la reproducción sin escribir comandos:
 
 Fila 1:
   ⏮  — vuelve a la canción anterior
@@ -70,17 +70,17 @@ Fila 2:
 
 
 COMPORTAMIENTO DE LA RADIO
---------------------------
+-------------------------
 Cuando termina una canción, el bot reproduce automáticamente otra del
-mismo artista que elegiste al buscar. Cada vez que pulses ⏭ salta
+mismo artista que eligió al buscar. Cada vez que pulse ⏭ salta
 a la siguiente canción del mismo artista.
 
-El bot no cambia de cantante solo. Si quieres escuchar otro artista,
-usa /buscar con el nombre del nuevo artista.
+El bot no cambia de cantante solo. Si quiere escuchar otro artista,
+use /buscar con el nombre del nuevo artista.
 
 Con artistas que tienen muchas canciones en YouTube, la radio puede
 sonar largo rato sin repetirse. Si el catálogo del artista se agota,
-el bot te avisa.
+el bot le avisa.
 
 
 COMANDOS DISPONIBLES
@@ -99,7 +99,7 @@ Todos (user, dj, admin):
   /lista                          muestra la lista; /lista N salta al tema N
 
 Un user que quiera ser dj puede escribir /solicitar para pedirle al
-admin que le de acceso.
+admin que le dé acceso.
 
 
 ROLES Y PERMISOS
@@ -108,15 +108,15 @@ ROLES Y PERMISOS
   dj     — buscar, controlar musica (tarjeta y comandos)
   user   — solo puede ver la lista con /lista o el boton 📋
 
-Por defecto solo el dueño (vos) sos admin. Para darle acceso a otros,
-necesitás su ID de Telegram y usás /adduser.
+Por defecto solo el dueño es admin. Para darle acceso a otros,
+necesita su ID de Telegram y use /adduser.
 
 
 PROBLEMAS COMUNES
 -----------------
-- Si al hacer doble clic no pasa nada, volvé a descargar la versión
+- Si al hacer doble clic no pasa nada, vuelva a descargar la versión
   completa desde el repositorio.
-- Si el bot no responde en el grupo, проверь que hayas agregado el bot
-  y le hayas enviado /start.
+- Si el bot no responde en el grupo, verifique que haya agregado el bot
+  y le haya enviado /start.
 - Si un video no se puede reproducir, puede que esté restringido o
-  no esté disponible en tu país.
+  no esté disponible en su país.
