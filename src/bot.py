@@ -1023,15 +1023,55 @@ class YTRemoteBot:
     async def _run_search(
         self, update: Update, context: ContextTypes.DEFAULT_TYPE, query: str
     ) -> None:
-        """Busca en YouTube y muestra el listado de resultados con botones."""
-        await context.bot.send_message(
-            update.effective_chat.id, "Buscando...", parse_mode=ParseMode.HTML
-        )
+        """Busca en YouTube y muestra el listado de resultados con botones.
+
+        Envia un mensaje "Buscando..." inmediato (asi el usuario no piensa
+        que su comando se perdio) y lo EDITA con los resultados en lugar de
+        mandar un segundo mensaje: queda un solo mensaje visible en el chat.
+        """
+        chat_id = update.effective_chat.id if update.effective_chat else None
+        if chat_id is None:
+            await self._reply(update, "Buscando...")
+            return
+        # Mensaje inmediato: el usuario ve que el bot recibio el comando.
+        try:
+            pending = await context.bot.send_message(
+                chat_id, "🔎 Buscando...", parse_mode=ParseMode.HTML
+            )
+            pending_id = pending.message_id
+        except Exception:
+            pending_id = None
+
         # yt-dlp es lento y bloqueante: ejecutarlo en un thread para no
         # congelar el bot mientras busca.
-        results = await asyncio.to_thread(search, query, self.config.max_results)
+        try:
+            results = await asyncio.to_thread(search, query, self.config.max_results)
+        except Exception as exc:
+            if pending_id is not None:
+                try:
+                    await context.bot.edit_message_text(
+                        f"❌ Error al buscar: {exc}",
+                        chat_id=chat_id,
+                        message_id=pending_id,
+                    )
+                except Exception:
+                    pass
+            else:
+                await self._reply(update, f"❌ Error al buscar: {exc}")
+            return
+
         if not results:
-            await self._reply(update, "No encontre resultados.")
+            if pending_id is not None:
+                try:
+                    await context.bot.edit_message_text(
+                        "No encontre resultados.",
+                        chat_id=chat_id,
+                        message_id=pending_id,
+                    )
+                except Exception:
+                    pass
+            else:
+                await self._reply(update, "No encontre resultados.")
             return
 
         # Nueva busqueda reemplaza el cache de streams: queda solo con las
@@ -1050,13 +1090,30 @@ class YTRemoteBot:
         self._anticipate_urls([r.url for r in results])
 
         reply_markup = InlineKeyboardMarkup(keyboard)
-        # Listado de resultados sin miniatura: la miniatura se muestra al
-        # elegir un video (es la tarjeta persistente del mini reproductor).
-        await context.bot.send_message(
-            update.effective_chat.id,
-            "Elige un video:",
-            reply_markup=reply_markup,
-        )
+        # Editamos el mismo mensaje "Buscando..." con los resultados: queda
+        # un solo mensaje en el chat, no dos.
+        try:
+            if pending_id is not None:
+                await context.bot.edit_message_text(
+                    f"Resultados para '{query}':",
+                    chat_id=chat_id,
+                    message_id=pending_id,
+                    reply_markup=reply_markup,
+                )
+            else:
+                await context.bot.send_message(
+                    chat_id,
+                    f"Resultados para '{query}':",
+                    reply_markup=reply_markup,
+                )
+        except Exception:
+            # Si la edicion falla (mensaje viejo, race condition), mandamos
+            # uno nuevo para no dejar al usuario sin respuesta.
+            await context.bot.send_message(
+                chat_id,
+                f"Resultados para '{query}':",
+                reply_markup=reply_markup,
+            )
 
     async def on_callback(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         query = update.callback_query
