@@ -927,14 +927,14 @@ class YTRemoteBot:
                 setup.set_allowed_chat_id(allowed)
                 self.config.allowed_chat_id = allowed
                 logger.info("Grupo permitido configurado: %s", allowed)
-                await self._reply(update, "Configurado: este chat quedo habilitado para el bot.\n\n" + "Comandos disponibles para tu rol (admin):\n" + self.help_for_role("admin"))
+                await self._reply(update, "Configurado: este chat quedo habilitado para el bot.\n\n" + "Comandos disponibles para su rol (admin):\n" + self.help_for_role("admin"))
                 return
 
         if not self._chat_allowed(update):
             await self._reply(update, "Este bot no esta habilitado en este chat.")
             return
 
-        await self._reply(update, "YT-Remote activo.\n\n" + f"Comandos disponibles para tu rol ({user_role}):\n" + self.help_for_role(user_role))
+        await self._reply(update, "YT-Remote activo.\n\n" + f"Comandos disponibles para su rol ({user_role}):\n" + self.help_for_role(user_role))
 
     async def cmd_play(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         """Busca y reproduce en un solo paso desde /buscar.
@@ -1243,7 +1243,7 @@ class YTRemoteBot:
 
         CONTROL_ACTIONS = {"pp", "prev", "next", "stop", "vol-10", "vol+10", "vol-info"}
         if action in CONTROL_ACTIONS and user_id is not None and not self.roles.has_role(user_id, "dj"):
-            await query.answer("No tenes permiso para eso.", show_alert=True)
+            await query.answer("No tiene permiso para eso.", show_alert=True)
             return
 
         self._card_chat_id = update.effective_chat.id
@@ -1736,7 +1736,7 @@ class YTRemoteBot:
         if user is None:
             return
         if self.roles.get_role(user.id) != "user":
-            await self._reply(update, "Ya tenes un rol asignado.")
+            await self._reply(update, "Ya tiene un rol asignado.")
             return
         admin_ids = self.roles.get_all_with_role("admin")
         for admin_id in admin_ids:

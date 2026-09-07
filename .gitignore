@@ -1,8 +1,4 @@
-# Virtualenv (enfoque anterior, ya no se usa)
-venv/
-.env
-
-# Datos generados en tiempo de ejecucion
+# Data generados en tiempo de ejecucion
 data/roles.json
 data/*.json
 
@@ -43,3 +39,18 @@ runtime/python/Lib/site-packages/*pygments*.dist-info/
 runtime/python/Lib/site-packages/*colorama*.dist-info/
 runtime/python/Lib/site-packages/*iniconfig*.dist-info/
 runtime/python/Lib/site-packages/*packaging*.dist-info/
+
+# Scripts y demas no incluidos en el release
+scripts/
+.githooks/
+exclude.txt
+make_zip.py
+
+# Entorno virtual (no necesario en el portable)
+venv/
+runtime/python/Lib/site-packages/_pytest/
+runtime/python/Lib/site-packages/_pytest-*.dist-info/
+runtime/python/Lib/site-packages/pluggy/
+runtime/python/Lib/site-packages/pluggy-*.dist-info/
+runtime/python/Lib/site-packages/pytest-*.dist-info/
+runtime/python/Lib/site-packages/_pip-*.dist-info/

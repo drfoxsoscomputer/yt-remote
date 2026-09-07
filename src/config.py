@@ -85,12 +85,12 @@ def load_config() -> Config:
     if config.token in ("", "TU_TOKEN_AQUI"):
         raise ValueError(
             "El token de Telegram no está configurado.\n"
-            f"1. Crea el archivo .env en {PROJECT_ROOT}\n"
-            "2. Escribe en el archivo, con tus datos reales:\n"
-            "      TELEGRAM_TOKEN=tu_token_de_botfather\n"
+            f"1. Cree el archivo .env en {PROJECT_ROOT}\n"
+            "2. Escriba en el archivo, con sus datos reales:\n"
+            "      TELEGRAM_TOKEN=su_token_de_botfather\n"
             "      OWNER_ID=123456789\n"
-            "3. OWNER_ID es tu ID de Telegram (se consigue con @userinfobot).\n"
-            "(El .env no se sube a GitHub; queda solo en tu máquina)."
+            "3. OWNER_ID es su ID de Telegram (se consigue con @userinfobot).\n"
+            "(El .env no se sube a GitHub; queda solo en su máquina)."
         )
 
     return config
