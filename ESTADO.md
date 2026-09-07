@@ -56,8 +56,14 @@ botones, radio automatica por artista, roles (admin/dj/user).
 
 ## Estado actual
 **v0.2.1 publicado en https://github.com/drfoxsoscomputer/yt-remote/releases/tag/v0.2.1**
-ZIP portable de 42.4 MB adjunto al release. Quien clone o descargue el ZIP no
-neede instalar Python ni mpv.
+ZIP portable de ~44.5 MB adjunto al release. Quien clone o descargue el ZIP no
+necesita instalar Python ni mpv.
+
+> **Nota 2026-09-07**: el primer ZIP subido no incluia `typing_extensions.py`
+> (paquete suelto en `site-packages/`, no carpeta) y el bot crasheaba al
+> arrancar con `ModuleNotFoundError`. Se corrigio `make_zip.py` (filtrar por
+> nombre quitando el `.py`) y se re-subio el ZIP corregido con `--clobber`.
+> Si al descargar da error, borrarlo y volver a descargar.
 
 ### Features de v0.2.1 (sobre v0.2.0)
 - **Modelo de roles simplificado**: user = nada (solo ver lista), dj = buscar +
