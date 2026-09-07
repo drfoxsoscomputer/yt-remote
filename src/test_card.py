@@ -114,15 +114,19 @@ class FakeApp:
 class FakeUpdate:
     """Callback query mínimo para disparar _on_control."""
 
-    def __init__(self, data, message_id=7, chat_id=44):
+    def __init__(self, data, message_id=7, chat_id=44, user_id=77):
         self.data = data
         self.answered = None
 
         class _Query:
-            def __init__(self, parent):
+            def __init__(self, parent, uid):
                 self.parent = parent
+                self._uid = uid
                 self.message = SimpleNamespace(message_id=message_id)
-                self.from_user = SimpleNamespace(id=77)
+
+            @property
+            def from_user(self):
+                return SimpleNamespace(id=self._uid)
 
             async def answer(self, *args, **kwargs):
                 self.parent.answered = args
@@ -131,9 +135,9 @@ class FakeUpdate:
             def data(self):
                 return self.parent.data
 
-        self.callback_query = _Query(self)
+        self.callback_query = _Query(self, user_id)
         self.chat = SimpleNamespace(id=chat_id)
-        self.effective_user = SimpleNamespace(id=77)
+        self.effective_user = SimpleNamespace(id=user_id)
 
     @property
     def effective_chat(self):
