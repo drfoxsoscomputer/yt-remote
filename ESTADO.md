@@ -83,6 +83,16 @@ necesita instalar Python ni mpv.
    actualizado para nunca incluirlos.
 
 ### Detalles de diseño vigentes
+- **Persistencia de estado (NUEVA en v0.2.2)**: `src/persistence.py` guarda en
+  `data/state.json` volumen, pausa, cancion actual, playlist, historial (100),
+  ancla de radio y la tarjeta. Escritura atomica (`os.replace`) + debounce 500ms.
+  Al reiniciar: NO auto-reanuda (arranca en pausa), re-edita la tarjeta con
+  "🔄 Retomada del cierre anterior: usa ▶ para reanudar."
+- **Diagnostico remoto por Telegram (NUEVO)**: `resolve_stream_url` hoy prueba
+  client 'visionos' y, si falla, reintenta UNA vez con el client por defecto de
+  yt-dlp (algunas redes/ISP lo rechazan). Cuando no se puede resolver, el motivo
+  real de yt-dlp viaja en el mensaje de error del bot (`last_resolve_error()`),
+  sin pedirle consolas al usuario afectado.
 - **Tarjeta persistente con botones**: edita el MISMO mensaje con
   `[⏮ ▶/⏸ ⏭ ⏹]` + `[🔊−10 🔊+10 📋]`. Callbacks `ctl:prev|pp|next|stop|vol-10|vol+10|lista`
   despachados por `_on_control`.
@@ -113,9 +123,19 @@ necesita instalar Python ni mpv.
 - [x] **Botones de la tarjeta**: user ve todos pero no puede usarlos (excepto
   📋). Solo dj/admin usan los controles.
 - [x] **Documentacion actualizada**: README.md y GUIA.txt reflejan el nuevo
-  modelo de roles.
-- [ ] **Pruebas en vivo con Telegram**: verificar que user no pueda usar
-  botones de control, /buscar requiere dj, /solicitar llega al admin.
+   modelo de roles.
+- [x] **Persistencia de estado completa** (Fase 1 y 2, 2026-09-07): StateStore
+   atómico + versionado, QueueItem serializable, instrumentación de
+   cambios, tarjeta re-editada al arranque con pausa forzada. Tests: 3 suites
+   verdes (tarjeta/roles/persistencia) sin tocar el state.json real (make_bot
+   aislado con temporal).
+- [x] **Diagnostico remoto del ZIP v0.2.1** (2026-09-07): se descartó "falta un
+   archivo" (el zip funciona en la PC del usuario; yt-dlp igual en ambos).
+   Sospecha: firewall/antivirus o ISP bloquea mpv.exe / googlevideo.com.
+   Solución sin trabajo para el usuario: fallback de client en resolución +
+   motivo real por Telegram. ZIP reconstruido con los fuentes nuevos.
+- [x] **Pruebas en vivo con Telegram**: verificar que user no pueda usar
+   botones de control, /buscar requiere dj, /solicitar llega al admin.
 
 ## Decisiones recientes
 - **v0.2.1 release**: features principales (modelo de roles simplificado, /solicitar,

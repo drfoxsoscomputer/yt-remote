@@ -25,6 +25,31 @@ class QueueItem:
     channel: str = ""
     artist: str = ""
 
+    def to_dict(self) -> dict:
+        """Serializa el item para persistence (data/state.json)."""
+        return {
+            "url": self.url,
+            "title": self.title,
+            "duration": self.duration,
+            "duration_seconds": self.duration_seconds,
+            "thumbnail": self.thumbnail,
+            "channel": self.channel,
+            "artist": self.artist,
+        }
+
+    @classmethod
+    def from_dict(cls, d: dict) -> "QueueItem":
+        """Restaura un item desde persistence. Campos faltantes usan defaults."""
+        return cls(
+            url=d.get("url", ""),
+            title=d.get("title", ""),
+            duration=d.get("duration", ""),
+            duration_seconds=d.get("duration_seconds", 0),
+            thumbnail=d.get("thumbnail", ""),
+            channel=d.get("channel", ""),
+            artist=d.get("artist", ""),
+        )
+
 
 class QueueManager:
     """Playlist fija con cursor (bucle) + modo radio con historico.

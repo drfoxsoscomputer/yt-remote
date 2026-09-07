@@ -189,6 +189,10 @@ def resolve_stream_url(youtube_url: str) -> tuple[str, str | None] | None:
     expone los formatos de alta resolucion. Con 'android' el bot quedaba
     limitado a 360p.
 
+    Si 'visionos' falla (hay redes/ISP que lo rechazan), se reintenta UNA vez
+    con el client por defecto de yt-dlp. El ultimo error real queda expuesto
+    en last_resolve_error para que el bot pueda diagnosticar por Telegram.
+
     La resolucion se limita a 1080p ('bestvideo[height<=1080]+bestaudio');
     si el video no tiene esa resolucion se toma la mayor que no la supere.
 
@@ -197,17 +201,53 @@ def resolve_stream_url(youtube_url: str) -> tuple[str, str | None] | None:
     """
     import yt_dlp
 
-    opts: "dict[str, Any]" = {
+    global _RESOLVE_LAST_ERROR  # noqa: PLW0603
+    _RESOLVE_LAST_ERROR = ""
+
+    # (nombre, opts extra). Primer intento: visionos. Fallback: client default.
+    strategies = [
+        ("visionos", {"extractor_args": {"youtube": {"player_client": ["visionos"]}}}),
+        ("default", {}),
+    ]
+    base_opts: "dict[str, Any]" = {
         "quiet": True,
         "no_warnings": True,
         "skip_download": True,
         "noplaylist": True,
         "format": "bestvideo[height<=1080]+bestaudio/best",
-        "extractor_args": {"youtube": {"player_client": ["visionos"]}},
     }
+
+    for client_name, extra in strategies:
+        opts = dict(base_opts)
+        opts.update(extra)
+        result = _resolve_with(client_name, opts, youtube_url)
+        if result is not None:
+            return result
+        # Si fallo, _resolve_with dejo el motivo real en _RESOLVE_LAST_ERROR
+        # (el del ultimo intento, que es el mas representativo).
+    return None
+
+
+# Ultimo error observado al resolver streams (diagnostico remoto por Telegram).
+_RESOLVE_LAST_ERROR: str = ""
+
+
+def last_resolve_error() -> str:
+    """Devuelve el motivo del ultimo fallo de resolucion, o vacio si no hubo."""
+    return _RESOLVE_LAST_ERROR
+
+
+def _resolve_with(client_name: str, opts: dict, youtube_url: str) -> tuple[str, str | None] | None:
+    """Intenta resolver el stream con una config de yt-dlp dada.
+
+    Registra el primer error real en _RESOLVE_LAST_ERROR (diagnostico).
+    """
+    global _RESOLVE_LAST_ERROR  # noqa: PLW0603
+    import yt_dlp
+
     try:
-        with yt_dlp.YoutubeDL(opts) as ydl:
-            info = ydl.extract_info(youtube_url, download=False)
+        with yt_dlp.YoutubeDL(opts) as ydl:  # type: ignore[arg-type]
+            info: "dict[str, Any]" = ydl.extract_info(youtube_url, download=False) or {}  # type: ignore[assignment]
             if not info:
                 return None
 
@@ -236,6 +276,7 @@ def resolve_stream_url(youtube_url: str) -> tuple[str, str | None] | None:
             # Fallback: webpage URL (mpv intentara resolver con su ytdl hook)
             if info.get("webpage_url"):
                 return (str(info["webpage_url"]), None)
-    except Exception:
-        pass
+    except Exception as exc:  # noqa: BLE001 - el motivo se reporta por Telegram
+        _RESOLVE_LAST_ERROR = str(exc)
+        return None
     return None

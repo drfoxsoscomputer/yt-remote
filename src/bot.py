@@ -28,9 +28,10 @@ from telegram.ext import (
 
 from config import Config
 from player import Player
+from persistence import StateStore
 from queue_manager import QueueItem, QueueManager
 from roles import VALID_ROLES, RoleManager
-from search import SearchResult, is_playlist_url, expand_playlist, is_youtube_link, search, resolve_stream_url, thumbnail_from_url
+from search import SearchResult, is_playlist_url, expand_playlist, is_youtube_link, search, resolve_stream_url, thumbnail_from_url, last_resolve_error
 import setup_cli as setup
 
 logging.basicConfig(
@@ -91,7 +92,79 @@ class YTRemoteBot:
         # actualizan en _play_item y se limpian al cambiar de fuente.
         self._nav_back: deque[QueueItem] = deque(maxlen=100)
         self._nav_forward: deque[QueueItem] = deque(maxlen=100)
+        # Persistencia: volumen, pausa, cola, historial y radio artist
+        # sobreviven a reinicios. Por defecto arranca en pausa si habia
+        # algo sonando (el usuario decide reanudar con /play).
+        self._state = StateStore()
+        # True si se restauro estado previo (hay una cancion que retomar),
+        # para el texto "retoma" en la tarjeta.
+        self._restored: bool = False
+        self._load_persisted_state()
         self._register_owner()
+
+    def _persist_dirty(self) -> None:
+        """Construye el estado actual y lo marca como dirty para guardado."""
+        history = [i.to_dict() for i in list(self.queue._history_items)[-100:]]
+        self._state._current = {
+            "version": 1,
+            "volume": self._volume,
+            "paused": self._paused,
+            "current": self.queue.current.to_dict() if self.queue.current else None,
+            "playlist": [i.to_dict() for i in self.queue._items],
+            "history": history,
+            "radio_artist": self._radio_artist,
+            "card": {
+                "chat_id": self._card_chat_id,
+                "message_id": self._card_message_id,
+                "is_photo": self._card_is_photo,
+            },
+        }
+        self._state.mark_dirty()
+
+    def _persist_flush(self) -> None:
+        """Guardado inmediato: llama save() sin esperar el debounce."""
+        self._persist_dirty()
+        self._state.flush()
+
+    def _load_persisted_state(self) -> None:
+        """Carga el estado persistente y aplica valores al bot.
+
+        Si no hay archivo o esta corrupto, usa defaults:
+        - volumen 100, sin pausa, sin cola.
+        Al arrancar, la cancion queda en pausa para que el usuario confirme.
+        """
+        loaded = self._state.load()
+        self._volume = loaded.get("volume", 100)
+        self._radio_artist = loaded.get("radio_artist", "")
+        has_current = bool(loaded.get("current"))
+        self._restored = has_current
+        # Si se restauro una cancion, arranca en PAUSA aunque el estado
+        # guardado dijera "sonando": el autoadvance no corre y el usuario
+        # decide reanudar con /play (o el boton ▶ de la tarjeta).
+        self._paused = True if has_current else loaded.get("paused", False)
+        if loaded.get("current"):
+            try:
+                self.queue._current = QueueItem.from_dict(loaded["current"])
+            except Exception:
+                pass
+        if loaded.get("playlist"):
+            try:
+                self.queue._items = [QueueItem.from_dict(i) for i in loaded["playlist"]]
+                self.queue._cursor = 0
+            except Exception:
+                pass
+        if loaded.get("history"):
+            try:
+                self.queue._history_items = deque(
+                    [QueueItem.from_dict(i) for i in loaded["history"][-100:]],
+                    maxlen=100,
+                )
+            except Exception:
+                pass
+        card = loaded.get("card") or {}
+        self._card_chat_id = card.get("chat_id")
+        self._card_message_id = card.get("message_id")
+        self._card_is_photo = bool(card.get("is_photo"))
 
     def _push_to_nav_back(self) -> None:
         """Guarda el item actual en la pila de navegación hacia atrás.
@@ -167,6 +240,11 @@ class YTRemoteBot:
                 "BOT ARRANCADO (pid=%s)",
                 os.getpid(),
             )
+            # Si se restauro estado previo con una cancion y hay tarjeta
+            # persistida, se re-edita la tarjeta con el texto "retoma"
+            # (la tarjeta queda "viva" al volver al chat).
+            if self._restored and self._card_message_id is not None:
+                await self._render_card(self._track_status_text())
             # Aviso de comandos perdidos: se lee el backlog ANTES de que el
             # polling lo consuma (post_init corre antes del start).
             await self._notify_pending_dropped(_app.bot)
@@ -465,7 +543,11 @@ class YTRemoteBot:
         if cur is None:
             return "No hay ninguna cancion sonando."
         state = "⏸️ Pausado" if self._paused else "▶️ Sonando"
-        return f"{state}\n🎵 {self._truncate(cur.title)}"
+        text = f"{state}\n🎵 {self._truncate(cur.title)}"
+        if self._restored:
+            self._restored = False
+            text += "\n🔄 Retomada del cierre anterior: usa ▶ para reanudar."
+        return text
 
     def _control_keyboard(self) -> InlineKeyboardMarkup:
         """Teclado del mini reproductor persistente.
@@ -966,6 +1048,7 @@ class YTRemoteBot:
         # El artista es EXACTAMENTE lo que escribió el usuario, nunca se
         # deriva de títulos. Queda fijado antes de la busqueda.
         self._radio_artist = artist
+        self._persist_dirty()
         search_query = f"{artist} {song}".strip()
         await self._run_search(update, context, search_query)
 
@@ -1001,6 +1084,7 @@ class YTRemoteBot:
                 for t in tracks
             ]
             self.queue.set_playlist(items)
+            self._persist_dirty()
             first = items[0]
             self._radio_artist = first.channel or ""
             started = await self._play_item(update, first, preserve_current=True)
@@ -1192,7 +1276,12 @@ class YTRemoteBot:
         # re-resuelve UNA vez abajo (sin TTL preventivos ni esperas).
         resolved = await self._stream_for(item.url)
         if not resolved:
-            await self._reply(update, "No se pudo resolver el video. Espera un momento e intenta de nuevo.")
+            motivo = last_resolve_error()
+            if motivo and "resuelto con client" in motivo:
+                # No es un error real: es el testeo interno del client fallback.
+                motivo = "todas las variantes de yt-dlp fallaron"
+            detalle = f"\nMotivo: {motivo}" if motivo else ""
+            await self._reply(update, "No se pudo reproducir. Esto suele ser un bloqueo del proveedor de internet o de YouTube a este equipo." + detalle)
             return False
         stream_url, audio_url = resolved
 
@@ -1213,6 +1302,7 @@ class YTRemoteBot:
                     # de cambiar el cursor (solo en modo radio).
                     self._push_to_nav_back()
                     self.queue.set_current(item)
+                    self._persist_dirty()
                 break
             except RuntimeError as exc:
                 if attempt == 1 or item.url not in self._stream_cache:
@@ -1255,6 +1345,7 @@ class YTRemoteBot:
             return
         await self.player.pause()
         self._paused = True
+        self._persist_dirty()
         await self._reply(update, "⏸️ Pausado")
 
     async def cmd_resume(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -1263,6 +1354,7 @@ class YTRemoteBot:
             return
         await self.player.play()
         self._paused = False
+        self._persist_dirty()
         await self._reply(update, "▶️ Reanudando")
 
     async def _toggle_play_pause(self) -> None:
@@ -1275,6 +1367,7 @@ class YTRemoteBot:
         else:
             await self.player.pause()
             self._paused = True
+        self._persist_dirty()
 
     async def _on_control(
         self,
@@ -1326,6 +1419,7 @@ class YTRemoteBot:
                 self._volume = max(0, min(100, self._volume + delta))
                 if self.player.is_running:
                     await self.player.set_volume(self._volume)
+                self._persist_dirty()
             elif action == "vol-info":
                 # Boton de estado: el volumen ya se lee en su etiqueta.
                 await query.answer(f"Volumen: {self._volume}%")
@@ -1670,6 +1764,7 @@ class YTRemoteBot:
         self._queue_advance_needed = False
         self._radio_artist = ""
         self._paused = False
+        self._persist_dirty()
         await self._render_card(self._track_status_text())
         await self._reply(update, "⏹️ Detenido y cola limpia")
 
@@ -1690,6 +1785,7 @@ class YTRemoteBot:
             return
         await self.player.set_volume(vol)
         self._volume = vol
+        self._persist_dirty()
         await self._reply(update, f"🔊 Volumen: {vol}")
 
     async def cmd_queue(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:

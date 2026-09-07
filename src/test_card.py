@@ -145,8 +145,10 @@ class FakeUpdate:
 
 
 def make_bot(fail_loads=0):
+    import tempfile
     import bot as bot_mod
     from config import Config
+    from persistence import StateStore
 
     player = FakePlayer(fail_loads=fail_loads)
     config = Config(
@@ -161,6 +163,9 @@ def make_bot(fail_loads=0):
     b._app = FakeApp()
     object.__setattr__(b, "player", player)
     b.roles.set_role(77, "dj")
+    # Aislar la persistencia: nunca tocar el state.json real del proyecto.
+    tmp = tempfile.TemporaryDirectory()
+    b._state = StateStore(Path(tmp.name) / "state.json")
     return b
 
 
