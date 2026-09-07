@@ -884,16 +884,12 @@ class YTRemoteBot:
         rank = {"user": 0, "dj": 1, "admin": 2}
         level = rank.get(role, 0)
 
-        def add(required: str, line: str) -> None:
-            lines.append(line) if rank.get(required, 0) <= level else None
-
         lines: list[str] = []
 
-        if level >= 1:  # dj
+        if level >= 1:  # dj o superior
             lines.append("• /buscar — buscar y reproducir un artista o link")
 
         if level >= 2:  # admin
-            lines.append("• /buscar — buscar y reproducir un artista o link")
             lines.append("• /adduser <id> <rol> — dar acceso (dj, admin)")
             lines.append("• /removeuser <id> — quitar acceso")
 
