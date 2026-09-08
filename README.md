@@ -3,7 +3,7 @@
 Bot de Telegram para controlar la reproducción de videos de YouTube en su PC.
 Búsqueda por chat, tarjeta de control con botones, radio automática por artista.
 
-**Versión actual:** v0.2.1
+**Versión actual:** v0.3.1
 
 ## Descarga e instalación
 
@@ -49,6 +49,10 @@ Cuando suena algo aparece una tarjeta con botones:
 
 La radio pasa automáticamente a la siguiente canción del mismo artista cuando
 termina. Use `/buscar` con otro nombre para cambiar de cantante.
+
+La tarjeta queda siempre como el último mensaje del chat: cuando usted escribe
+un comando o un mensaje, la tarjeta se desvanece y reaparece abajo, al final
+de la conversación.
 
 ## Comandos
 

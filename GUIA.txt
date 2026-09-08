@@ -68,6 +68,10 @@ Fila 2:
   🔊+10  — sube el volumen 10 puntos
   📋     — muestra la lista de canciones
 
+La tarjeta queda siempre como el último mensaje del chat: cuando usted
+escribe un comando o un mensaje, la tarjeta se desvanece y reaparece
+abajo, al final de la conversación.
+
 
 COMPORTAMIENTO DE LA RADIO
 -------------------------
