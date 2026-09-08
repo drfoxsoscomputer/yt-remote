@@ -8,12 +8,32 @@ Sin red ni mpv real: se stubbea Player y el bot de Telegram.
 
 import asyncio
 import sys
+import time
+from contextlib import contextmanager
 from pathlib import Path
 from types import SimpleNamespace
-from typing import cast
+from typing import Any, cast
 
 SRC = Path(__file__).resolve().parent
 sys.path.insert(0, str(SRC))
+
+
+@contextmanager
+def isolated_state_path():
+    """Aisla la persistencia: el StateStore default del bot apunta a un
+    archivo temporal, nunca al data/state.json real del proyecto (puede
+    traer artistas, historial y pausa reales de un uso real previo que
+    contaminan los asserts). Se restaura la ruta real al salir."""
+    import persistence as persistence_mod
+    import tempfile
+
+    tmp = tempfile.mkdtemp()
+    real = persistence_mod.STATE_PATH
+    persistence_mod.STATE_PATH = Path(tmp) / "state.json"
+    try:
+        yield
+    finally:
+        persistence_mod.STATE_PATH = real
 
 
 class FakeBot:
@@ -23,6 +43,7 @@ class FakeBot:
     def __init__(self):
         self.sent = []
         self.edited = []
+        self.deleted = []
         self.get_me_ok = True
         self.pending_updates = []
 
@@ -44,6 +65,9 @@ class FakeBot:
 
     async def edit_message_caption(self, caption=None, chat_id=None, message_id=None, **kwargs):
         self.edited.append((chat_id, message_id, "CAP:" + str(caption), kwargs))
+
+    async def delete_message(self, chat_id, message_id, **kwargs):
+        self.deleted.append((chat_id, message_id))
 
     async def get_me(self):
         if not self.get_me_ok:
@@ -77,6 +101,7 @@ class FakePlayer:
         self.fail_loads = fail_loads
         self.loaded = []
         self.starts = 0
+        self.rewinds = 0
 
     @property
     def is_running(self):
@@ -103,6 +128,9 @@ class FakePlayer:
 
     async def stop(self):
         self.stopped += 1
+
+    async def rewind(self):
+        self.rewinds += 1
 
 
 class FakeApp:
@@ -131,6 +159,9 @@ class FakeUpdate:
             async def answer(self, *args, **kwargs):
                 self.parent.answered = args
 
+            async def edit_message_text(self, *args, **kwargs):
+                self.parent.answered = ("edit",) + args
+
             @property
             def data(self):
                 return self.parent.data
@@ -145,10 +176,8 @@ class FakeUpdate:
 
 
 def make_bot(fail_loads=0):
-    import tempfile
     import bot as bot_mod
     from config import Config
-    from persistence import StateStore
 
     player = FakePlayer(fail_loads=fail_loads)
     config = Config(
@@ -159,13 +188,14 @@ def make_bot(fail_loads=0):
         owner_id=1,
         allowed_chat_id=None,
     )
-    b = bot_mod.YTRemoteBot(config)
+    # Construir bajo aislamiento completo: el __init__ del bot carga Estado
+    # del StateStore default; si  el state.json real trae pausa/artista/
+    # historial de un uso previo, no debe filtrarse a los tests.
+    with isolated_state_path():
+        b = bot_mod.YTRemoteBot(config)
     b._app = FakeApp()
     object.__setattr__(b, "player", player)
     b.roles.set_role(77, "dj")
-    # Aislar la persistencia: nunca tocar el state.json real del proyecto.
-    tmp = tempfile.TemporaryDirectory()
-    b._state = StateStore(Path(tmp.name) / "state.json")
     return b
 
 
@@ -317,16 +347,20 @@ def test_artist_seed_literal_or_channel():
     from config import Config
     from queue_manager import QueueItem
 
-    b = bot_mod.YTRemoteBot(
-        Config(
-            token="test",
-            mpv_path="mpv",
-            default_role="user",
-            max_results=5,
-            owner_id=1,
-            allowed_chat_id=None,
+    # Envolver el acceso: el bot directo (sin make_bot) tambien debe arrancar
+    # con un state limpio para que el assert del canal real no se contamine
+    # con radio_artist de un uso previo.
+    with isolated_state_path():
+        b = bot_mod.YTRemoteBot(
+            Config(
+                token="test",
+                mpv_path="mpv",
+                default_role="user",
+                max_results=5,
+                owner_id=1,
+                allowed_chat_id=None,
+            )
         )
-    )
     item = QueueItem(
         url="u1",
         title="Inexplicable - GP BAND - [Cover Julissa]",
@@ -366,6 +400,7 @@ def test_radio_gate_strict_excludes_covers():
     try:
         for idx, (results, expected) in enumerate(cases):
             bot_mod.search = lambda q, n, _r=results: _r
+            b._radio_search_cache.clear()  # cada caso es una radio nueva
             candidate, from_queue, _ = asyncio.run(b._pick_next_candidate(current))
             got = candidate.url if candidate else None
             assert got == expected, f"caso {idx}: {got} != {expected}"
@@ -756,6 +791,448 @@ async def test_nav_playlist_unaffected():
         bot_mod.resolve_stream_url = lambda url: None
 
 
+async def test_toggle_play_pause_starts_player_when_off():
+    """Fase 1: si mpv no esta corriendo, ▶ en la tarjeta PRENDE mpv y carga
+    el item actual (no se queda mudo tras un apagado de la PC o un stop)."""
+    import bot as bot_mod
+    from queue_manager import QueueItem
+
+    bot_mod.resolve_stream_url = lambda url: ("stream-" + url, None)
+    try:
+        b = make_bot()
+        fp = cast(Any, b.player)
+        fp.running = False
+        b.queue.set_current(QueueItem(url="u1", title="Tema"))
+        b._paused = False  # "sonando", pero mpv apagado
+
+        await b._toggle_play_pause()
+        assert fp.starts == 1, "debe llamar player.start()"
+        assert fp.loaded == [("stream-u1", None)], fp.loaded
+        assert fp.resumed == 1, "debe reanudar reproduccion"
+        assert b._paused is False
+    finally:
+        bot_mod.resolve_stream_url = lambda url: None
+
+
+async def test_resume_starts_player_when_not_running():
+    """Fase 1: el /resume tras apagado/stop reproduce el item restaurado:
+    prende mpv y carga el stream (no solo hace play sobre nada)."""
+    import bot as bot_mod
+    from queue_manager import QueueItem
+
+    bot_mod.resolve_stream_url = lambda url: ("stream-" + url, None)
+    try:
+        b = make_bot()
+        fp = cast(Any, b.player)
+        b.queue.set_current(QueueItem(url="u1", title="Tema"))
+        fp.running = False
+
+        await b.cmd_resume(FakeUpdate("ctl:play"), SimpleNamespace(args=[]))
+        assert fp.starts == 1, "debe llamar player.start()"
+        assert fp.loaded == [("stream-u1", None)], fp.loaded
+        assert b.queue.current is not None and b.queue.current.url == "u1"
+    finally:
+        bot_mod.resolve_stream_url = lambda url: None
+
+
+async def test_next_prefetch_starts_player():
+    """Fase 1: el /next con stream ya resuelto (prefetch) debe prender mpv
+    antes de cargar, igual que /resume y ▶."""
+    import bot as bot_mod
+    from queue_manager import QueueItem
+
+    bot_mod.resolve_stream_url = lambda url: ("stream-" + url, None)
+    try:
+        b = make_bot()
+        fp = cast(Any, b.player)
+        fp.running = False
+        b._radio_artist = "artista"
+        b.queue.set_current(QueueItem(url="actual", title="Actual"))
+        b._clear_nav_stacks()
+        # Prefetch ya resuelto para el candidato 'siguiente'.
+        candidate = QueueItem(url="siguiente", title="Siguiente")
+        b._prefetch_candidate = (candidate, False)
+        b._prefetch_basis = "actual"
+        b._prefetch_resolved = ((candidate, False), ("stream-siguiente", None))
+
+        await b.cmd_next(FakeUpdate("ctl:next"), SimpleNamespace(args=[]))
+        assert fp.starts == 1, "debe llamar player.start()"
+        assert fp.loaded[0][0] == "stream-siguiente", fp.loaded
+        assert cast(QueueItem, b.queue.current).url == "siguiente"
+    finally:
+        bot_mod.resolve_stream_url = lambda url: None
+
+
+async def test_stop_conserves_state_and_rewinds():
+    """Fase 2: el stop NO borra historial, cola, radio ni navegacion: solo
+    pausa el reproductor y rebobina a 0:00 para que ▶ reanude desde el inicio."""
+    import bot as bot_mod
+    from queue_manager import QueueItem
+
+    bot_mod.resolve_stream_url = lambda url: ("stream-" + url, None)
+    try:
+        b = make_bot()
+        fp = cast(Any, b.player)
+        b.queue.set_current(QueueItem(url="u1", title="Tema"))
+        b._radio_artist = "GP Band"
+        b._nav_back.append(QueueItem(url="prev", title="Prev"))
+        b._paused = False
+
+        await b.cmd_stop(FakeUpdate("ctl:stop"), SimpleNamespace(args=[]))
+        assert fp.rewinds == 1, "debe rebobinar a 0:00"
+        assert fp.stopped == 0, "stop NO debe descargar el track"
+        assert b.queue.current is not None and b.queue.current.url == "u1", "current intacto"
+        assert b._radio_artist == "GP Band", "radio intacta"
+        assert [i.url for i in b._nav_back] == ["prev"], "navegacion intacta"
+        assert b._paused is True, "deja en pausa para reanudar con ▶"
+    finally:
+        bot_mod.resolve_stream_url = lambda url: None
+
+
+async def test_stop_does_not_clear_queue():
+    """El stop de la tarjeta no llama queue.clear(): el historico de la radio
+    y la cola siguen vivos (el bug reportado era que /stop borraba todo)."""
+    import bot as bot_mod
+    from queue_manager import QueueItem, QueueManager
+
+    bot_mod.resolve_stream_url = lambda url: ("stream-" + url, None)
+    b = make_bot()
+    b.queue.set_current(QueueItem(url="u1", title="Tema"))
+
+    # Spy sobre queue.clear: si cmd_stop lo llamara, el historial explota.
+    original_clear = QueueManager.clear
+    cleared = []
+
+    def spy_clear(self):
+        cleared.append(True)
+        return original_clear(self)
+
+    QueueManager.clear = spy_clear
+    try:
+        b.queue._history_items.append(QueueItem(url="v0", title="V0"))
+        b.queue._history.append("v0")
+        await b.cmd_stop(FakeUpdate("ctl:stop"), SimpleNamespace(args=[]))
+        assert cleared == [], "cmd_stop NO debe limpiar la cola"
+        assert cast(QueueItem, b.queue.current).url == "u1"
+        assert [i.url for i in b.queue._history_items] == ["v0"]
+        assert list(b.queue._history) == ["v0"]
+        assert b._radio_artist == ""
+
+    finally:
+        QueueManager.clear = original_clear
+
+
+async def test_notify_admin_sends_to_owner():
+    """Fase 4: _notify_admin copia el error al chat del dueno (log del admin)."""
+    b = make_bot()
+    await b._notify_admin("Fallo al reproducir X: boom")
+    sent = b._app.bot.sent[-1]
+    assert sent[0] == b.config.owner_id, "debe ir al owner, no al chat permitido"
+    assert "⚠️" in sent[1] and "boom" in sent[1], sent[1]
+
+
+async def test_control_lock_discards_second_tap():
+    """Medida 1: si una accion de boton esta en curso (lock tomado), el toque
+    extra se descarta al instante con su toast y NO se encola: el volumen de
+    un toque que llega tarde no se aplica."""
+    b = make_bot()
+    upd = FakeUpdate("ctl:vol+10", chat_id=44)
+    await b._control_lock.acquire()
+    try:
+        await b._on_control(upd, SimpleNamespace(args=[]), "vol+10")
+        assert upd.answered == ("⏳ Un momento, primero termina...",), upd.answered
+        assert b._volume == 100, "el toque descartado no debe cambiar el volumen"
+        assert not b._app.bot.edited, "la tarjeta no se re-renderiza con el descarte"
+    finally:
+        b._control_lock.release()
+
+
+async def test_radio_search_list_cached_per_anchor():
+    """Medida 2: la lista de radio se busca UNA vez por ancla de sesion; la
+    cache evita la segunda llamada a yt-dlp que era el delay del salto."""
+    import bot as bot_mod
+    from queue_manager import QueueItem
+    from search import SearchResult
+
+    b = make_bot()
+    b._radio_artist = "GP Band"
+    current = QueueItem(url="u0", title="actual")
+    calls = []
+
+    def counting_search(query, count, **kw):
+        calls.append(query)
+        return [
+            SearchResult(url="u1", title="Tema GP Band", duration="3:00", thumbnail=""),
+            SearchResult(url="u2", title="Otro GP Band", duration="4:00", thumbnail=""),
+        ]
+
+    original = bot_mod.search
+    bot_mod.search = counting_search
+    try:
+        c1, _, _ = await b._pick_next_candidate(current)
+        c2, _, _ = await b._pick_next_candidate(current)
+        assert len(calls) == 1, f"search se llamo {len(calls)} veces, debe ser 1"
+        assert c1 is not None and c2 is not None
+        assert c1.url == c2.url == "u1"
+    finally:
+        bot_mod.search = original
+
+
+async def test_next_radio_renders_loading_card_inmediato():
+    """Al tocar ⏭ sin prefetch resuelto, la tarjeta se edita YA con
+    "⏳ Cargando…" + titulo del candidato nuevo, antes de resolver el stream.
+    El commit de queue._current ocurre recien tras el load exitoso: el estado
+    del dominio no se toca para mostrar el feedback de carga."""
+    import bot as bot_mod
+    from queue_manager import QueueItem
+
+    bot_mod.resolve_stream_url = lambda url: ("stream-" + url, None)
+    try:
+        b = make_bot()
+        # Tarjeta persistente ya activa (mensaje de texto, sin miniatura).
+        b._card_chat_id = 44
+        b._card_message_id = 7
+        b._card_is_photo = False
+        b._radio_artist = ""
+        b._clear_nav_stacks()
+        b.queue.set_current(QueueItem(url="A", title="A"))
+        b._prefetch_resolved = None
+        b._prefetch_candidate = None
+
+        new_pick = QueueItem(url="B", title="Nuevo Tema")
+        async def fake_pick(current: QueueItem) -> tuple[QueueItem | None, bool, bool]:
+            return new_pick, False, False
+        b._pick_next_candidate = fake_pick
+
+        await b.cmd_next(FakeUpdate("ctl:next"), SimpleNamespace(args=[]))
+        assert cast(QueueItem, b.queue.current).url == "B"
+        # En algun edit de la tarjeta (44/7) aparecio el estado de carga
+        # con el titulo nuevo ANTES de que la musica entrara.
+        carga = [
+            e for e in b._app.bot.edited
+            if e[0] == 44 and e[1] == 7 and isinstance(e[2], str)
+            and "⏳ Cargando…" in e[2] and "Nuevo Tema" in e[2]
+        ]
+        assert carga, b._app.bot.edited
+    finally:
+        bot_mod.resolve_stream_url = lambda url: None
+
+
+async def test_next_radio_failed_resolve_keeps_current():
+    """Si la resolucion del candidato nuevo falla, queue._current NO pasa a
+    apuntar al candidato: el estado conserva el tema anterior (el commit del
+    dominio ocurre solo cuando el audio realmente arranca)."""
+    import bot as bot_mod
+    from queue_manager import QueueItem
+
+    bot_mod.resolve_stream_url = lambda url: None
+    try:
+        b = make_bot()
+        b._card_chat_id = 44
+        b._card_message_id = 7
+        b._card_is_photo = False
+        b._radio_artist = ""
+        b._clear_nav_stacks()
+        b.queue.set_current(QueueItem(url="A", title="A"))
+        b._prefetch_resolved = None
+        b._prefetch_candidate = None
+
+        new_pick = QueueItem(url="B", title="Nuevo Tema")
+        async def fake_pick(current: QueueItem) -> tuple[QueueItem | None, bool, bool]:
+            return new_pick, False, False
+        b._pick_next_candidate = fake_pick
+
+        await b.cmd_next(FakeUpdate("ctl:next"), SimpleNamespace(args=[]))
+        # El estado no se corrompe con el candidato que nunca sonó.
+        assert cast(QueueItem, b.queue.current).url == "A"
+        # La card si mostró el feedback de carga (presentación) antes del fallo.
+        carga = [
+            e for e in b._app.bot.edited
+            if e[0] == 44 and e[1] == 7 and isinstance(e[2], str)
+            and "⏳ Cargando…" in e[2] and "Nuevo Tema" in e[2]
+        ]
+        assert carga, b._app.bot.edited
+    finally:
+        bot_mod.resolve_stream_url = lambda url: None
+
+
+async def test_stream_for_times_out_hung_resolve():
+    """Un yt-dlp colgado (thread que nunca termina) NO congela el bot: el
+    timeout de _stream_for corta el await y devuelve None (fallo de
+    resolucion) en vez de dejar el polling mudo para siempre."""
+    import bot as bot_mod
+
+    b = make_bot()
+
+    original_resolve = bot_mod.resolve_stream_url
+    original_timeout = bot_mod._RESOLVE_TIMEOUT
+    bot_mod.resolve_stream_url = lambda url: time.sleep(5) or ("stream-" + url, None)
+    bot_mod._RESOLVE_TIMEOUT = 0.3
+    try:
+        inicio = time.monotonic()
+        result = await b._stream_for("X")
+        transcurrido = time.monotonic() - inicio
+        assert result is None, "la resolucion colgada debe expirar como fallo"
+        assert transcurrido < 4, f"tardo {transcurrido:.1f}s, el timeout no funciono"
+    finally:
+        bot_mod.resolve_stream_url = original_resolve
+        bot_mod._RESOLVE_TIMEOUT = original_timeout
+
+
+async def test_control_button_answers_instantly_no_toast():
+    """El boton responde al instante con query.answer() mudo (apaga el spinner
+    sin toast de arriba): todo el feedback vive en la card, y la accion corrio."""
+    b = make_bot()
+    upd = FakeUpdate("ctl:vol-10", chat_id=44)
+    await b._on_control(upd, SimpleNamespace(args=[]), "vol-10")
+    assert upd.answered == (), upd.answered
+    assert b._volume == 90, "la accion del boton debe ejecutarse"
+
+
+async def test_remove_card_deletes_and_resets():
+    """La card vieja se borra de verdad (delete_message) y los ids se limpian:
+    antes el pick solo resetaba los ids y dejaba el mensaje huerfano en el chat."""
+    b = make_bot()
+    b._card_chat_id = 44
+    b._card_message_id = 7
+    await b._remove_card()
+    assert (44, 7) in [(d[0], d[1]) for d in b._app.bot.deleted], b._app.bot.deleted
+    assert b._card_chat_id is None
+    assert b._card_message_id is None
+
+
+async def test_reposition_card_deletes_old_and_sends_new():
+    """La card vieja se desvanece (delete_message) y se re-envia como nuevo
+    mensaje al final del chat: queda como ultima visualizacion, no editada
+    en el medio."""
+    from queue_manager import QueueItem
+
+    b = make_bot()
+    b.queue.set_current(QueueItem(url="u1", title="Tema"))
+    b._card_chat_id = 44
+    b._card_message_id = 7
+    await b._reposition_card(44)
+    assert (44, 7) in [(d[0], d[1]) for d in b._app.bot.deleted], b._app.bot.deleted
+    assert len(b._app.bot.sent) == 1, b._app.bot.sent
+    assert b._card_chat_id == 44
+    assert b._card_message_id is not None
+
+
+async def test_pick_removes_orphan_card():
+    """Elegir un resultado de /buscar borra la card vieja (con su mensaje),
+    no solo los ids: la nueva nace fresca al final de la conversacion."""
+    from search import SearchResult
+
+    b = make_bot()
+    b._card_chat_id = 44
+    b._card_message_id = 7
+    b._search_cache["pick:0"] = SearchResult(
+        url="u1", title="Tema Uno", duration="3:00", thumbnail=""
+    )
+    played = []
+
+    async def fake_play(update, item, **kwargs):
+        played.append(item)
+        return True
+
+    b._play_item = fake_play
+    upd = FakeUpdate("pick:0", message_id=500, chat_id=44)
+    await b.on_callback(upd, SimpleNamespace(args=[]))
+    assert (44, 7) in [(d[0], d[1]) for d in b._app.bot.deleted], b._app.bot.deleted
+    assert len(played) == 1
+
+
+async def test_with_card_reposition_repositions_existing():
+    """Tras correr un comando con card previa, el wrapper la re-envia al final
+    del chat: los mensajes del comando quedan arriba y la card abajo."""
+    b = make_bot()
+    b._card_chat_id = 44
+    b._card_message_id = 7
+    ran = []
+
+    async def handler(update, context):
+        ran.append(1)
+
+    wrapped = b._with_card_reposition(handler)
+    await wrapped(FakeMessageUpdate("/x"), SimpleNamespace(args=[]))
+    assert ran == [1]
+    assert (44, 7) in [(d[0], d[1]) for d in b._app.bot.deleted], b._app.bot.deleted
+    assert len(b._app.bot.sent) == 1, b._app.bot.sent
+
+
+async def test_passive_text_repositions_card():
+    """Escribir un texto en el chat (no comando) re-posiciona la card al final
+    sin responder nada al usuario."""
+    b = make_bot()
+    b._card_chat_id = 44
+    b._card_message_id = 7
+    upd = FakeMessageUpdate("hola")
+    await b._passive_card_reposition(upd, SimpleNamespace(args=[]))
+    assert (44, 7) in [(d[0], d[1]) for d in b._app.bot.deleted], b._app.bot.deleted
+    assert len(b._app.bot.sent) == 1, b._app.bot.sent
+    assert upd.sent == [], "el pasivo no debe responder nada"
+
+
+async def test_playlist_feedback_renders_in_card():
+    """Expandir una playlist avisa en la card (⏳ Expandiendo) sin dejar un
+    mensaje suelto clavado en el chat, y al final reproduce desde la lista."""
+    import bot as bot_mod
+    from search import SearchResult
+
+    b = make_bot()
+    b._card_chat_id = 44
+    b._card_message_id = 7
+    played = []
+
+    async def fake_play(update, item, **kwargs):
+        played.append(item)
+        return True
+
+    b._play_item = fake_play
+
+    orig_pl = bot_mod.is_playlist_url
+    orig_exp = bot_mod.expand_playlist
+    bot_mod.is_playlist_url = lambda q: True
+    bot_mod.expand_playlist = lambda q, n: [
+        SearchResult(url="u1", title="T1", duration="3:00", thumbnail="")
+    ]
+    try:
+        upd = FakeMessageUpdate("https://youtube.com/playlist?list=XYZ")
+        await b._play_link_or_playlist(upd, SimpleNamespace(args=[]), upd.message.text)
+    finally:
+        bot_mod.is_playlist_url = orig_pl
+        bot_mod.expand_playlist = orig_exp
+    cards_log = [e for e in b._app.bot.edited if "⏳ Expandiendo playlist" in str(e[2])]
+    assert cards_log, b._app.bot.edited
+    assert not [s for s in b._app.bot.sent if "Expandiendo" in str(s[1])], b._app.bot.sent
+    assert len(played) == 1, played
+
+
+async def test_playlist_expand_times_out():
+    """Un link de playlist colgado no congela el bot: el wait_for con
+    _RESOLVE_TIMEOUT expira y se responde el error en vez de colgarse."""
+    import bot as bot_mod
+
+    b = make_bot()
+    upd = FakeMessageUpdate("https://youtube.com/playlist?list=XYZ")
+    orig_pl = bot_mod.is_playlist_url
+    orig_exp = bot_mod.expand_playlist
+    orig_timeout = bot_mod._RESOLVE_TIMEOUT
+    bot_mod.is_playlist_url = lambda q: True
+    bot_mod.expand_playlist = lambda q, n: time.sleep(5) or []
+    bot_mod._RESOLVE_TIMEOUT = 0.3
+    try:
+        inicio = time.monotonic()
+        await b._play_link_or_playlist(upd, SimpleNamespace(args=[]), upd.message.text)
+        transcurrido = time.monotonic() - inicio
+    finally:
+        bot_mod.is_playlist_url = orig_pl
+        bot_mod.expand_playlist = orig_exp
+        bot_mod._RESOLVE_TIMEOUT = orig_timeout
+    assert transcurrido < 4, f"tardo {transcurrido:.1f}s, el timeout no funciono"
+    assert any("No se pudo expandir" in t for t, _ in upd.sent), upd.sent
+
+
 def run():
     test_control_keyboard_and_status()
     test_artist_seed_literal_or_channel()
@@ -780,6 +1257,25 @@ def run():
     asyncio.run(test_nav_next_chooses_new_candidate_when_forward_empty())
     asyncio.run(test_nav_prev_falls_back_to_queue_history())
     asyncio.run(test_nav_playlist_unaffected())
+    asyncio.run(test_toggle_play_pause_starts_player_when_off())
+    asyncio.run(test_resume_starts_player_when_not_running())
+    asyncio.run(test_next_prefetch_starts_player())
+    asyncio.run(test_stop_conserves_state_and_rewinds())
+    asyncio.run(test_stop_does_not_clear_queue())
+    asyncio.run(test_notify_admin_sends_to_owner())
+    asyncio.run(test_control_lock_discards_second_tap())
+    asyncio.run(test_radio_search_list_cached_per_anchor())
+    asyncio.run(test_next_radio_renders_loading_card_inmediato())
+    asyncio.run(test_next_radio_failed_resolve_keeps_current())
+    asyncio.run(test_stream_for_times_out_hung_resolve())
+    asyncio.run(test_control_button_answers_instantly_no_toast())
+    asyncio.run(test_remove_card_deletes_and_resets())
+    asyncio.run(test_reposition_card_deletes_old_and_sends_new())
+    asyncio.run(test_pick_removes_orphan_card())
+    asyncio.run(test_with_card_reposition_repositions_existing())
+    asyncio.run(test_passive_text_repositions_card())
+    asyncio.run(test_playlist_feedback_renders_in_card())
+    asyncio.run(test_playlist_expand_times_out())
     print("TARJETA TESTS OK")
 
 

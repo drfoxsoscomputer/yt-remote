@@ -14,6 +14,7 @@ __pycache__/
 .codegraph/
 
 # Config real (la plantilla publica es .env.example)
+.env
 .env.example.tmp
 *.swp
 

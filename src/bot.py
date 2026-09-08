@@ -24,6 +24,8 @@ from telegram.ext import (
     CallbackQueryHandler,
     CommandHandler,
     ContextTypes,
+    MessageHandler,
+    filters,
 )
 
 from config import Config
@@ -38,6 +40,12 @@ logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s", level=logging.INFO
 )
 logger = logging.getLogger(__name__)
+
+# Timeout para cada resolucion de stream (yt-dlp en thread): si tarda mas,
+# se corta y se trata como fallo de resolucion. Sin esto, un yt-dlp colgado
+# congelaria el polling entero (los handlers de python-telegram-bot corren
+# en secuencia) y el bot dejaria de responder botones y comandos.
+_RESOLVE_TIMEOUT = 20.0
 
 
 class YTRemoteBot:
@@ -60,6 +68,16 @@ class YTRemoteBot:
         self._net_offline: bool = False
         # cache: callback_data -> SearchResult para los botones de busqueda
         self._search_cache: dict[str, SearchResult] = {}
+        # Candado anti-colision de botones: una sola accion de control a la
+        # vez. Si ya hay una en curso (p.ej. resolviendo el stream de un
+        # salto), los toques extra se descartan al instante en vez de
+        # acumularse en la cola del bot (eran los saltos encolados lentos).
+        self._control_lock = asyncio.Lock()
+        # Cache de la lista de radio: la busqueda de 50 temas se hace UNA vez
+        # por ancla de sesion (lo que escribió el usuario en /buscar) y cada
+        # /next elige de la lista cacheada en vez de volver a golpear yt-dlp
+        # (era el delay real de los botones ⏭/⏮: ~2s de busqueda por salto).
+        self._radio_search_cache: dict[str, list] = {}
         # Prefetch (auto-continuacion): candidato a siguiente + stream resuelto
         self._prefetch_task: asyncio.Task | None = None
         self._prefetch_basis: str | None = None
@@ -80,6 +98,9 @@ class YTRemoteBot:
         self._card_chat_id: int | None = None
         self._card_message_id: int | None = None
         self._card_is_photo: bool = False
+        # Seria la re-creacion de la tarjeta (borrar + enviar de nuevo): dos
+        # updates seguidos no deben borrar dos veces para duplicar la card.
+        self._card_lock: asyncio.Lock = asyncio.Lock()
         self._paused: bool = False
         self._volume: int = 100
         # True mientras se ejecuta una accion disparada por un boton de la
@@ -212,23 +233,35 @@ class YTRemoteBot:
         app = Application.builder().token(self.config.token).build()
 
         # Comandos principales (el menu "/" se registra en post_init).
-        app.add_handler(CommandHandler("start", self._require_chat(self.cmd_start)))
-        app.add_handler(CommandHandler("buscar", self._require_chat(self._require("dj", self.cmd_play))))
-        app.add_handler(CommandHandler("play", self._require_chat(self._require("dj", self.cmd_play))))
-        app.add_handler(CommandHandler("solicitar", self._require_chat(self.cmd_solicitar)))
-        app.add_handler(CommandHandler("lista", self._require_chat(self.cmd_queue)))
+        # _with_card_reposition: al terminar cualquier comando, si la tarjeta
+        # ya existia, se re-envia al final del chat (la card queda como ultima
+        # visualizacion; los mensajes del comando quedan arriba).
+        app.add_handler(CommandHandler("start", self._with_card_reposition(self._require_chat(self.cmd_start))))
+        app.add_handler(CommandHandler("buscar", self._with_card_reposition(self._require_chat(self._require("dj", self.cmd_play)))))
+        app.add_handler(CommandHandler("play", self._with_card_reposition(self._require_chat(self._require("dj", self.cmd_play)))))
+        app.add_handler(CommandHandler("solicitar", self._with_card_reposition(self._require_chat(self.cmd_solicitar))))
+        app.add_handler(CommandHandler("lista", self._with_card_reposition(self._require_chat(self.cmd_queue))))
         app.add_handler(
             CommandHandler(
-                "adduser", self._require_chat(self._require("admin", self.cmd_adduser))
+                "adduser", self._with_card_reposition(self._require_chat(self._require("admin", self.cmd_adduser)))
             )
         )
         app.add_handler(
             CommandHandler(
                 "removeuser",
-                self._require_chat(self._require("admin", self.cmd_removeuser)),
+                self._with_card_reposition(self._require_chat(self._require("admin", self.cmd_removeuser))),
             )
         )
         app.add_handler(CallbackQueryHandler(self._require_chat(self.on_callback)))
+        # Cualquier mensaje de texto en el chat (alguien escribio algo) re-posiciona
+        # la tarjeta como ultimo mensaje. Va despues de los comandos para no
+        # interceptarlos; el handler no responde nada.
+        app.add_handler(
+            MessageHandler(
+                filters.TEXT & ~filters.COMMAND,
+                self._require_chat(self._passive_card_reposition),
+            )
+        )
 
         self._app = app
 
@@ -464,6 +497,44 @@ class YTRemoteBot:
         wrapper.__name__ = getattr(handler, "__name__", "wrapper")
         return wrapper
 
+    async def _card_exists_in(self, chat_id: int | None) -> bool:
+        return (
+            chat_id is not None
+            and self._card_chat_id == chat_id
+            and self._card_message_id is not None
+        )
+
+    def _with_card_reposition(self, handler):
+        """Envuelve un handler para que, al terminar, la tarjeta vuelva a ser
+        el ULTIMO mensaje del chat.
+
+        Si la tarjeta ya existia antes del handler (el usuario escribio algo
+        arriba: comando, texto, respuesta del bot), se borra con su
+        desvanecimiento y se re-envia al final: los mensajes quedan arriba y
+        la tarjeta pasa a ser la ultima visualizacion. Si el handler creo la
+        tarjeta desde cero (no existia), no se reposiciona (ya quedo de ultima).
+        """
+
+        async def wrapper(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+            chat_id = update.effective_chat.id if update.effective_chat else None
+            existia = await self._card_exists_in(chat_id)
+            await handler(update, context)
+            if existia and await self._card_exists_in(chat_id):
+                await self._reposition_card(chat_id)  # type: ignore[arg-type]
+
+        wrapper.__name__ = getattr(handler, "__name__", "wrapper")
+        return wrapper
+
+    async def _passive_card_reposition(
+        self, update: Update, _context: ContextTypes.DEFAULT_TYPE
+    ) -> None:
+        """Cualquier mensaje de texto de alguien en el chat re-posiciona la
+        tarjeta como ultimo mensaje (se desvanece la vieja y aparece abajo).
+        No responde nada: el bot solo mantiene la tarjeta a la vista."""
+        chat_id = update.effective_chat.id if update.effective_chat else None
+        if await self._card_exists_in(chat_id):
+            await self._reposition_card(chat_id)  # type: ignore[arg-type]
+
     async def _reply(self, update, text: str, **kwargs):
         """Envia un mensaje de respuesta, manejando tanto CallbackQuery como Message.
 
@@ -479,11 +550,16 @@ class YTRemoteBot:
                 # Desde un boton de la tarjeta el mensaje ya va a ser
                 # re-renderizado por el handler del control: el texto de
                 # estado/error se muestra como toast (response) y el bot
-                # no edita el mensaje.
+                # no edita el mensaje. Los mensajes de fallo suben como
+                # alerta visible (popup) para que el error no pase de largo.
+                es_fallo = (
+                    text.startswith("No se pudo")
+                    or text.startswith("Problema")
+                    or text.startswith("mpv")
+                    or text.startswith("Error")
+                )
                 try:
-                    await query.answer(
-                        text, show_alert=False
-                    )  # tooltip de respuesta
+                    await query.answer(text, show_alert=es_fallo)
                 except Exception:
                     pass
                 return
@@ -498,6 +574,20 @@ class YTRemoteBot:
                 await query.edit_message_text(text)
         else:
             await update.message.reply_text(text, **kwargs)
+
+    async def _notify_admin(self, text: str, store_log: bool = True) -> None:
+        """Escribe un error/aviso en el log y lo manda al dueno por Telegram.
+        Sirve como "log de errores" del admin: el propio bot le copia todo
+        fallo real (resolucion, arranque de mpv, reproduccion, red) a su chat.
+        No requiere update: se puede llamar desde auto-advance sin usuario.
+        """
+        logger.warning("ADMIN_LOG: %s", text)
+        if self.config.owner_id is None or self._app is None:
+            return
+        try:
+            await self._app.bot.send_message(self.config.owner_id, f"⚠️ {text}")
+        except Exception as exc:  # noqa: BLE001 - reportar el fallo es best-effort
+            logger.warning("ADMIN_LOG no pudo notificar: %s", exc)
 
     def _thumbnail_for(self, item: QueueItem) -> str:
         """URL de la miniatura del item; la deriva del link si no la trae."""
@@ -549,6 +639,25 @@ class YTRemoteBot:
             text += "\n🔄 Retomada del cierre anterior: usa ▶ para reanudar."
         return text
 
+    async def _render_pending(
+        self, title: str, item: QueueItem | None = None
+    ) -> None:
+        """La tarjeta cambia YA con el titulo nuevo + espera del stream.
+
+        Al tocar ⏭/⏮ sin prefetch, la tarjeta se actualiza al instante con
+        "⏳ Cargando…" en vez de quedarse con el titulo anterior hasta que
+        yt-dlp termine; el audio entra cuando el stream esté resuelto.
+
+        Recibe el item del candidato para mostrar su miniatura y su titulo
+        SIN tocar queue._current: si el stream falla, el estado queda igual
+        y la tarjeta refleja la realidad cuando el error se re-renderiza.
+        Tambien sirve para avisos de espera sin item (p.ej. expandir una
+        playlist): item=None usa la miniatura del tema actual.
+        """
+        await self._render_card(
+            f"⏳ Cargando…\n🎵 {self._truncate(title)}", item=item
+        )
+
     def _control_keyboard(self) -> InlineKeyboardMarkup:
         """Teclado del mini reproductor persistente.
 
@@ -573,7 +682,7 @@ class YTRemoteBot:
         return InlineKeyboardMarkup(keyboard)
 
     async def _render_card(
-        self, text: str, chat_id: int | None = None
+        self, text: str, chat_id: int | None = None, item: QueueItem | None = None
     ) -> None:
         """Edita el mensaje persistente del mini reproductor (si existe).
 
@@ -583,12 +692,17 @@ class YTRemoteBot:
         es un mensaje de texto (sin miniatura disponible), edita solo el texto.
 
         No envia una tarjeta nueva: para crear la primera usar _show_card.
+
+        Si se pasa `item`, la miniatura se toma de ese item (feedback de carga
+        del candidato); si no, del tema actual. La presentacion nunca altera
+        queue._current: ese es estado de dominio y se commitea solo al exito.
         """
         if self._card_chat_id is None or self._card_message_id is None:
             return
         chat_id = chat_id or self._card_chat_id
         bot = self._app.bot
-        thumb = self._thumbnail_for(self.queue.current) if self.queue.current else ""
+        source = item if item is not None else self.queue.current
+        thumb = self._thumbnail_for(source) if source else ""
         try:
             if self._card_is_photo:
                 if thumb:
@@ -670,6 +784,38 @@ class YTRemoteBot:
             return
         await self._render_card(self._track_status_text(), chat_id)
 
+    async def _remove_card(self) -> None:
+        """Borra la tarjeta persistente si existe (con su desvanecimiento).
+
+        No envia ninguna nueva: deja la card en None para que el siguiente
+        _show_card/_send_card cree una fresca al final de la conversacion.
+        Seriada con _card_lock y tolerante a mensajes que Telegram no deja
+        borrar (viejos).
+        """
+        async with self._card_lock:
+            old_chat = self._card_chat_id
+            old_msg = self._card_message_id
+            self._card_chat_id = None
+            self._card_message_id = None
+            if old_msg is not None and old_chat is not None:
+                try:
+                    await self._app.bot.delete_message(old_chat, old_msg)
+                except Exception as exc:  # noqa: BLE001 - no debe romper la card
+                    logger.warning("No se pudo borrar la tarjeta vieja: %s", exc)
+
+    async def _reposition_card(self, chat_id: int) -> None:
+        """Re-crea la tarjeta como el ULTIMO mensaje del chat.
+
+        Borra la tarjeta vieja (con su animacion de desvanecimiento) y la
+        re-envia al final de la conversacion: los mensajes y comandos quedan
+        arriba y la tarjeta pasa a ser siempre la ultima visualizacion.
+
+        Si Telegram no deja borrar la vieja (mensaje muy antiguo), se tolera
+        el fallo y solo se envía la nueva.
+        """
+        await self._remove_card()
+        await self._send_card(chat_id)
+
     def _mpv_track_ended_callback(self) -> None:
         """Callback invocado por el reader thread cuando mpv detecta end-file.
 
@@ -710,7 +856,16 @@ class YTRemoteBot:
             return self._stream_cache.get(url)
         self._resolving.add(url)
         try:
-            resolved = await asyncio.to_thread(resolve_stream_url, url)
+            try:
+                resolved = await asyncio.wait_for(
+                    asyncio.to_thread(resolve_stream_url, url),
+                    timeout=_RESOLVE_TIMEOUT,
+                )
+            except asyncio.TimeoutError:
+                logger.warning(
+                    "Resolucion de stream agotada (%ss): %s", _RESOLVE_TIMEOUT, url
+                )
+                resolved = None
         finally:
             self._resolving.discard(url)
         if resolved:
@@ -748,6 +903,9 @@ class YTRemoteBot:
         """Vuelve a vaciar el cache de streams (nueva busqueda o /stop)."""
         self._stream_cache.clear()
         self._resolving.clear()
+        # Nuevo /buscar = nuevo catalogo de radio: la lista cacheada del
+        # ancla anterior ya no sirve (puede ser otro artista o el mismo).
+        self._radio_search_cache.clear()
         if self._anticipate_queue is not None:
             while not self._anticipate_queue.empty():
                 try:
@@ -805,15 +963,30 @@ class YTRemoteBot:
         seed = self._artist_seed(current)
         if not seed:
             return None, False, False
-        # Pedir mas resultados: mas catalogo del artista para poder avanzar
-        # sin repetir (la radio busca 50 y elige entre los no-recientes).
-        try:
-            results = await asyncio.to_thread(search, seed, 50)
-        except Exception as exc:
-            logging.getLogger(__name__).warning(
-                "Error en busqueda de radio '%s': %s", seed, exc
-            )
-            return None, False, True
+        # La lista de radio se busca UNA vez por ancla de sesion y queda
+        # cacheada: cada saltarse eligirá de aquí sin volver a golpear yt-dlp
+        # (esa segunda busqueda era el delay perceptible de los botones).
+        results = self._radio_search_cache.get(seed)
+        if results is None:
+            # Pedir mas resultados: mas catalogo del artista para poder avanzar
+            # sin repetir (la radio busca 50 y elige entre los no-recientes).
+            try:
+                try:
+                    results = await asyncio.wait_for(
+                        asyncio.to_thread(search, seed, 50),
+                        timeout=_RESOLVE_TIMEOUT,
+                    )
+                except asyncio.TimeoutError:
+                    logging.getLogger(__name__).warning(
+                        "Busqueda de radio '%s' agotada (%ss)", seed, _RESOLVE_TIMEOUT
+                    )
+                    return None, False, True
+            except Exception as exc:
+                logging.getLogger(__name__).warning(
+                    "Error en busqueda de radio '%s': %s", seed, exc
+                )
+                return None, False, True
+            self._radio_search_cache[seed] = results
 
         def _candidate(r) -> tuple[QueueItem, bool, bool]:
             return (
@@ -923,6 +1096,7 @@ class YTRemoteBot:
                 await self.player.play()
             except RuntimeError as exc:
                 await self._reply(None, f"No se pudo continuar: {exc}")
+                await self._notify_admin(f"Fallo en autoplay: {exc}")
                 return
             # Si venia de la playlist, avanzar el cursor (bucle) para no repetir
             # el mismo track en el siguiente prefetch.
@@ -1065,14 +1239,50 @@ class YTRemoteBot:
         self._radio_artist = ""
         self._clear_nav_stacks()
         if is_playlist_url(query):
-            await context.bot.send_message(
-                update.effective_chat.id,
-                "Expandiendo playlist/mix, un momento...",
-            )
-            tracks = await asyncio.to_thread(expand_playlist, query, 50)
+            chat_id = update.effective_chat.id if update.effective_chat else None
+            # Feedback en la tarjeta si existe: no se envia un mensaje que
+            # quede clavado en el chat. Si no hay tarjeta, un mensaje efimero
+            # que se borra al terminar (exito o fallo) para no ensuciar.
+            pending_id = None
+            if await self._card_exists_in(chat_id):
+                await self._render_card("⏳ Expandiendo playlist…")
+            else:
+                try:
+                    pending = await context.bot.send_message(
+                        chat_id, "⏳ Expandiendo playlist/mix, un momento..."
+                    )
+                    pending_id = pending.message_id
+                except Exception:
+                    pending_id = None
+            try:
+                try:
+                    tracks = await asyncio.wait_for(
+                        asyncio.to_thread(expand_playlist, query, 50),
+                        timeout=_RESOLVE_TIMEOUT,
+                    )
+                except asyncio.TimeoutError:
+                    logger.warning(
+                        "Expansion de playlist agotada (%ss): %s", _RESOLVE_TIMEOUT, query
+                    )
+                    tracks = []
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("Error expandiendo playlist: %s", exc)
+                tracks = []
             if not tracks:
+                if pending_id is not None:
+                    try:
+                        await context.bot.delete_message(chat_id, pending_id)
+                    except Exception:
+                        pass
                 await self._reply(update, "No se pudo expandir esa lista.")
+                if await self._card_exists_in(chat_id):
+                    await self._render_card(self._track_status_text())
                 return
+            if pending_id is not None:
+                try:
+                    await context.bot.delete_message(chat_id, pending_id)
+                except Exception:
+                    pass
             items = [
                 QueueItem(
                     url=t.url,
@@ -1226,10 +1436,11 @@ class YTRemoteBot:
             except Exception as exc2:  # noqa: BLE001
                 logger.warning("No se pudo editar mensaje tras fallo de borrado: %s", exc2)
 
-        # Forzar creación de tarjeta fresca: limpiar estado previo por si quedó
-        # de una sesión anterior y coincidía con el chat actual.
-        self._card_chat_id = None
-        self._card_message_id = None
+        # Forzar creación de tarjeta fresca: borrar la card previa (con su
+        # desvanecimiento) para que _play_item cree la nueva al final de la
+        # conversación. Antes quedaba huérfana porque solo se resetaban los
+        # ids, sin borrar el mensaje.
+        await self._remove_card()
         # Nueva intención: limpiar stacks de navegación.
         self._clear_nav_stacks()
 
@@ -1282,6 +1493,9 @@ class YTRemoteBot:
                 motivo = "todas las variantes de yt-dlp fallaron"
             detalle = f"\nMotivo: {motivo}" if motivo else ""
             await self._reply(update, "No se pudo reproducir. Esto suele ser un bloqueo del proveedor de internet o de YouTube a este equipo." + detalle)
+            await self._notify_admin(
+                f"Fallo de resolucion: {item.title}\n{motivo or 'sin motivo detallado'}"
+            )
             return False
         stream_url, audio_url = resolved
 
@@ -1290,6 +1504,7 @@ class YTRemoteBot:
             await self.player.start()
         except RuntimeError as exc:
             await self._reply(update, f"Problema al iniciar el reproductor: {exc}")
+            await self._notify_admin(f"mpv no arranco: {exc}")
             return False
 
         for attempt in range(2):
@@ -1307,6 +1522,7 @@ class YTRemoteBot:
             except RuntimeError as exc:
                 if attempt == 1 or item.url not in self._stream_cache:
                     await self._reply(update, f"No se pudo reproducir: {exc}")
+                    await self._notify_admin(f"Fallo al reproducir {item.title}: {exc}")
                     return False
                 # URL cacheada vencida: descartar esa entrada, re-resolver y
                 # reintentar una vez.
@@ -1349,17 +1565,34 @@ class YTRemoteBot:
         await self._reply(update, "⏸️ Pausado")
 
     async def cmd_resume(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-        if self.queue.current is None or not self.player.is_running:
+        if self.queue.current is None:
             await self._reply(update, "No hay ninguna reproduccion activa.")
+            return
+        # Si mpv no esta corriendo (tras apagado de la PC o tras un stop),
+        # reproducir el item actual por _play_item: prende mpv y carga el stream.
+        if not self.player.is_running:
+            started = await self._play_item(update, self.queue.current)
+            if started:
+                await self._send_track_card(
+                    update, f"▶️ Reanudando: {self.queue.current.title}", self.queue.current
+                )
             return
         await self.player.play()
         self._paused = False
         self._persist_dirty()
         await self._reply(update, "▶️ Reanudando")
 
-    async def _toggle_play_pause(self) -> None:
-        """Alterna reproducir/pausar (boton ▶/⏸ de la tarjeta)."""
-        if self.queue.current is None or not self.player.is_running:
+    async def _toggle_play_pause(self, update: Update | None = None) -> None:
+        """Alterna reproducir/pausar (boton ▶/⏸ de la tarjeta).
+
+        Si hay un item actual pero mpv no esta corriendo (tras apagado de la
+        PC o tras un stop), reproduce ese item por _play_item: eso prende mpv
+        y carga el stream. Si mpv ya corre, solo alterna pausa/reproduccion.
+        """
+        if self.queue.current is None:
+            return
+        if not self.player.is_running:
+            await self._play_item(update, self.queue.current)
             return
         if self._paused:
             await self.player.play()
@@ -1396,50 +1629,63 @@ class YTRemoteBot:
         self._card_message_id = query.message.message_id
         chat_id = self._card_chat_id
 
-        self._from_card = True
-        reflect_status = True
-        # Mostrar "Cargando..." inmediatamente al tocar el boton para que
-        # el usuario sepa que se registro el toque y el bot esta procesando.
-        try:
-            await query.answer("Cargando...")
-        except Exception:
-            pass
-        try:
-            if action == "pp":
-                await self._toggle_play_pause()
-            elif action == "prev":
-                await self.cmd_prev(update, context)
-            elif action == "next":
-                await self.cmd_next(update, context)
-            elif action == "stop":
-                await self.cmd_stop(update, context)
-                self._paused = False
-            elif action in ("vol-10", "vol+10"):
-                delta = -10 if action == "vol-10" else 10
-                self._volume = max(0, min(100, self._volume + delta))
-                if self.player.is_running:
-                    await self.player.set_volume(self._volume)
-                self._persist_dirty()
-            elif action == "vol-info":
-                # Boton de estado: el volumen ya se lee en su etiqueta.
-                await query.answer(f"Volumen: {self._volume}%")
-                reflect_status = False
-            elif action == "lista":
-                # El boton 📋 muestra la lista encima de la tarjeta: se
-                # edita el mismo mensaje, ahora con el listado (los botones
-                # de control siguen pegados abajo).
-                text = self._queue_list_text() or "La lista esta vacia."
-                await self._render_card(text, chat_id)
-                reflect_status = False  # no pisa la lista recien mostrada
-            else:
-                return
-        finally:
-            self._from_card = False
+        # Candado anti-colision: si una accion de boton ya esta en curso
+        # (p.ej. resolviendo el stream de un salto), los toques extra que
+        # llegan mientras tanto se DESCARTAN al instante y no se encolan.
+        # Esa cola acumulada era la otra mitad del delay percibido: el bot
+        # procesaba un salto lento tras otro. Un boton a la vez.
+        if self._control_lock.locked():
+            try:
+                await query.answer("⏳ Un momento, primero termina...")
+            except Exception:
+                pass
+            return
 
-        # Estado final: el texto de la tarjeta refleja el cambio de la
-        # accion (nuevo tema, pausa, volumen, detenido, etc.).
-        if reflect_status:
-            await self._render_card(self._track_status_text(), chat_id)
+        async with self._control_lock:
+            self._from_card = True
+            reflect_status = True
+            # Respuesta muda al toque: apaga el spinner del boton al instante
+            # sin mostrar toast. Todo el feedback de carga vive en la tarjeta
+            # (ver _render_pending); el texto aparece solo en los errores.
+            try:
+                await query.answer()
+            except Exception:
+                pass
+            try:
+                if action == "pp":
+                    await self._toggle_play_pause(update)
+                elif action == "prev":
+                    await self.cmd_prev(update, context)
+                elif action == "next":
+                    await self.cmd_next(update, context)
+                elif action == "stop":
+                    await self.cmd_stop(update, context)
+                elif action in ("vol-10", "vol+10"):
+                    delta = -10 if action == "vol-10" else 10
+                    self._volume = max(0, min(100, self._volume + delta))
+                    if self.player.is_running:
+                        await self.player.set_volume(self._volume)
+                    self._persist_dirty()
+                elif action == "vol-info":
+                    # Boton de estado: el volumen ya se lee en su etiqueta.
+                    await query.answer(f"Volumen: {self._volume}%")
+                    reflect_status = False
+                elif action == "lista":
+                    # El boton 📋 muestra la lista encima de la tarjeta: se
+                    # edita el mismo mensaje, ahora con el listado (los botones
+                    # de control siguen pegados abajo).
+                    text = self._queue_list_text() or "La lista esta vacia."
+                    await self._render_card(text, chat_id)
+                    reflect_status = False  # no pisa la lista recien mostrada
+                else:
+                    return
+            finally:
+                self._from_card = False
+
+            # Estado final: el texto de la tarjeta refleja el cambio de la
+            # accion (nuevo tema, pausa, volumen, detenido, etc.).
+            if reflect_status:
+                await self._render_card(self._track_status_text(), chat_id)
 
     async def cmd_next(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         """Salta YA al siguiente tema: corta el actual y reproduce el siguiente.
@@ -1462,6 +1708,7 @@ class YTRemoteBot:
                 self._prefetch_resolved = None
                 self._cancel_prefetch()
                 try:
+                    await self.player.start()
                     await self.player.load(stream_url, audio_url)
                     await self.player.play()
                     self._paused = False
@@ -1512,15 +1759,18 @@ class YTRemoteBot:
             # intencionalmente: el flujo de navegación no entra al histórico
             # de "ya reproducidos" de la radio.
             self._cancel_prefetch()
+            await self._render_pending(item.title, item)
             resolved = await self._stream_for(item.url)
             if not resolved:
                 await self._reply(update, "No se pudo resolver el video. Espera un momento e intenta de nuevo.")
+                await self._notify_admin(f"Fallo de resolucion en /next (forward): {item.title}")
                 return
             stream_url, audio_url = resolved
             try:
                 await self.player.start()
             except RuntimeError as exc:
                 await self._reply(update, f"Problema al iniciar el reproductor: {exc}")
+                await self._notify_admin(f"mpv no arranco en /next: {exc}")
                 return
             for attempt in range(2):
                 try:
@@ -1534,12 +1784,14 @@ class YTRemoteBot:
                 except RuntimeError as exc:
                     if attempt == 1 or item.url not in self._stream_cache:
                         await self._reply(update, f"No se pudo reproducir: {exc}")
+                        await self._notify_admin(f"Fallo al reproducir {item.title}: {exc}")
                         return
                     logger.info("Stream cacheado expirado, re-resolviendo: %s", item.url)
                     self._stream_cache.pop(item.url, None)
                     resolved = await self._stream_for(item.url)
                     if not resolved:
                         await self._reply(update, f"No se pudo reproducir: {exc}")
+                        await self._notify_admin(f"Fallo al re-resolver {item.title}: {exc}")
                         return
                     stream_url, audio_url = resolved
             self._schedule_prefetch(item)
@@ -1558,11 +1810,13 @@ class YTRemoteBot:
             self._prefetch_resolved = None
             self._cancel_prefetch()
             try:
+                await self.player.start()
                 await self.player.load(stream_url, audio_url)
                 await self.player.play()
                 self._paused = False
             except RuntimeError as exc:
                 await self._reply(update, f"No se pudo saltar: {exc}")
+                await self._notify_admin(f"Fallo al saltar en /next: {exc}")
                 return
             # En radio, from_queue siempre es False. Navegacion pura: seteamos
             # _current directo para no duplicar el push al stack (ya lo hicimos).
@@ -1591,18 +1845,22 @@ class YTRemoteBot:
             return
         # Navegacion pura: seteamos _current directo para evitar el doble push
         # al stack de navegacion (ya se guardo el item en _push_to_nav_back).
-        self.queue._current = candidate
-        self.queue._items = []
-        self.queue._cursor = 0
+        # El commit del estado se hace SOLO tras el load exitoso (abajo):
+        # si resolver o reproducir falla, queue._current sigue apuntando al
+        # tema anterior. La miniatura del candidato va por _render_pending
+        # (item explicito) sin tocar el estado del dominio.
+        await self._render_pending(candidate.title, candidate)
         resolved = await self._stream_for(candidate.url)
         if not resolved:
             await self._reply(update, "No se pudo resolver el video. Espera un momento e intenta de nuevo.")
+            await self._notify_admin(f"Fallo de resolucion en /next: {candidate.title}")
             return
         stream_url, audio_url = resolved
         try:
             await self.player.start()
         except RuntimeError as exc:
             await self._reply(update, f"Problema al iniciar el reproductor: {exc}")
+            await self._notify_admin(f"mpv no arranco en /next: {exc}")
             return
         for attempt in range(2):
             try:
@@ -1613,14 +1871,20 @@ class YTRemoteBot:
             except RuntimeError as exc:
                 if attempt == 1 or candidate.url not in self._stream_cache:
                     await self._reply(update, f"No se pudo reproducir: {exc}")
+                    await self._notify_admin(f"Fallo al reproducir {candidate.title}: {exc}")
                     return
                 logger.info("Stream cacheado expirado, re-resolviendo: %s", candidate.url)
                 self._stream_cache.pop(candidate.url, None)
                 resolved = await self._stream_for(candidate.url)
                 if not resolved:
                     await self._reply(update, f"No se pudo reproducir: {exc}")
+                    await self._notify_admin(f"Fallo al re-resolver {candidate.title}: {exc}")
                     return
                 stream_url, audio_url = resolved
+        # Audio arrancando: recien aca se commitea el nuevo tema en la cola.
+        self.queue._current = candidate
+        self.queue._items = []
+        self.queue._cursor = 0
         self._schedule_prefetch(candidate)
         if update is not None:
             await self._show_card(update.effective_chat.id)
@@ -1677,15 +1941,18 @@ class YTRemoteBot:
             # Reproducir el item sin pasar por _play_item (que haria un push
             # extra a back, duplicando el item). Manejo manual.
             self._cancel_prefetch()
+            await self._render_pending(item.title, item)
             resolved = await self._stream_for(item.url)
             if not resolved:
                 await self._reply(update, "No se pudo resolver el video. Espera un momento e intenta de nuevo.")
+                await self._notify_admin(f"Fallo de resolucion en /prev (back): {item.title}")
                 return
             stream_url, audio_url = resolved
             try:
                 await self.player.start()
             except RuntimeError as exc:
                 await self._reply(update, f"Problema al iniciar el reproductor: {exc}")
+                await self._notify_admin(f"mpv no arranco en /prev: {exc}")
                 return
             for attempt in range(2):
                 try:
@@ -1699,12 +1966,14 @@ class YTRemoteBot:
                 except RuntimeError as exc:
                     if attempt == 1 or item.url not in self._stream_cache:
                         await self._reply(update, f"No se pudo reproducir: {exc}")
+                        await self._notify_admin(f"Fallo al reproducir {item.title}: {exc}")
                         return
                     logger.info("Stream cacheado expirado, re-resolviendo: %s", item.url)
                     self._stream_cache.pop(item.url, None)
                     resolved = await self._stream_for(item.url)
                     if not resolved:
                         await self._reply(update, f"No se pudo reproducir: {exc}")
+                        await self._notify_admin(f"Fallo al re-resolver {item.title}: {exc}")
                         return
                     stream_url, audio_url = resolved
             self._schedule_prefetch(item)
@@ -1714,19 +1983,22 @@ class YTRemoteBot:
                 update, f"⏮️ Anterior: {item.title}", item
             )
             return
-        # Fallback: item del historico de cola. No llamamos a _play_item
+# Fallback: item del historico de cola. No llamamos a _play_item
         # (que hace _push_to_nav_back y limpiaria nav_forward). En su lugar,
         # hacemos el manejo manual directo para preservar los stacks de navegacion.
         self._cancel_prefetch()
+        await self._render_pending(item.title, item)
         resolved = await self._stream_for(item.url)
         if not resolved:
             await self._reply(update, "No se pudo resolver el video. Espera un momento e intenta de nuevo.")
+            await self._notify_admin(f"Fallo de resolucion en /prev: {item.title}")
             return
         stream_url, audio_url = resolved
         try:
             await self.player.start()
         except RuntimeError as exc:
             await self._reply(update, f"Problema al iniciar el reproductor: {exc}")
+            await self._notify_admin(f"mpv no arranco en /prev: {exc}")
             return
         for attempt in range(2):
             try:
@@ -1740,12 +2012,14 @@ class YTRemoteBot:
             except RuntimeError as exc:
                 if attempt == 1 or item.url not in self._stream_cache:
                     await self._reply(update, f"No se pudo reproducir: {exc}")
+                    await self._notify_admin(f"Fallo al reproducir {item.title}: {exc}")
                     return
                 logger.info("Stream cacheado expirado, re-resolviendo: %s", item.url)
                 self._stream_cache.pop(item.url, None)
                 resolved = await self._stream_for(item.url)
                 if not resolved:
                     await self._reply(update, f"No se pudo reproducir: {exc}")
+                    await self._notify_admin(f"Fallo al re-resolver {item.title}: {exc}")
                     return
                 stream_url, audio_url = resolved
         self._schedule_prefetch(item)
@@ -1756,17 +2030,15 @@ class YTRemoteBot:
         )
 
     async def cmd_stop(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-        await self.player.stop()
-        self.queue.clear()
-        self._cancel_prefetch()
-        self._clear_stream_cache()
-        self._clear_nav_stacks()
+        # Detener y rebobinar a 0:00 SIN borrar historial, cola, radio ni
+        # navegacion: conserva todo para que ▶ reanude el video desde el inicio.
+        if self.player.is_running:
+            await self.player.rewind()
         self._queue_advance_needed = False
-        self._radio_artist = ""
-        self._paused = False
+        self._paused = True
         self._persist_dirty()
         await self._render_card(self._track_status_text())
-        await self._reply(update, "⏹️ Detenido y cola limpia")
+        await self._reply(update, "⏹️ Detenido. Usa ▶ para reanudar desde el inicio.")
 
     async def cmd_volume(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         if not context.args:

@@ -55,9 +55,95 @@ botones, radio automatica por artista, roles (admin/dj/user).
    en GitHub.
 
 ## Estado actual
-**v0.2.1 publicado en https://github.com/drfoxsoscomputer/yt-remote/releases/tag/v0.2.1**
-ZIP portable de ~44.5 MB adjunto al release. Quien clone o descargue el ZIP no
-necesita instalar Python ni mpv.
+**v0.3.1 publicado en https://github.com/drfoxsoscomputer/yt-remote/releases/tag/v0.3.1**
+ZIP `yt-remote-v0.3.1-portable.zip` (~42.4 MB). Incluye el fix de los 4 bugs
+post-v0.3.0 (no reanuda tras apagado, a veces video sin audio, mpv "Drop files",
+errores que no llegan al admin) con el plan Fase 1-6 aprobado por el usuario,
+mas el fix del bot congelado (3ra ronda, timeouts de resolucion) y la card
+siempre al final (4ta ronda):
+
+- **Fase 1 (mpv vivo)**: `_toggle_play_pause` y `cmd_resume` reproducen el
+  item actual por `_play_item` si mpv no corre (prende el reproductor); los
+  2 bloques prefetch de `cmd_next` llaman `player.start()` antes de cargar.
+- **Fase 2 (stop que no borra)**: `Player.rewind()` (pausa + seek 0 absolute);
+  `cmd_stop` conserva TODO (cola, historial, radio, navegacion, cache) y deja
+  `_paused=True` para reanudar con ▶ desde 0:00. El boton stop de la tarjeta
+  ya no fuerza `_paused=False`.
+- **Fase 3 (audio robusto)**: `Player.load()` reintenta el `audio-add` (DASH)
+  y VERIFICA con `track-list` (via request_id) que haya pista de audio
+  seleccionada antes de dar el track por cargado.
+- **Fase 4 (errores al admin)**: `_notify_admin()` copia todo fallo real
+  (resolucion, mpv, reproduccion, red) al chat del OWNER_ID como log;
+  cubierto en _play_item, cmd_next/cmd_prev, autoplay, saltos y re-resolucion.
+  Los errores desde botones de tarjeta suben como alerta visible
+  (`show_alert=True`) en vez de toast efimero.
+- **Fase 5 (tests)**: 6 tests nuevos en test_card (toggle/resume/next prenden
+  mpv, stop conserva estado y no llama clear, notify_admin llega al owner).
+  56 tests verdes. Se reinstalo pytest/pluggy/pytest-asyncio (corruptos) y se
+  creo `pytest.ini` con `asyncio_mode=auto`.
+- **Fase 6**: zip `yt-remote-v0.3.1-portable.zip` (42.4 MB) GENERADO. Tag + release
+  publicados el 2026-09-08.
+- **Fix botones ⏭/⏮ lentos en radio** (2026-09-07, 3 medidas): (1) candado
+  anti-colision en `_on_control` (`_control_lock`): toques extra se descartan
+  al instante ("⏳ Un momento, primero termina...") en vez de encolarse; (2)
+  cache de la lista de radio (`_radio_search_cache` por ancla): la busqueda de
+  50 temas se hace UNA vez por /buscar y cada salto elige de la cache (era el
+  delay real de ~2s por boton); (3) respuesta inmediata: al tocar sin prefetch
+  la tarjeta se re-renderiza YA con "⏳ Cargando…\n🎵 {titulo}" (`_render_pending`)
+  y el audio entra cuando yt-dlp termina (los 4 caminos radio de cmd_next/
+  cmd_prev). Se descubrio ademas que los tests dependian sin querer de un
+  `data/state.json` vacio: `make_bot` ahora aísla la persistencia con
+  `isolated_state_path()` (nunca toca el state real del proyecto). 3 tests
+  nuevos cubren las medidas. **59 tests verdes**.
+- **Fix skeleton en la card (2026-09-07, 2da ronda del mismo bug)**: el usuario
+  aclaró que el feedback de carga debe vivir en la CARD (el toast de arriba
+  "Cargando..." era "una porquería" imperceptible). Cambios: (1) se eliminó el
+  toast `query.answer("Cargando...")` — todo el feedback está en la tarjeta;
+  (2) `_render_card` acepta `item` opcional y `_render_pending(title, item)`
+  muestra miniatura + título del candidato SIN tocar `queue._current` (antes la
+  thumb quedaba clavada en el tema viejo porque `_render_card` la sacaba de
+  `self.queue.current`); (3) el commit de `queue._current = candidate` en el
+  camino "candidato nuevo" se mueve a DESPUÉS del load exitoso (corrige un bug
+  latente: antes se setteaba antes de resolver y no se restauraba al fallar).
+Presentación ≠ estado de dominio. 1 test ajustado + 1 nuevo (si resolve falla,
+   `queue._current` sigue apuntando al anterior). **60 tests verdes**.
+- **Fix bot congelado (2026-09-07, 3ra ronda; causa raiz del "no responde nada")**:
+   el usuario reportó que el bot quedó "pegado" y ningún botón/comando respondía
+   aunque el video seguía sonando. Causa: `_stream_for` resolvía el stream con
+   `asyncio.to_thread(resolve_stream_url, url)` SIN timeout; `resolve_stream_url`
+   corre yt-dlp síncrono y puede colgarse 30s+ (TLS, rate-limit, client bloqueado)
+   INCLUSO con internet; y como python-telegram-bot procesa los updates en
+   secuencia (`run_polling` sin concurrencia), un handler colgado congela todo el
+   polling (el mpv sigue vivo porque es proceso aparte). Cambios: (1) timeout de
+   20s (`_RESOLVE_TIMEOUT`) sobre CADA resolución de stream y sobre `search()` en
+   `_pick_next_candidate` — al expirar se trata como fallo de resolución (mensaje +
+   `_notify_admin`), el polling nunca queda mudo; (2) se restauró la respuesta al
+   toque del botón pero SIN toast: `await query.answer()` mudo al entrar en la
+   acción — el spinner del botón se apaga al instante (antes, al quitar el toast
+   en la ronda 2, el callback quedaba sin responder hasta que terminaba toda la
+   acción y el botón parecía muerto). El candado anti-colisión y el "⏳ Un momento..."
+   siguen intactos (es el firewall, no el problema). 2 tests nuevos:
+   `_stream_for` con resolve colgado (sleep 5s) expira por timeout en <4s; botón
+   vol-10 responde con `answered == ()` SIN toast y la acción corre. **61 verdes
+   + 1 fallo ambiental** (`test_singleton_lock`: el puerto 47631 lo tiene el bot
+   real corriendo en la PC — matar el proceso 12636 y el test vuelve a pasar).
+- **La card siempre al final (2026-09-08, 4ta ronda)**: el usuario pidió que la
+   card quede SIEMPRE como el último mensaje del chat: al escribir un comando o
+   texto, los mensajes quedan arriba y la card se desvanece (delete_message) y
+   se re-envía fresca al final. Cambios: (1) `_remove_card()` borra la card OK
+   real (seriada con `_card_lock`) y resetea ids — el pick/:N ya no deja cards
+   huérfanas (antes solo resetaba ids sin borrar el mensaje); (2) `_reposition_card(chat_id)`
+   = borrar + re-enviar al final; (3) wrapper `_with_card_reposition(handler)` en
+   todos los CommandHandlers: si la card existía antes del comando, se reposiciona
+   al final al terminar; (4) MessageHandler pasivo `filters.TEXT & ~COMMAND`
+   reposiciona la card cuando alguien escribe texto (sin responder); (5) el
+   auto-advance NO reposiciona (sigue editando en su lugar — decisión del
+   usuario); (6) "Expandiendo playlist/mix" dejó de ser un mensaje clavado: si
+   hay card avisa en ella con "⏳ Expandiendo playlist…" y si no hay card usa un
+   mensaje efímero que se borra al terminar; además `expand_playlist` ahora corre
+   bajo `_RESOLVE_TIMEOUT` (20s) — mismo riesgo de congelamiento que `_stream_for`.
+   7 tests nuevos. **69 verdes** (el singleton volvió a pasar porque el bot real
+   ya no corre).
 
 > **Nota 2026-09-07**: el primer ZIP subido no incluia `typing_extensions.py`
 > (paquete suelto en `site-packages/`, no carpeta) y el bot crasheaba al
@@ -109,6 +195,34 @@ necesita instalar Python ni mpv.
   retry de `send_photo`.
 
 ## Pendientes / ToDo
+- [ ] **Revalidar el bot en vivo tras el fix del congelamiento (Test 8)**: el
+   bot actual quedó colgado en el arreglo viejo; reiniciarlo
+   con el fix (timeouts + `query.answer` mudo) y repetir el Test 7 (⏭ lento,
+   doble toque).
+- [ ] **Revalidar la card siempre al final en vivo**: escribir texto un comando
+   y confirmar que la card se desvanece y reaparece como último mensaje; probar
+   expandir una playlist y ver el "⏳ Expandiendo playlist…" en la card.
+- [ ] **Testeo humano del fix de botones (Test 7)**: revalidar con el amigo
+   que ⏭/⏮ responden al instante (tarjeta cambia YA con "⏳ Cargando…") y que
+   no se encolan toques múltiples.
+- [x] **Release v0.3.1 en GitHub** (2026-09-08): zip regenerado con el codigo
+   nuevo (bot/player/test/docs/pytest.ini), tag `v0.3.1`, release con el zip
+   como unico asset, commit + push. 69 tests verdes.
+- [x] **Fix botones ⏭/⏮ lentos en radio** (2026-09-07): candado anti-colision
+   + cache de lista de radio por ancla + render pendiente "⏳ Cargando…".
+   59 tests verdes.
+- [x] **Skeleton en la card sin riesgo de estado** (2026-09-07): toast eliminado;
+   `_render_pending(title, item)` muestra miniatura+título del candidato sin
+   tocar `queue._current`; commit de `_current` solo tras load exitoso. La
+   presentación nunca compromete el estado de dominio. 60 tests verdes.
+- [x] **Fix bot congelado / timeouts de resolución (2026-09-07)**: `_RESOLVE_TIMEOUT`
+   de 20s en `_stream_for` y en `search()` de `_pick_next_candidate` (un yt-dlp
+   colgado ya no congela el polling); `query.answer()` mudo al entrar en la acción
+   (spinner del botón se apaga sin toast). 2 tests nuevos; 61 verdes + singleton
+   verde cuando no corre el bot real.
+- [x] **La card siempre al final (2026-09-08)**: `_remove_card`/`_reposition_card`
+   + wrapper `_with_card_reposition` en comandos + MessageHandler pasivo de texto +
+   feedback de playlist en la card con timeout. 7 tests nuevos. **69 verdes**.
 - [x] **Tests `test_card.py`**: 22 errores LSP corregidos. py_compile OK + tests OK.
 - [x] **Manejo de errores de red en `_pick_next_candidate`**: flag de error +
    `_radio_over_message(por_error)` sugiere /lista en fallos de red.
@@ -138,6 +252,13 @@ necesita instalar Python ni mpv.
    botones de control, /buscar requiere dj, /solicitar llega al admin.
 
 ## Decisiones recientes
+- **v0.3.1 bugfix plan (2026-09-07)**: fixes de los 4 bugs post-v0.3.0 (reanudar
+  tras apagado, audio sin sonido, stop que borraba, errores invisibles).
+  Errores al OWNER_ID directo (chat privado), no al allowed_chat_id. Botones
+  que prenden mpv: solo atras/play/pausa/siguiente. Stop = pausa + rewind a
+  0:00 sin limpiar nada.
+- **v0.3.0 release**: persistencia de estado + diagnostico remoto (feature,
+  bump minor). Commit `425eff5`.
 - **v0.2.1 release**: features principales (modelo de roles simplificado, /solicitar,
   botones de tarjeta restringidos). Numero de version siguiendo semver:
   bump minor (0.2.0 → 0.2.1) por features nuevos (no fixes).

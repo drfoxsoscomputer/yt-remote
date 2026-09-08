@@ -65,6 +65,14 @@ class Player:
         self._debug_events: list[object] = []
         # Evita iniciar el reader thread mas de una vez por proceso mpv.
         self._reader_started = False
+        # Respuestas a comandos con request_id (ver _request/_dispatch).
+        # mpv responde {"request_id": N, "data": ...}; el reader las captura
+        # aqui para que load() pueda VERIFICAR el track-list (audio presente)
+        # en vez de mandar el audio-add a ciegas.
+        self._request_events: dict[int, threading.Event] = {}
+        self._request_results: dict[int, object] = {}
+        self._request_id = 0
+        self._lock_req = threading.Lock()
 
     @property
     def is_playing(self) -> bool:
@@ -225,6 +233,15 @@ class Player:
                             continue
                         if getattr(self, "_debug_events", None) is not None:
                             self._debug_events.append(ev)
+                        # Respuesta a un comando con request_id (ver _request):
+                        # capturar el 'data' y despertar al que espera.
+                        if isinstance(ev, dict) and ev.get("request_id") is not None:
+                            rid = ev["request_id"]
+                            ev_obj = self._request_events.get(rid)
+                            if ev_obj is not None:
+                                self._request_results[rid] = ev.get("data")
+                                ev_obj.set()
+                                self._request_events.pop(rid, None)
                         if isinstance(ev, dict) and ev.get("event") == "file-loaded":
                             # mpv termino de cargar el track: load() lo espera
                             # antes de mandar el audio-add (ver _file_loaded_event).
@@ -323,6 +340,31 @@ class Player:
                     "MPV no responde (timeout escribiendo al pipe)."
                 )
 
+    async def _request(self, command: list) -> object | None:
+        """Envia un comando con request_id y espera la respuesta del reader.
+
+        El reader captura la respuesta y la deja en _request_results.
+        Devuelve el 'data' de la respuesta o None si no llego.
+        """
+        with self._lock_req:
+            self._request_id += 1
+            rid = self._request_id
+        payload = {"command": command, "request_id": rid}
+        ev = threading.Event()
+        self._request_events[rid] = ev
+        try:
+            await self._send_raw(json.dumps(payload))
+        except RuntimeError:
+            self._request_events.pop(rid, None)
+            return None
+        try:
+            await asyncio.wait_for(asyncio.to_thread(ev.wait), timeout=3.0)
+        except asyncio.TimeoutError:
+            self._request_events.pop(rid, None)
+            self._request_results.pop(rid, None)
+            return None
+        return self._request_results.pop(rid, None)
+
     async def command(self, command: str, *args) -> None:
         """Envia un comando mpv (ej: 'play', 'pause', 'cycle')."""
         payload = json.dumps({"command": [command, *args]})
@@ -335,6 +377,10 @@ class Player:
         cargar el video (file-loaded) ANTES del audio-add: si el comando llega
         mientras el video se carga, mpv descarta la pista al completar el load
         y queda video sin sonido.
+
+        Tras el audio-add VERIFICA con 'track-list' que haya una pista de
+        audio con 'selected'; si no, lo reintenta una vez mas. Asi los videos
+        sin sonido no pasan sin diagnostico.
         """
         self._file_loaded_event.clear()
         self._loaded.append((url, audio_url))
@@ -349,8 +395,24 @@ class Player:
                 # Sin file-loaded no hay forma de saber si el video cargo;
                 # igual se intenta el audio-add por si mpv ya lo proceso.
                 pass
-            await self.command("audio-add", audio_url, "select")
+            for attempt in range(2):
+                await self.command("audio-add", audio_url, "select")
+                await asyncio.sleep(0.3)
+                if await self._has_audio_track():
+                    break
         self._track_active = True
+
+    async def _has_audio_track(self) -> bool:
+        """True si el track-list de mpv muestra al menos una pista de audio."""
+        data = await self._request(
+            ["get_property", "track-list"]
+        )
+        if not isinstance(data, list):
+            return True  # sin respuesta: no bloquear, asumir que anda
+        for track in data:
+            if isinstance(track, dict) and track.get("type") == "audio":
+                return True
+        return False
 
     async def play(self) -> None:
         await self.command("set", "pause", "no")
@@ -364,6 +426,15 @@ class Player:
     async def stop(self) -> None:
         await self.command("stop")
         await self.command("playlist-clear")
+
+    async def rewind(self) -> None:
+        """Detiene la reproduccion sin descargar el track: pausa y rebobina a 0:00.
+
+        Mantiene la ventana de mpv y el track cargado, para que al presionar
+        ▶ se reanude desde el principio del video actual.
+        """
+        await self.command("set", "pause", "yes")
+        await self.command("seek", "0", "absolute")
 
     async def set_volume(self, volume: int) -> None:
         volume = max(0, min(100, volume))
