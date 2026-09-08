@@ -46,6 +46,7 @@ Cuando suena algo aparece una tarjeta con botones:
 | ⏹ | Detiene todo |
 | 🔊−10 / 🔊+10 | Bajar o subir volumen 10 puntos |
 | 📋 | Ver la lista |
+| ⚙️ Calidad: N | Elegir la resolución de los videos (solo admin) |
 
 La radio pasa automáticamente a la siguiente canción del mismo artista cuando
 termina. Use `/buscar` con otro nombre para cambiar de cantante.
@@ -53,6 +54,17 @@ termina. Use `/buscar` con otro nombre para cambiar de cantante.
 La tarjeta queda siempre como el último mensaje del chat: cuando usted escribe
 un comando o un mensaje, la tarjeta se desvanece y reaparece abajo, al final
 de la conversación.
+
+## Calidad de video
+
+El botón `⚙️ Calidad` de la tarjeta muestra la resolución actual (por
+defecto **1080p**). Todos lo ven, pero solo un **admin** puede tocarlo: abre
+una lista de niveles (144, 240, 360, 480, 720, 1080) y basta tocar uno para
+aplicarlo de inmediato: la canción recarga con la nueva resolución.
+
+La calidad es un **tope máximo**: si un video no tiene la resolución elegida,
+usa la mayor que no la supere (1080 es el máximo soportado). El cambio queda
+**guardado** en la PC (estado del bot) y sobrevive a reinicios.
 
 ## Comandos
 
@@ -66,7 +78,8 @@ de la conversación.
 | `/solicitar` | user | Solicitar acceso de dj al admin |
 
 **Todos los roles** pueden tocar el boton 📋 (ver lista). Los demas
-botones de la tarjeta (▶ ⏮ ⏭ ⏹ 🔊) son solo para dj y admin.
+botones de la tarjeta (▶ ⏮ ⏭ ⏹ 🔊) son solo para dj y admin; el boton
+⚙️ Calidad es exclusivo de **admin**.
 
 ## Roles
 

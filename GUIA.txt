@@ -68,9 +68,27 @@ Fila 2:
   🔊+10  — sube el volumen 10 puntos
   📋     — muestra la lista de canciones
 
+Fila 3:
+  ⚙️ Calidad: 1080p  — elige la resolución de los videos (solo admin)
+
 La tarjeta queda siempre como el último mensaje del chat: cuando usted
 escribe un comando o un mensaje, la tarjeta se desvanece y reaparece
 abajo, al final de la conversación.
+
+
+CALIDAD DE VIDEO
+----------------
+El botón ⚙️ Calidad de la tarjeta muestra la resolución actual (por
+defecto 1080p). Todos lo ven, pero solo un admin puede tocarlo: abre
+una lista de niveles (144, 240, 360, 480, 720, 1080) y basta tocar
+uno para aplicarlo de inmediato: la canción recarga con la nueva
+resolución.
+
+La calidad es un tope máximo: si un video no tiene la resolución
+elegida, se usa la mayor que no la supere (1080 es el máximo
+soportado). El cambio queda guardado en la PC y sobrevive a
+reinicios. Útil si el internet está lento: baje a 480 o 360 y los
+videos arrancan más livianos.
 
 
 COMPORTAMIENTO DE LA RADIO
@@ -108,7 +126,7 @@ admin que le dé acceso.
 
 ROLES Y PERMISOS
 ----------------
-  admin  — puede hacer todo + dar/quitar acceso
+  admin  — puede hacer todo + dar/quitar acceso + cambiar la calidad
   dj     — buscar, controlar musica (tarjeta y comandos)
   user   — solo puede ver la lista con /lista o el boton 📋
 

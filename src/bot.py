@@ -33,7 +33,7 @@ from player import Player
 from persistence import StateStore
 from queue_manager import QueueItem, QueueManager
 from roles import VALID_ROLES, RoleManager
-from search import SearchResult, is_playlist_url, expand_playlist, is_youtube_link, search, resolve_stream_url, thumbnail_from_url, last_resolve_error
+from search import SearchResult, is_playlist_url, expand_playlist, is_youtube_link, search, resolve_stream_url, thumbnail_from_url, last_resolve_error, set_max_height
 import setup_cli as setup
 
 logging.basicConfig(
@@ -46,6 +46,9 @@ logger = logging.getLogger(__name__)
 # congelaria el polling entero (los handlers de python-telegram-bot corren
 # en secuencia) y el bot dejaria de responder botones y comandos.
 _RESOLVE_TIMEOUT = 20.0
+
+# Niveles de calidad disponibles para el admin. 1080 es el tope maximo.
+QUALITY_LEVELS = (144, 240, 360, 480, 720, 1080)
 
 
 class YTRemoteBot:
@@ -98,6 +101,9 @@ class YTRemoteBot:
         self._card_chat_id: int | None = None
         self._card_message_id: int | None = None
         self._card_is_photo: bool = False
+        # Tope de resolucion elegido por el admin (None = 1080 por defecto).
+        # Se aplica a search.MAX_HEIGHT y se persiste en state.json.
+        self._max_height: int | None = None
         # Seria la re-creacion de la tarjeta (borrar + enviar de nuevo): dos
         # updates seguidos no deben borrar dos veces para duplicar la card.
         self._card_lock: asyncio.Lock = asyncio.Lock()
@@ -134,6 +140,7 @@ class YTRemoteBot:
             "playlist": [i.to_dict() for i in self.queue._items],
             "history": history,
             "radio_artist": self._radio_artist,
+            "max_height": self._max_height,
             "card": {
                 "chat_id": self._card_chat_id,
                 "message_id": self._card_message_id,
@@ -186,6 +193,16 @@ class YTRemoteBot:
         self._card_chat_id = card.get("chat_id")
         self._card_message_id = card.get("message_id")
         self._card_is_photo = bool(card.get("is_photo"))
+
+        # Tope de resolucion: un valor persistido invalido (>1080, caida del
+        # tope antiguo) se ignora y se vuelve a 1080 por defecto.
+        persistido = loaded.get("max_height")
+        if persistido in QUALITY_LEVELS:
+            self._max_height = persistido
+            set_max_height(persistido)
+        else:
+            self._max_height = None
+            set_max_height(1080)
 
     def _push_to_nav_back(self) -> None:
         """Guarda el item actual en la pila de navegación hacia atrás.
@@ -663,6 +680,7 @@ class YTRemoteBot:
 
         Fila 1: ⏮ anterior | ▶/⏸ alternar play-pause | ⏭ siguiente | ⏹ detener
         Fila 2: 🔊−10 | <volumen actual> | 🔊+10 | 📋 lista
+        Fila 3: ⚙️ Calidad: Np (solo admin puede usarla)
         """
         play_pause = "▶️" if self._paused else "⏸️"
         keyboard = [
@@ -678,8 +696,34 @@ class YTRemoteBot:
                 InlineKeyboardButton("🔊+10", callback_data="ctl:vol+10"),
                 InlineKeyboardButton("📋", callback_data="ctl:lista"),
             ],
+            [
+                InlineKeyboardButton(
+                    f"⚙️ Calidad: {(self._max_height or 1080)}p",
+                    callback_data="ctl:calidad",
+                )
+            ],
         ]
         return InlineKeyboardMarkup(keyboard)
+
+    def _quality_keyboard(self) -> InlineKeyboardMarkup:
+        """Grilla de calidades para el admin (el vigente se marca con ✓)."""
+        current = self._max_height or 1080
+        rows: list[list[InlineKeyboardButton]] = []
+        current_row: list[InlineKeyboardButton] = []
+        for level in QUALITY_LEVELS:
+            label = f"{level} ✓" if level == current else str(level)
+            current_row.append(
+                InlineKeyboardButton(label, callback_data=f"cl:calidad:{level}")
+            )
+            if len(current_row) == 4:
+                rows.append(current_row)
+                current_row = []
+        if current_row:
+            rows.append(current_row)
+        rows.append(
+            [InlineKeyboardButton("✖ Cerrar", callback_data="cl:calidad:cerrar")]
+        )
+        return InlineKeyboardMarkup(rows)
 
     async def _render_card(
         self, text: str, chat_id: int | None = None, item: QueueItem | None = None
@@ -734,6 +778,26 @@ class YTRemoteBot:
                 # Re-render con el mismo texto/teclado: es un no-op valido.
                 return
             logger.warning("No se pudo editar la tarjeta: %s", exc)
+
+    async def _swap_card_keyboard(self, keyboard: InlineKeyboardMarkup) -> None:
+        """Cambia SOLO el teclado de la tarjeta (edit_message_reply_markup).
+
+        Ni borra la card ni re-renderiza texto/miniatura: la grilla de calidad
+        reemplaza a los controles y al elegir/cerrar vuelven los controles,
+        todo sobre el MISMO mensaje (sin desvanecimiento ni recreacion).
+        """
+        if self._card_chat_id is None or self._card_message_id is None:
+            return
+        try:
+            await self._app.bot.edit_message_reply_markup(
+                chat_id=self._card_chat_id,
+                message_id=self._card_message_id,
+                reply_markup=keyboard,
+            )
+        except Exception as exc:  # noqa: BLE001 - no debe romper la card
+            if "message is not modified" in str(exc):
+                return
+            logger.warning("No se pudo cambiar el teclado de la tarjeta: %s", exc)
 
     async def _send_card(self, chat_id: int) -> None:
         """Crea la tarjeta persistente del mini reproductor en un chat.
@@ -1415,6 +1479,10 @@ class YTRemoteBot:
             # Un boton de la tarjeta persistente del mini reproductor.
             await self._on_control(update, context, query.data.split(":", 1)[1])
             return
+        if query.data and query.data.startswith("cl:calidad:"):
+            # Selector de calidad de la tarjeta (cl:calidad:N / cl:calidad:cerrar).
+            await self._on_quality_callback(update, context)
+            return
         await query.answer()
         if not query.data or not query.data.startswith("pick:"):
             return
@@ -1677,6 +1745,15 @@ class YTRemoteBot:
                     text = self._queue_list_text() or "La lista esta vacia."
                     await self._render_card(text, chat_id)
                     reflect_status = False  # no pisa la lista recien mostrada
+                elif action == "calidad":
+                    # Solo admin puede abrir el selector de calidad.
+                    if user_id is None or not self.roles.has_role(user_id, "admin"):
+                        await query.answer("Solo el admin puede cambiar la calidad.", show_alert=True)
+                        return
+                    # Solo cambia el teclado (la grilla reemplaza a los
+                    # botones de control); el texto/miniatura no se tocan.
+                    await self._swap_card_keyboard(self._quality_keyboard())
+                    reflect_status = False  # no pisa el selector abierto
                 else:
                     return
             finally:
@@ -1686,6 +1763,110 @@ class YTRemoteBot:
             # accion (nuevo tema, pausa, volumen, detenido, etc.).
             if reflect_status:
                 await self._render_card(self._track_status_text(), chat_id)
+
+    async def _on_quality_callback(
+        self, update: Update, context: ContextTypes.DEFAULT_TYPE
+    ) -> None:
+        """Maneja el selector de calidad de la tarjeta (callback `cl:calidad:*`).
+
+        Solo admin. Se serializa con el MISMO `_control_lock` que los botones de
+        control: un toque de calidad jamas se pisa con un next/prev. Si otra
+        accion corre, se descarta al instante.
+
+        `cl:calidad:N` aplica el nivel (persistido en `state.json`, aplicado a
+        `search.MAX_HEIGHT`), invalida el cache de streams/prefetch y, si hay una
+        canción sonando, la recarga con la nueva resolución. `cl:calidad:cerrar`
+        descarta sin guardar nada.
+
+        Elegir el nivel ya activo equivale a cerrar: solo vuelve los botones de
+        control, sin recargar ni invalidar el cache.
+
+        Al aplicar (o cerrar, o repetir), la card NO se borra ni se recrea: se
+        restaura el teclado de control sobre el MISMO mensaje (`_swap_card_keyboard`).
+        """
+        query = update.callback_query
+        user_id = query.from_user.id if query.from_user else None
+        if user_id is not None and not self.roles.has_role(user_id, "admin"):
+            await query.answer("Solo el admin puede cambiar la calidad.", show_alert=True)
+            return
+
+        if self._control_lock.locked():
+            try:
+                await query.answer("⏳ Un momento, primero termina...")
+            except Exception:
+                pass
+            return
+
+        async with self._control_lock:
+            self._from_card = True
+            try:
+                data = query.data or ""
+                level_str = (
+                    data.split(":", 2)[2] if data.startswith("cl:calidad:") else ""
+                )
+                self._card_chat_id = update.effective_chat.id
+                self._card_message_id = query.message.message_id
+                try:
+                    await query.answer()
+                except Exception:
+                    pass
+
+                if level_str == "cerrar":
+                    await self._swap_card_keyboard(self._control_keyboard())
+                    return
+
+                try:
+                    level = int(level_str)
+                except ValueError:
+                    return
+                if level not in QUALITY_LEVELS:
+                    return
+
+                # Elegir el nivel VIGENTE equivale a cerrar: no recargar, no
+                # invalidar cache, no tocar nada. Solo vuelve los botones.
+                if level == (self._max_height or 1080):
+                    await self._swap_card_keyboard(self._control_keyboard())
+                    return
+
+                self._max_height = level
+                set_max_height(level)
+                self._persist_dirty()
+                try:
+                    await query.answer(f"Calidad: {level}p ✓")
+                except Exception:
+                    pass
+
+                # Cambio YA: invalidar el mesonero y el prefetch para que nada
+                # siga resolviendo con la calidad vieja, y recargar el tema
+                # actual con la nueva resolucion (si hay algo sonando).
+                self._clear_stream_cache()
+                self._cancel_prefetch()
+                current = self.queue.current
+                if current is not None:
+                    try:
+                        resolved = await self._stream_for(current.url)
+                        if not resolved:
+                            await self._notify_admin(
+                                f"No se pudo recargar '{current.title}' con calidad {level}p."
+                            )
+                        else:
+                            stream_url, audio_url = resolved
+                            await self.player.start()
+                            await self.player.load(stream_url, audio_url)
+                            await self.player.play()
+                            self._paused = False
+                    except Exception as exc:  # noqa: BLE001 - no romper la card
+                        logger.warning("Fallo la recarga tras cambiar calidad: %s", exc)
+                        await self._notify_admin(
+                            f"No se pudo recargar '{current.title}' a {level}p: {exc}"
+                        )
+
+                # La card NO se borra ni se recrea: se restaura el MISMO mensaje
+                # con el teclado de control estandar (ya mostrando el nuevo nivel
+                # en el boton ⚙️), sin desvanecimiento ni efecto de recreacion.
+                await self._swap_card_keyboard(self._control_keyboard())
+            finally:
+                self._from_card = False
 
     async def cmd_next(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         """Salta YA al siguiente tema: corta el actual y reproduce el siguiente.

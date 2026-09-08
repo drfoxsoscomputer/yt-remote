@@ -66,6 +66,9 @@ class FakeBot:
     async def edit_message_caption(self, caption=None, chat_id=None, message_id=None, **kwargs):
         self.edited.append((chat_id, message_id, "CAP:" + str(caption), kwargs))
 
+    async def edit_message_reply_markup(self, chat_id=None, message_id=None, **kwargs):
+        self.edited.append((chat_id, message_id, "MARKUP", kwargs))
+
     async def delete_message(self, chat_id, message_id, **kwargs):
         self.deleted.append((chat_id, message_id))
 
@@ -1208,6 +1211,287 @@ async def test_playlist_feedback_renders_in_card():
     assert len(played) == 1, played
 
 
+async def test_quality_button_in_card_keyboard():
+    """La tarjeta muestra siempre el boton ancho de calidad (fila 3), visible
+    para todos: '⚙️ Calidad: 1080p' por defecto."""
+    b = make_bot()
+    kb = b._control_keyboard()
+    rows = kb.inline_keyboard
+    assert len(rows) == 3, f"la tarjeta debe tener 3 filas, tiene {len(rows)}"
+    quality_btn = rows[2]
+    assert len(quality_btn) == 1, f"la fila 3 es un solo boton ancho: {quality_btn}"
+    assert quality_btn[0].text == "⚙️ Calidad: 1080p", quality_btn[0].text
+    assert quality_btn[0].callback_data == "ctl:calidad"
+    b._max_height = 480
+    kb = b._control_keyboard()
+    assert kb.inline_keyboard[2][0].text == "⚙️ Calidad: 480p"
+
+
+async def test_quality_selector_opens_for_admin():
+    """El selector de calidad se abre tocando el boton de la tarjeta; solo el
+    admin lo puede abrir (el resto recibe alerta y no se toca nada)."""
+    b = make_bot()
+    b.roles.set_role(1, "admin")
+
+    # No-admin: rechazado con alerta, la card no cambia.
+    upd_user = FakeUpdate("ctl:calidad", user_id=77, chat_id=44, message_id=7)
+    b._card_chat_id = 44
+    b._card_message_id = 7
+    b._app.bot.edited.clear()
+    await b._on_control(upd_user, SimpleNamespace(args=[]), "calidad")
+    assert upd_user.answered and "admin" in str(upd_user.answered[0])
+    assert b._app.bot.edited == []
+    assert b._max_height is None
+
+    # Admin: se abre el selector en la propia tarjeta.
+    upd_admin = FakeUpdate("ctl:calidad", user_id=1, chat_id=44, message_id=7)
+    b._card_chat_id = 44
+    b._card_message_id = 7
+    b._app.bot.edited.clear()
+    await b._on_control(upd_admin, SimpleNamespace(args=[]), "calidad")
+    ediciones = b._app.bot.edited
+    assert ediciones, "el admin debe ver el selector editando la card"
+    assert ediciones[-1][2] == "MARKUP", ediciones[-1]
+    markup = ediciones[-1][3].get("reply_markup")
+    filas = markup.inline_keyboard
+    etiquetas = [btn.text for fila in filas for btn in fila]
+    assert "1080 ✓" in etiquetas, etiquetas  # el nivel vigente sale marcado
+    assert "✖ Cerrar" in etiquetas, etiquetas
+    # Tope de la app: 1080 es el maximo, no hay 1440 ni 2160.
+    assert "1440" not in etiquetas, etiquetas
+    assert "2160" not in etiquetas, etiquetas
+
+
+async def test_quality_select_applies_and_persists():
+    """Elegir un nivel aplica search.MAX_HEIGHT, lo persiste en state.json y
+    restaura la MISMA card sin recrearla (solo vuelve el teclado de control
+    con el boton mostrando la nueva calidad)."""
+    import bot as bot_mod
+    import search as search_mod
+
+    b = make_bot()
+    b.roles.set_role(1, "admin")
+    b._card_chat_id = 44
+    b._card_message_id = 7
+
+    original_height = search_mod.MAX_HEIGHT
+    try:
+        upd = FakeUpdate("cl:calidad:480", user_id=1, chat_id=44, message_id=7)
+        await b._on_quality_callback(upd, SimpleNamespace(args=[]))
+        assert b._max_height == 480
+        assert search_mod.MAX_HEIGHT == 480
+        # La card NO se desvanece ni se re-envia: se edita el MISMO mensaje.
+        assert b._app.bot.sent == [], "no se debe re-enviar la card"
+        assert b._app.bot.deleted == [], "no se debe desvanecer la card vieja"
+        ediciones = b._app.bot.edited
+        assert ediciones and ediciones[-1][2] == "MARKUP", ediciones[-1]
+        # El teclado restaurado es el de control con la calidad elegida.
+        kb = ediciones[-1][3].get("reply_markup")
+        assert kb.inline_keyboard[2][0].text == "⚙️ Calidad: 480p"
+        # Persistido: al "reiniciar" en aislamiento se restaura.
+        b2 = make_bot()
+        assert b2._max_height is None, "un bot nuevo sin estado previo: 1080"
+    finally:
+        search_mod.MAX_HEIGHT = original_height
+
+
+async def test_quality_select_reloads_current_track():
+    """Elegir calidad invalida el cache del mesonero/radio y RECARGA el tema
+    actual con la nueva resolucion: el player recibe el stream re-resuelto."""
+    import search as search_mod
+    from queue_manager import QueueItem
+
+    b = make_bot()
+    b.roles.set_role(1, "admin")
+    b._card_chat_id = 44
+    b._card_message_id = 7
+    b.queue.set_current(QueueItem(url="u1", title="Mi Cancion", channel="GP Band"))
+    # Cache del mesonero con streams resueltos a la calidad vieja: al cambiar
+    # el nivel deben invalidarse (se re-resuelve con el tope nuevo).
+    b._stream_cache["u1"] = ("stream-1080", None)
+    b._radio_search_cache["GP Band"] = ["resultado viejo"]
+
+    async def fake_stream_for(url):
+        return ("stream-480", None)
+
+    b._stream_for = fake_stream_for
+    original_height = search_mod.MAX_HEIGHT
+    try:
+        upd = FakeUpdate("cl:calidad:480", user_id=1, chat_id=44, message_id=7)
+        await b._on_quality_callback(upd, SimpleNamespace(args=[]))
+        assert search_mod.MAX_HEIGHT == 480
+        # El stream se re-resolvio y se recargo en el player.
+        assert b.player.loaded, "la cancion actual debe recargarse"
+        assert b.player.loaded[-1] == ("stream-480", None), b.player.loaded
+        assert b.player.resumed >= 1
+        # El cache viejo quedo invalidado (el stream cacheado murio de verdad).
+        assert "u1" not in b._stream_cache, b._stream_cache
+        assert "GP Band" not in b._radio_search_cache, b._radio_search_cache
+        # La card no se borra ni re-envia: solo vuelve el teclado de control.
+        assert b._app.bot.sent == [], "recargar no re-envia la card"
+        assert b._app.bot.deleted == [], "recargar no desvanece la card"
+        assert b._app.bot.edited[-1][2] == "MARKUP", b._app.bot.edited
+    finally:
+        search_mod.MAX_HEIGHT = original_height
+
+
+async def test_quality_persisted_across_restart():
+    """Si state.json guarda max_height, un bot nuevo lo restaura y lo aplica."""
+    import bot as bot_mod
+    import persistence as persistence_mod
+    import search as search_mod
+    import tempfile
+    from config import Config
+
+    original_height = search_mod.MAX_HEIGHT
+    real_state_path = persistence_mod.STATE_PATH
+    try:
+        tmp = tempfile.mkdtemp()
+        persistence_mod.STATE_PATH = Path(tmp) / "state.json"
+
+        def _fresh_bot():
+            player = FakePlayer()
+            config = Config(
+                token="test", mpv_path="mpv", default_role="user",
+                max_results=5, owner_id=1, allowed_chat_id=None,
+            )
+            b = bot_mod.YTRemoteBot(config)
+            b._app = FakeApp()
+            object.__setattr__(b, "player", player)
+            b.roles.set_role(77, "dj")
+            return b
+
+        b1 = _fresh_bot()
+        assert b1._max_height is None
+        b1._max_height = 720
+        b1._persist_flush()
+        # "Reinicio": un bot nuevo que lee el MISMO state.json.
+        b2 = _fresh_bot()
+        assert b2._max_height == 720
+        assert search_mod.MAX_HEIGHT == 720
+        # Y un estado sin tope vuelve al default 1080.
+        persistence_mod.STATE_PATH = Path(tmp) / "otro.json"
+        b3 = _fresh_bot()
+        assert b3._max_height is None
+        # Un estado viejo con nivel por encima del tope nuevo (1440/2160) cae
+        # a None -> 1080: nunca se aplica una calidad que dejamos de soportar.
+        persistence_mod.STATE_PATH.write_text(
+            '{"version": 1, "max_height": 2160}', encoding="utf-8"
+        )
+        b4 = _fresh_bot()
+        assert b4._max_height is None, b4._max_height
+        assert search_mod.MAX_HEIGHT == 1080
+    finally:
+        persistence_mod.STATE_PATH = real_state_path
+        search_mod.MAX_HEIGHT = original_height
+
+
+async def test_quality_close_without_changing():
+    """Cerrar el selector no cambia nada y la card vuelve al estado normal."""
+    b = make_bot()
+    b.roles.set_role(1, "admin")
+    b._card_chat_id = 44
+    b._card_message_id = 7
+    upd = FakeUpdate("cl:calidad:cerrar", user_id=1, chat_id=44, message_id=7)
+    await b._on_quality_callback(upd, SimpleNamespace(args=[]))
+    assert b._max_height is None
+    ediciones = b._app.bot.edited
+    assert ediciones and ediciones[-1][2] == "MARKUP", ediciones
+    kb = ediciones[-1][3].get("reply_markup")
+    assert kb.inline_keyboard[2][0].text == "⚙️ Calidad: 1080p"
+    assert b._app.bot.sent == [], "cerrar no re-envia ni borra la card"
+    assert b._app.bot.deleted == []
+
+
+async def test_quality_rejects_non_admin():
+    """Un no-admin no puede elegir calidad ni con el boton ni con target."""
+    b = make_bot()
+    b._card_chat_id = 44
+    b._card_message_id = 7
+    upd = FakeUpdate("ctl:calidad", user_id=77, chat_id=44, message_id=7)
+    await b._on_control(upd, SimpleNamespace(args=[]), "calidad")
+    assert upd.answered and "admin" in str(upd.answered[0])
+    upd2 = FakeUpdate("cl:calidad:360", user_id=77, chat_id=44, message_id=7)
+    await b._on_quality_callback(upd2, SimpleNamespace(args=[]))
+    assert upd2.answered and "admin" in str(upd2.answered[0])
+    assert b._max_height is None
+
+
+async def test_quality_lock_discards_while_control_busy():
+    """Si otra accion de boton corre, el toque de calidad se descarta al
+    instante (candado anti-colision) en vez de esperar y congelar la
+    botonera: es el fix del freeze de next/prev/stop/pause."""
+    b = make_bot()
+    b.roles.set_role(1, "admin")
+    await b._control_lock.acquire()
+    try:
+        upd = FakeUpdate("cl:calidad:720", user_id=1, chat_id=44, message_id=7)
+        await b._on_quality_callback(upd, SimpleNamespace(args=[]))
+        assert b._max_height is None, "el nivel no se aplica si otra accion corre"
+        assert upd.answered, "el toque en curso responde con aviso"
+        assert "termina" in " ".join(str(a) for a in upd.answered), upd.answered
+        assert b._app.bot.sent == [], "no se toca la card"
+    finally:
+        b._control_lock.release()
+
+
+async def test_quality_above_1080_is_ignored():
+    """El tope maximo es 1080: pedir 2160 no aplica nada."""
+    import search as search_mod
+
+    b = make_bot()
+    b.roles.set_role(1, "admin")
+    b._card_chat_id = 44
+    b._card_message_id = 7
+    upd = FakeUpdate("cl:calidad:2160", user_id=1, chat_id=44, message_id=7)
+    await b._on_quality_callback(upd, SimpleNamespace(args=[]))
+    assert b._max_height is None
+    assert search_mod.MAX_HEIGHT == 1080
+
+
+async def test_quality_same_level_is_ignored():
+    """Elegir el nivel ya activo equivale a Cerrar: no aplica nada, no invalida
+    cache y NO recarga la cancion actual (solo vuelve el teclado de control)."""
+    import search as search_mod
+    from queue_manager import QueueItem
+
+    b = make_bot()
+    b.roles.set_role(1, "admin")
+    b._card_chat_id = 44
+    b._card_message_id = 7
+    b._max_height = 480
+    b.queue.set_current(QueueItem(url="u1", title="Mi Cancion", channel="GP Band"))
+    b._stream_cache["u1"] = ("stream-480", None)
+    b._radio_search_cache["GP Band"] = ["resultado viejo"]
+
+    async def fake_stream_for(url):
+        raise AssertionError("no se debe re-resolver si la calidad no cambia")
+
+    b._stream_for = fake_stream_for
+    original_height = search_mod.MAX_HEIGHT
+    try:
+        search_mod.MAX_HEIGHT = 480
+        upd = FakeUpdate("cl:calidad:480", user_id=1, chat_id=44, message_id=7)
+        await b._on_quality_callback(upd, SimpleNamespace(args=[]))
+        # Nada cambio: ni nivel, ni tope, ni cache.
+        assert b._max_height == 480
+        assert search_mod.MAX_HEIGHT == 480
+        assert "u1" in b._stream_cache, "misma calidad no invalida el cache de streams"
+        assert "GP Band" in b._radio_search_cache
+        # El player NO recarga la cancion actual.
+        assert b.player.loaded == [], "misma calidad no recarga la cancion"
+        assert b.player.resumed == 0
+        # La card no se borra ni re-envia: solo vuelve el teclado de control.
+        assert b._app.bot.sent == [], "misma calidad no re-envia la card"
+        assert b._app.bot.deleted == [], "misma calidad no desvanece la card"
+        ediciones = b._app.bot.edited
+        assert ediciones and ediciones[-1][2] == "MARKUP", ediciones
+        kb = ediciones[-1][3].get("reply_markup")
+        assert kb.inline_keyboard[2][0].text == "⚙️ Calidad: 480p"
+    finally:
+        search_mod.MAX_HEIGHT = original_height
+
+
 async def test_playlist_expand_times_out():
     """Un link de playlist colgado no congela el bot: el wait_for con
     _RESOLVE_TIMEOUT expira y se responde el error en vez de colgarse."""
@@ -1276,6 +1560,16 @@ def run():
     asyncio.run(test_passive_text_repositions_card())
     asyncio.run(test_playlist_feedback_renders_in_card())
     asyncio.run(test_playlist_expand_times_out())
+    asyncio.run(test_quality_button_in_card_keyboard())
+    asyncio.run(test_quality_selector_opens_for_admin())
+    asyncio.run(test_quality_select_applies_and_persists())
+    asyncio.run(test_quality_select_reloads_current_track())
+    asyncio.run(test_quality_persisted_across_restart())
+    asyncio.run(test_quality_close_without_changing())
+    asyncio.run(test_quality_rejects_non_admin())
+    asyncio.run(test_quality_lock_discards_while_control_busy())
+    asyncio.run(test_quality_above_1080_is_ignored())
+    asyncio.run(test_quality_same_level_is_ignored())
     print("TARJETA TESTS OK")
 
 
