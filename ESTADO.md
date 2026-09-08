@@ -263,13 +263,8 @@ Presentación ≠ estado de dominio. 1 test ajustado + 1 nuevo (si resolve falla
   retry de `send_photo`.
 
 ## Pendientes / ToDo
-- [ ] **Revalidar la calidad en vivo**: tocar ⚙️ como no-admin (alerta), como
-   admin elegir 480 y ver la canción recargarse SIN que la card se borre ni se
-   desvanezca (solo vuelven los botones de control sobre el mismo mensaje, ⚙️
-   mostrando "Calidad: 480p"); repetir tocando el nivel YA activo (debe
-   comportarse como ✖ Cerrar: no recarga nada); repetir el escenario del freeze
-   (cambiar calidad y tocar ⏭ varias veces seguidas: no debe congelarse);
-   reiniciar el bot y confirmar que mantiene la calidad elegida.
+- [x] **Revalidar la calidad en vivo** (2026-09-08): el usuario la probó en
+   vivo y la dio por buena; con eso aprobó commit + push (v0.3.2).
 - [ ] **Revalidar el bot en vivo tras el fix del congelamiento (Test 8)**: el
    bot actual quedó colgado en el arreglo viejo; reiniciarlo
    con el fix (timeouts + `query.answer` mudo) y repetir el Test 7 (⏭ lento,
