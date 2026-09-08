@@ -60,7 +60,65 @@ ZIP `yt-remote-v0.3.1-portable.zip` (~42.4 MB). Incluye el fix de los 4 bugs
 post-v0.3.0 (no reanuda tras apagado, a veces video sin audio, mpv "Drop files",
 errores que no llegan al admin) con el plan Fase 1-6 aprobado por el usuario,
 mas el fix del bot congelado (3ra ronda, timeouts de resolucion) y la card
-siempre al final (4ta ronda):
+siempre al final (4ta ronda).
+
+**En desarrollo (post-v0.3.1): Calidad en la tarjeta.** Boton ancho en fila 3
+(`⚙️ Calidad: N`, visible para todos, solo admin lo usa). Al tocarlo la propia
+tarjeta cambia SOLO el teclado a la grilla de niveles (144-1080, el vigente con
+✓, + Cerrar); elegir aplica el tope a `resolve_stream_url` (`MAX_HEIGHT`), lo
+persiste en `data/state.json` (`max_height`), invalida cache de mesonero/radio y
+RECARGA la canción actual con la resolución nueva. La card NUNCA se borra ni se
+recrea: al elegir (o cerrar) vuelve el teclado de control sobre el MISMO mensaje
+(`edit_message_reply_markup`), sin desvanecimiento ni reenvio. No-admin
+rechazado con alerta; si otra accion de boton corre, el toque se descarta al
+instante (candado anti-colision, fix del freeze). Elegir el nivel YA activo
+equivale a Cerrar: no recarga ni invalida cache. Tope maximo: 1080 (sin
+1440/2160). 79 tests verdes.
+
+- **Calidad en la tarjeta (5ta ronda, plan 7 pasos)**: `src/search.py` gana
+  `MAX_HEIGHT` global + `set_max_height()`; `resolve_stream_url` respeta el
+  tope (`bestvideo[height<=N]+bestaudio/best[height<=N]`). `src/persistence.py`
+  guarda `max_height`. `src/bot.py`: `QUALITY_LEVELS`, `_max_height`, fila 3 en
+  `_control_keyboard`, `_quality_keyboard` (grilla 4x), dispatch `cl:` en
+  `on_callback`, `_on_control` rama `calidad`, `_on_quality_callback` (admin).
+  6 tests nuevos en test_card. Docs al dia.
+- **Fix calidad (2026-09-08, ronda 6a)**: el usuario reportó que la calidad no
+  cambiaba de una vez, que el bot se congelaba y que el icono 🎚️ parecía
+  "una lapida con una cruz". Causas: (1) el callback solo seteaba `MAX_HEIGHT`,
+  pero el stream cacheado (`_stream_cache`) y el prefetch quedaban con la
+  calidad vieja — el cambio no se veía hasta re-resolver; (2) el callback salía
+  del candado `_control_lock` y podía colisionar con un toque de boton: al
+  re-crear la card desde dos flujos, el otro quedaba esperando el lock para
+  siempre = freeze de TODA la botonera. Cambios: `_on_quality_callback` ahora
+  corre DENTRO de `_control_lock`, invalida `_stream_cache`/`_radio_search_cache`
+  y cancela el prefetch, relanza el tema actual recargado (`_stream_for` →
+  `player.load/play` con la nueva resolucion), icono ⚙️ (engranaje) y tope
+  maximo 1080 (QUALITY_LEVELS sin 1440/2160; un state viejo con 2160 cae a
+  None=1080). 3 tests nuevos: recarga del tema actual, lock ocupado descarta,
+  y >1080 ignorado. **78 tests verdes**.
+- **Fix card sin re-crear (2026-09-08, ronda 6b)**: el usuario pidió que al
+  elegir calidad la card NO se borre con el efecto de desvanecimiento ni se
+  re-renderice toda: solo deben volver los botones de control. Nuevo
+  `_swap_card_keyboard(keyboard)` hace `edit_message_reply_markup` sobre el
+  MISMO mensaje (ni texto ni miniatura se tocan). Abrir el selector ahora
+  también solo cambia el teclado (antes editaba el texto con "⚙️ Calidad
+  actual..."); elegir/cerrar restaura `_control_keyboard()` sobre el mismo
+  mensaje. Se eliminó el par `_remove_card()`+`_send_card()` del callback
+(era lo que desvanecía y recreaba). Tests ajustados (selector y aplicar
+   verifican MARKUP, sin sent/deleted). **78 tests verdes**.
+- **Misma calidad = Cerrar (2026-09-08, ronda 6c)**: recuperado tras un
+  `git checkout -- src/bot.py` accidental que revirtió TODOS los cambios de
+  bot.py de la feature calidad (solo bot.py perdió codigo; `search.py`/
+  `persistence.py` conservaron sus cambios). Al reconstruir, el usuario pidió
+  que elegir el nivel YA activo haga EXACTAMENTE lo mismo que "✖ Cerrar":
+  guard `if level == (self._max_height or 1080)` que restaura
+  `_control_keyboard()` y sale ANTES de aplicar/persistir/invalidar/recargar.
+  Nuevo test `test_quality_same_level_is_ignored` (misma calidad no
+  re-resuelve, no invalida `_stream_cache`/`_radio_search_cache`, no recarga
+  el player, no reenvía/borra la card, y el botón ⚙️ sigue mostrando el nivel).
+  Además un estado `max_height` inválido (>1080) ahora resetea
+  `search.MAX_HEIGHT` a 1080 explícitamente (antes podía quedar en el valor
+  previo). **79 tests verdes**.
 
 - **Fase 1 (mpv vivo)**: `_toggle_play_pause` y `cmd_resume` reproducen el
   item actual por `_play_item` si mpv no corre (prende el reproductor); los
@@ -180,8 +238,18 @@ Presentación ≠ estado de dominio. 1 test ajustado + 1 nuevo (si resolve falla
   real de yt-dlp viaja en el mensaje de error del bot (`last_resolve_error()`),
   sin pedirle consolas al usuario afectado.
 - **Tarjeta persistente con botones**: edita el MISMO mensaje con
-  `[⏮ ▶/⏸ ⏭ ⏹]` + `[🔊−10 🔊+10 📋]`. Callbacks `ctl:prev|pp|next|stop|vol-10|vol+10|lista`
-  despachados por `_on_control`.
+  `[⏮ ▶/⏸ ⏭ ⏹]` + `[🔊−10 🔊+10 📋]` + fila 3 `[⚙️ Calidad: N]`.
+  Callbacks `ctl:prev|pp|next|stop|vol-10|vol+10|lista|calidad` despachados
+  por `_on_control`; la rama `calidad` (solo admin) cambia SOLO el teclado:
+  la grilla `_quality_keyboard` reemplaza a los controles y al elegir/cerrar
+  `_on_quality_callback` restaura `_control_keyboard` sobre el MISMO mensaje
+  (`edit_message_reply_markup`): la card nunca se borra ni se recrea.
+- **Tope de resolucion (NUEVO)**: `search.MAX_HEIGHT` (1080 default, tope
+  maximo de la app: sin 1440/2160) aplica a `bestvideo` y a `best` en
+  `resolve_stream_url`; `set_max_height()` lo cambia.
+  Es un tope maximo: si el video no llega, usa la mayor que no lo supere. Se
+  persiste en `state.json` (`max_height`) y sobrevive reinicios (un valor
+  persistido >1080 cae a None=1080).
 - **Radio por artista ancla**: `_radio_artist` se captura en el primer `/buscar`;
   `/next` y el auto-advance usan ese ancla para que la radio no derive.
 - **Cache "mesonero"**: cache en RAM de URLs de YouTube a streams directos
@@ -195,6 +263,13 @@ Presentación ≠ estado de dominio. 1 test ajustado + 1 nuevo (si resolve falla
   retry de `send_photo`.
 
 ## Pendientes / ToDo
+- [ ] **Revalidar la calidad en vivo**: tocar ⚙️ como no-admin (alerta), como
+   admin elegir 480 y ver la canción recargarse SIN que la card se borre ni se
+   desvanezca (solo vuelven los botones de control sobre el mismo mensaje, ⚙️
+   mostrando "Calidad: 480p"); repetir tocando el nivel YA activo (debe
+   comportarse como ✖ Cerrar: no recarga nada); repetir el escenario del freeze
+   (cambiar calidad y tocar ⏭ varias veces seguidas: no debe congelarse);
+   reiniciar el bot y confirmar que mantiene la calidad elegida.
 - [ ] **Revalidar el bot en vivo tras el fix del congelamiento (Test 8)**: el
    bot actual quedó colgado en el arreglo viejo; reiniciarlo
    con el fix (timeouts + `query.answer` mudo) y repetir el Test 7 (⏭ lento,
@@ -220,6 +295,10 @@ Presentación ≠ estado de dominio. 1 test ajustado + 1 nuevo (si resolve falla
    colgado ya no congela el polling); `query.answer()` mudo al entrar en la acción
    (spinner del botón se apaga sin toast). 2 tests nuevos; 61 verdes + singleton
    verde cuando no corre el bot real.
+- [x] **Calidad en la tarjeta** (2026-09-08): boton ⚙️ en fila 3 (solo admin),
+   grilla de niveles en la card, tope aplicado en `resolve_stream_url`, persistido
+   en `state.json`. 9 tests (los 6 originales + recarga del actual, lock ocupado,
+   >1080 ignorado); **78 verdes**.
 - [x] **La card siempre al final (2026-09-08)**: `_remove_card`/`_reposition_card`
    + wrapper `_with_card_reposition` en comandos + MessageHandler pasivo de texto +
    feedback de playlist en la card con timeout. 7 tests nuevos. **69 verdes**.
@@ -287,3 +366,9 @@ Presentación ≠ estado de dominio. 1 test ajustado + 1 nuevo (si resolve falla
   (video VP9 + audio Opus via audio-add). Verificado: mpv reproduce con exito.
 - **Tests unitarios `test_card.py`**: VERDES (0 errores LSP). player.py expone
   `_loaded` y property `loaded` para que las assertions funcionen.
+- **Tests de calidad** (test_card, 10): boton en fila 3, selector solo admin
+  con ✓ en el vigente, eleccion aplica+persiste SIN re-crear la card (solo
+  MARKUP), recarga del tema actual tras cambiar nivel, persistencia entre
+  reinicios (state.json compartido), cerrar sin cambios, no-admin rechazado,
+  lock ocupado descarta, >1080 ignorado, y misma-calidad-equivalente-a-cerrar.
+  **79 tests verdes en total**.

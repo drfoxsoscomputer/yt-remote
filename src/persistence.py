@@ -7,6 +7,7 @@ Estado persistido:
 - playlist: lista de QueueItem serializados de la cola fija
 - history: ultimas 100 canciones reproducidas
 - radio_artist: semilla de la radio
+- max_height: tope de resolucion elegido por el admin (None = 1080)
 
 Escritura atomica con os.replace para no dejar archivos corruptos
 si el bot se cierra a mitad de escritura.
@@ -65,6 +66,7 @@ class StateStore:
         state.setdefault("playlist", [])
         state.setdefault("history", [])
         state.setdefault("radio_artist", "")
+        state.setdefault("max_height", None)
 
         if "history" in state and len(state["history"]) > MAX_HISTORY:
             state["history"] = state["history"][-MAX_HISTORY:]
@@ -115,6 +117,7 @@ class StateStore:
             "playlist": [],
             "history": [],
             "radio_artist": "",
+            "max_height": None,
         }
 
     def _read_raw(self) -> dict:

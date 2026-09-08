@@ -16,6 +16,21 @@ _LINK_RE = re.compile(
     r"^(?:https?://)?(?:www\.)?(?:youtube\.com|youtu\.be)/"
 )
 
+# Tope maximo de resolucion (altura en pixeles) para los streams resueltos.
+# El bot lo ajusta en caliente con set_max_height (persistido en state.json).
+MAX_HEIGHT = 1080
+
+
+def set_max_height(height: int) -> None:
+    """Cambia el tope maximo de resolucion usado por resolve_stream_url.
+
+    El formato de yt-dlp se arma en el momento de resolver, asi que basta
+    actualizar este valor global para que los proximos streams respeten el
+    nuevo limite (el cache de streams ya resueltos mantiene los anteriores).
+    """
+    global MAX_HEIGHT  # noqa: PLW0603
+    MAX_HEIGHT = height
+
 
 @dataclass
 class SearchResult:
@@ -193,8 +208,10 @@ def resolve_stream_url(youtube_url: str) -> tuple[str, str | None] | None:
     con el client por defecto de yt-dlp. El ultimo error real queda expuesto
     en last_resolve_error para que el bot pueda diagnosticar por Telegram.
 
-    La resolucion se limita a 1080p ('bestvideo[height<=1080]+bestaudio');
+    La resolucion se limita al tope MAX_HEIGHT (configurable con
+    set_max_height, por defecto 1080: 'bestvideo[height<=MAX]'+bestaudio);
     si el video no tiene esa resolucion se toma la mayor que no la supere.
+    El fallback combinado ('best[height<=MAX]') tambien respeta el tope.
 
     Devuelve (video_url, audio_url) o (url, None) si es un stream combinado.
     Devuelve None si no se pudo resolver.
@@ -214,7 +231,7 @@ def resolve_stream_url(youtube_url: str) -> tuple[str, str | None] | None:
         "no_warnings": True,
         "skip_download": True,
         "noplaylist": True,
-        "format": "bestvideo[height<=1080]+bestaudio/best",
+        "format": f"bestvideo[height<={MAX_HEIGHT}]+bestaudio/best[height<={MAX_HEIGHT}]",
     }
 
     for client_name, extra in strategies:
