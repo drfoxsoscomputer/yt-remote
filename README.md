@@ -34,6 +34,15 @@ Si no usa el guion, todo el texto se busca como nombre de artista:
 
 Si pega un link de YouTube, reproduce directo sin buscar.
 
+Si el link es de una **playlist o mix**, arranca de inmediato con los primeros
+temas y sigue cargando el resto en segundo plano (el bot avisa cuando quedó
+completa). El 📋 muestra la lista completa mientras se va expandiendo, y la
+posición se **guarda**: al reiniciar, retoma la misma canción y la misma página
+del 📋 donde iba.
+
+Los videos **en vivo** se reproducen con su audio normal; las duraciones
+desconocidas aparecen como `--:--`.
+
 ## Tarjeta de reproducción
 
 Cuando suena algo aparece una tarjeta con botones:
@@ -87,7 +96,7 @@ botones de la tarjeta (▶ ⏮ ⏭ ⏹ 🔊) son solo para dj y admin; el boton
 |-----|----------------|
 | admin | Todo + dar/quitar acceso a otros |
 | dj | Buscar, controlar reproduccion (tarjeta y comandos) |
-| user | Solo ver la lista con /lista o el boton 📋 |
+| user | Solo ver la lista con el boton 📋 (sin elegir temas) |
 
 Por defecto solo el dueño es admin. Use `/adduser` con el ID de
 Telegram de la otra persona para darle acceso dj o admin.

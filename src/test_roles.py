@@ -225,19 +225,24 @@ async def test_on_control_allows_dj():
 
 
 async def test_on_control_lista_works_for_user():
-    """El boton lista (no es CONTROL_ACTIONS) no se bloquea: user puede ver la cola."""
+    """El boton 📋 no se bloquea para un user: puede ver la lista, que se
+    ENVIA como mensaje aparte (la card no se pisa)."""
+    from queue_manager import QueueItem
+
     b = make_bot()
     b.roles.set_role(50, "user")
-    upd = FakeUpdate("ctl:lista", user_id=50)
-
-    rendered = []
-
-    async def capture_render(*args, **kwargs):
-        rendered.append(args)
-
-    b._render_card = capture_render
+    b.queue.set_playlist(
+        [QueueItem(url=f"u{i}", title=f"Tema {i}") for i in range(3)]
+    )
+    upd = FakeUpdate("ctl:lista", user_id=50, chat_id=44)
     await b._on_control(upd, SimpleNamespace(args=[]), "lista")
-    assert len(rendered) == 1, f"lista deberia renderizarse sin bloquear, got {rendered}"
+    # Lista enviada como mensaje nuevo; el listado arranca con "Lista:".
+    assert b._list_message_id is not None
+    assert b._app.bot.sent, "deberia enviar el mensaje de la lista"
+    text = b._app.bot.sent[-1][1]
+    assert text.startswith("Lista:"), text
+    # El user abre la lista SIN botones de tema (flag fijo en el mensaje).
+    assert b._list_can_select is False
     print("  OK  test_on_control_lista_works_for_user")
 
 

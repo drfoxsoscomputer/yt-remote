@@ -22,10 +22,11 @@ botones, radio automatica por artista, roles (admin/dj/user).
 
 ## Estructura
 - `src/main.py` — entrada; sys.path al parent y run_polling.
-- `src/bot.py` — YTRemoteBot: comandos `/buscar` (dj+), `/lista`, `/now`,
+- `src/bot.py` — YTRemoteBot: comandos `/buscar` (dj+), `/now`,
    `/pause`, `/resume`, `/next`, `/prev`, `/stop`, `/volume`, `/adduser`,
    `/removeuser`, `/solicitar`; wrapper `_require(rol)`; tarjeta persistente
-   con botones; callbacks con thumbnails y `_search_cache`.
+   con botones; mensaje de lista (boton 📋) con paginacion y callbacks `lst:`;
+   callbacks con thumbnails y `_search_cache`.
 - `src/search.py` — `is_youtube_link()` + `search()` via yt-dlp; `SearchResult`.
 - `src/player.py` — clase Player, IPC de mpv por named pipe
    `\\.\pipe\mpv-ytremote`. Usa `--idle=yes` para mantener el pipe vivo.
@@ -62,18 +63,50 @@ errores que no llegan al admin) con el plan Fase 1-6 aprobado por el usuario,
 mas el fix del bot congelado (3ra ronda, timeouts de resolucion) y la card
 siempre al final (4ta ronda).
 
-**En desarrollo (post-v0.3.1): Calidad en la tarjeta.** Boton ancho en fila 3
-(`⚙️ Calidad: N`, visible para todos, solo admin lo usa). Al tocarlo la propia
-tarjeta cambia SOLO el teclado a la grilla de niveles (144-1080, el vigente con
-✓, + Cerrar); elegir aplica el tope a `resolve_stream_url` (`MAX_HEIGHT`), lo
-persiste en `data/state.json` (`max_height`), invalida cache de mesonero/radio y
-RECARGA la canción actual con la resolución nueva. La card NUNCA se borra ni se
-recrea: al elegir (o cerrar) vuelve el teclado de control sobre el MISMO mensaje
-(`edit_message_reply_markup`), sin desvanecimiento ni reenvio. No-admin
-rechazado con alerta; si otra accion de boton corre, el toque se descarta al
-instante (candado anti-colision, fix del freeze). Elegir el nivel YA activo
-equivale a Cerrar: no recarga ni invalida cache. Tope maximo: 1080 (sin
-1440/2160). 79 tests verdes.
+**En desarrollo (post-v0.3.2): Ronda 8 — playlist al toque y persistencia.** Al
+pegar un link de playlist/mix: arrancan YA los primeros 15 temas (quick-load) y
+el total real se reporta ("Playlist (15/N): …"), mientras el RESTO se expande en
+segundo plano hasta 5000 temas (timeout 300s, dedupe por URL, si cambias de
+playlist se cancela la expansión anterior; el 📋 se actualiza solo). El bot no
+hace wrap prematuro: si la expansión sigue corriendo y llegás al último tema
+cargado, espera la anexión en vez de volver al primero. La playlist, la canción,
+el cursor y la página del 📋 SE PERSISTEN (al reiniciar se restaura la posición
+real). Fix ▶️: antes descartaba la playlist (set_current limpiaba los items).
+Fix de videos EN VIVO sin sonido: se fuerza el formato combinado muxed
+(`best[height<=N]`) en vez de video+audio separados, y las duraciones
+desconocidas se muestran como "--:--" (no "0:00"). 102 tests verdes.
+
+- **Mensaje de la lista (2026-09-08, ronda 7)**: decisión del usuario NO
+  trabajar sobre el comando sino rediseñar el 📋: lista como mensaje separado,
+  paginación 10 por página [◀ ❌ ▶], solo admin/dj eligen, ❌ lo usa cualquiera,
+  reapertura borra + manda nueva, y el comando `/lista` se elimina. `src/bot.py`:
+  `_LIST_PAGE_SIZE`/`_LIST_TITLE_MAX`, `_list_chat_id`/`_list_message_id`/
+  `_list_page`/`_list_can_select`, `_list_keyboard` (flag de selección fijo en
+  el mensaje), `_open_queue_list` (toast si vacia), `_edit_list_message` (◀ ▶
+  editan TEXTO + botones de la pagina nueva), `_on_list_callback` (rama `lst:`
+  en `on_callback`; `lst:close` cualquiera, `lst:N` con guard dj +
+  `_control_lock`; bug evitado: comparar contra el actual ANTES del `jump_to`,
+  porque `jump_to` ya mueve el cursor). Handler `CommandHandler("lista")` y
+  `cmd_queue` eliminados; 5 textos
+  "Usa /lista" reescritos a "Usa el boton 📋". test_roles ajustado + 10 tests
+  nuevos en test_card (abrir dj, user sin botones, paginacion, reapertura,
+  elegir reproduce y cierra, user rechazado, ❌, vacia, ya sonando, fuera de
+  rango). **89 tests verdes**.
+
+- **Fix paginacion lista (2026-09-08, ronda 7b)**: el usuario probó una
+  playlist de 21 canciones y notó dos problemas en el mensaje de la lista:
+  la 3ra pagina mostraba el listado completo en texto plano con el tema 21
+  como boton suelto, y ademas preguntó por que cada tema se veia dos veces
+  (texto plano + boton). Salida del rediseño final: la lista se muestra UNA
+  sola vez, como BOTONES paginados (posicion global + titulo COMPLETO sin
+  truncar, el actual con "▶️ "; adios a `_LIST_TITLE_MAX`). El texto del
+  mensaje es SOLO el encabezado con pagina actual y total (`Lista (pag 2/3):`,
+  u `Lista:` con una sola pagina; modo radio idem). `_queue_list_text(page)`
+  genera ese encabezado; `_edit_list_buttons` → `_edit_list_message` pagina
+  con `edit_message_text` (texto + keyboard sincronizados). Con 21 temas:
+  pag 1 = botones 1-10, pag 2 = 11-20, pag 3 = solo el 21. Tests: el de
+  paginacion pasa de 25 a 21 temas y verifica los labels numerados y el
+  header por pagina. **89 tests verdes**.
 
 - **Calidad en la tarjeta (5ta ronda, plan 7 pasos)**: `src/search.py` gana
   `MAX_HEIGHT` global + `set_max_height()`; `resolve_stream_url` respeta el
@@ -256,13 +289,24 @@ Presentación ≠ estado de dominio. 1 test ajustado + 1 nuevo (si resolve falla
    googlevideo, resolucion serial (no paralelizar para evitar rate limit).
 - **Prefetch 2 fases**: decide candidato al reproducir (Fase A) + resuelve el
    stream de inmediato (Fase B) = cero silencio.
-- **Playlist fija con cursor**: `/lista` muestra 25 temas con `[▶️]` en el
-  actual; `/lista N` mueve el cursor; `/next` y `/prev` con wrap.
+- **Playlist fija con cursor**: el boton 📋 abre la lista (mensaje aparte,
+  paginado de 10 en 10, actual con [▶️]); tocar un tema mueve el cursor con
+  `jump_to`; `/next` y `/prev` con wrap.
 - **Hardening**: drop_pending_updates en run_polling, vigilante de red con
   `_on_bot_error` + `_net_watch_job` (15s), singleton lock en puerto 47631,
   retry de `send_photo`.
 
 ## Pendientes / ToDo
+- [ ] **Revalidar la ronda 8 en vivo**: probar en Telegram una playlist larga
+   (link → arranca YA con "Playlist (15/N)", resto en segundo plano con la card
+   avisando "✅ Playlist cargada: N temas", 📋 con todo), un video EN VIVO (que
+   suene con audio), y reiniciar el bot a mitad de una playlist (que retome la
+   canción y el 📋 en la página correcta). Aprobación del usuario antes de
+   commit/push.
+- [ ] **Revalidar la lista en vivo (ronda 7)**: probar el 📋 en Telegram
+   (admin/dj ve botones de tema, paginar ◀▶, elegir reproduce y cierra, ❌
+   cierra para cualquiera, reapertura borra y manda nueva, user abre sin
+   botones). Aprobacion del usuario antes de commit/push.
 - [x] **Revalidar la calidad en vivo** (2026-09-08): el usuario la probó en
    vivo y la dio por buena; con eso aprobó commit + push (v0.3.2).
 - [ ] **Revalidar el bot en vivo tras el fix del congelamiento (Test 8)**: el
@@ -299,17 +343,17 @@ Presentación ≠ estado de dominio. 1 test ajustado + 1 nuevo (si resolve falla
    feedback de playlist en la card con timeout. 7 tests nuevos. **69 verdes**.
 - [x] **Tests `test_card.py`**: 22 errores LSP corregidos. py_compile OK + tests OK.
 - [x] **Manejo de errores de red en `_pick_next_candidate`**: flag de error +
-   `_radio_over_message(por_error)` sugiere /lista en fallos de red.
+   `_radio_over_message(por_error)` sugiere el boton 📋 en fallos de red.
 - [x] **Bounds check visible de /volume**: valida 0-100 y avisa en cliente.
 - [x] **Pruebas en vivo con Telegram**: 15 tests humanos OK.
 - [x] **`requirements.txt`**: eliminado (todo vive en runtime/).
-- [x] **Menu de comandos**: `/now`, `/pause`, `/resume`, `/lista`, `/next`,
-   `/stop`, `/volume` fuera del menu.
-- [x] **Modelo de roles simplificado**: user = nada (solo ver lista), dj = buscar +
-   controlar musica, admin = todo.
+- [x] **Menu de comandos**: `/now`, `/pause`, `/resume`, `/next`,
+   `/stop`, `/volume` fuera del menu (la lista vive en el boton 📋).
+- [x] **Modelo de roles simplificado**: user = nada (solo ver la lista con 📋),
+   dj = buscar + controlar musica, admin = todo.
 - [x] **Comando `/solicitar`**: user pide acceso dj al admin.
 - [x] **Botones de la tarjeta**: user ve todos pero no puede usarlos (excepto
-  📋). Solo dj/admin usan los controles.
+   📋, que abre la lista sin botones de tema). Solo dj/admin controlan.
 - [x] **Documentacion actualizada**: README.md y GUIA.txt reflejan el nuevo
    modelo de roles.
 - [x] **Persistencia de estado completa** (Fase 1 y 2, 2026-09-07): StateStore
@@ -343,7 +387,8 @@ Presentación ≠ estado de dominio. 1 test ajustado + 1 nuevo (si resolve falla
   `static/` y `scripts/` eliminados del historial; `.gitignore` actualizado
   para que clones frescos no descarguen basura. Force-push autorizado.
 - **Cambio a modelo de roles simplificado** (2026-09-06): user ya no puede
-  usar comandos /buscar /next /stop /volume del menu, solo /lista. dj y admin
+   usar comandos /buscar /next /stop /volume del menu; solo ver la lista con
+   el boton 📋. dj y admin
   mantienen acceso total. Se agregó comando `/solicitar` para que user pida
   acceso dj al admin.
 - **Numeracion de version x convencion** (2026-09-06): usuario pidio seguir
@@ -366,4 +411,45 @@ Presentación ≠ estado de dominio. 1 test ajustado + 1 nuevo (si resolve falla
   MARKUP), recarga del tema actual tras cambiar nivel, persistencia entre
   reinicios (state.json compartido), cerrar sin cambios, no-admin rechazado,
   lock ocupado descarta, >1080 ignorado, y misma-calidad-equivalente-a-cerrar.
-  **79 tests verdes en total**.
+- **Tests de la lista** (test_card/test_roles, 11): boton 📋 abre MENSAJE aparte
+  sin pisar la card, user sin botones de tema, paginacion 10 por pagina con
+  ◀▶ (edita solo botones), reapertura borra+manda nueva, elegir reproduce y
+  cierra la lista con fade, user rechazado con alerta, ❌ cierra para cualquiera,
+  cola vacia = toast sin enviar, elegir el actual = "Ya esta sonando", posicion
+  fuera de rango avisa y no cierra. **89 tests verdes en total**.
+
+### Tests de la ronda 8 (13 nuevos)
+- **Ronda 8**: `test_toggle_play_pause_keeps_playlist` (fix ▶️), persistencia
+  de cursor+página (`test_restore_cursor_and_list_page`, `test_restore_cursor_clamped_to_range`,
+  `test_restore_cursor_corrupt_falls_to_zero`, `test_close_list_keeps_page`,
+  `test_defaults_for_cursor_and_list_page`, `test_round_trip_cursor_and_list_page`),
+  quick-load (`test_playlist_feedback_renders_in_card`, `test_playlist_expand_times_out`,
+  `test_playlist_quick_load_starts_immediately`, `test_playlist_background_expansion_does_not_duplicate`,
+  `test_playlist_background_expansion_ignores_swapped_queue`, `test_pick_next_waits_for_expansion_no_early_wrap`),
+  y live (`test_live_stream_resolves_combined`, `test_fmt_duration_live_shows_dashes`).
+  **102 tests verdes en total**.
+
+### Detalles técnicos nuevos (ronda 8)
+- **Quick-load + expansión de fondo**: `search.quick_playlist(url, N)` usa
+  `playlistend` + `playlist_count` para devolver los primeros N y el total real.
+  `_play_link_or_playlist` arranca YA con `_QUICK_TRACKS=15`, `_radio_artist` se
+  fija al canal del primer tema, y lanza `_start_playlist_expansion(url, total)`
+  que corre `expand_playlist(url, _MAX_PLAYLIST=5000)` en `to_thread` con
+  `_EXPAND_TIMEOUT=300s`, dedupe por URL contra lo ya cargado, verificación de
+  vigencia (si cambiaste de playlist se ignora), `queue.add` + persist por lotes,
+  y aviso en la card ("✅ Playlist cargada: N temas") al terminar. Cambiar de
+  playlist cancela la expansión anterior (`_cancel_playlist_expansion`).
+- **Sin wrap prematuro**: `_pick_next_candidate`, con expansión activa y cursor
+  en el último tema, espera hasta `_expand_esperas < 30` sleeps de 1s por si la
+  expansión anexa más, antes de hacer wrap al primero.
+- **Persistencia de posición**: `state.json` guarda `cursor` y `list_page`; al
+  restaurar el cursor se clampa al rango real y la página se valida (int, 0+).
+  Cerrar el 📋 NO resetea la página (la reapertura usa la última; el render
+  clampa rangos inválidos).
+- **Fix live sin sonido**: `resolve_stream_url`, cuando `live_status == is_live`,
+  re-resuelve forzando `best[height<=MAX_HEIGHT]` (un solo URL muxed) porque el
+  HLS de un directo con video+audio separados llega mudo en mpv.
+  `_fmt_duration(0|None)` → "--:--".
+- **Fix ▶️ descartaba la playlist**: `_toggle_play_pause` llamaba
+  `_play_item(..., preserve_current=False)` → `set_current` → `_items=[]`.
+  Ahora es `preserve_current=self.queue.has_playlist`.

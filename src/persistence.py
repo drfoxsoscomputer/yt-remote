@@ -5,6 +5,8 @@ Estado persistido:
 - paused: True si esta en pausa al cerrarse
 - current: QueueItem serializado de la cancion actual
 - playlist: lista de QueueItem serializados de la cola fija
+- cursor: posicion del tema actual dentro de la playlist
+- list_page: pagina del listado 📋 en la que iba el usuario
 - history: ultimas 100 canciones reproducidas
 - radio_artist: semilla de la radio
 - max_height: tope de resolucion elegido por el admin (None = 1080)
@@ -64,6 +66,8 @@ class StateStore:
         state.setdefault("paused", False)
         state.setdefault("current", None)
         state.setdefault("playlist", [])
+        state.setdefault("cursor", 0)
+        state.setdefault("list_page", 0)
         state.setdefault("history", [])
         state.setdefault("radio_artist", "")
         state.setdefault("max_height", None)
@@ -115,6 +119,8 @@ class StateStore:
             "paused": False,
             "current": None,
             "playlist": [],
+            "cursor": 0,
+            "list_page": 0,
             "history": [],
             "radio_artist": "",
             "max_height": None,

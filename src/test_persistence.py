@@ -203,6 +203,23 @@ def test_save_partial_state_with_defaults():
     print("  OK  test_save_partial_state_with_defaults")
 
 
+def test_defaults_for_cursor_and_list_page():
+    s = make_store()
+    state = s.load()
+    assert state["cursor"] == 0
+    assert state["list_page"] == 0
+    print("  OK  test_defaults_for_cursor_and_list_page")
+
+
+def test_round_trip_cursor_and_list_page():
+    s = make_store()
+    s.save({"version": 1, "cursor": 7, "list_page": 2})
+    loaded = s.load()
+    assert loaded["cursor"] == 7
+    assert loaded["list_page"] == 2
+    print("  OK  test_round_trip_cursor_and_list_page")
+
+
 def run():
     print("\n=== Tests de persistence ===\n")
     test_defaults_when_file_missing()
@@ -220,6 +237,8 @@ def run():
     test_mark_dirty_no_timer_without_loop()
     test_save_unicode_preserved()
     test_save_partial_state_with_defaults()
+    test_defaults_for_cursor_and_list_page()
+    test_round_trip_cursor_and_list_page()
     print("\nPERSISTENCE TESTS OK")
 
 

@@ -165,7 +165,6 @@ def show_summary():
         ("Accion", "user", "dj", "admin"),
         ("-", "-", "-", "-"),
         ("/start", "si", "si", "si"),
-        ("/lista", "si", "si", "si"),
         ("/buscar", "NO", "si", "si"),
         ("/solicitar", "si -> admin", "NO", "NO"),
         ("/adduser", "NO", "NO", "si"),
