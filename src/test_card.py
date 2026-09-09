@@ -2096,13 +2096,13 @@ async def test_pick_next_waits_for_expansion_no_early_wrap():
             tarea.cancel()
 
 
-def test_live_stream_resolves_combined():
-    """Paso 6: un video EN VIVO no se resuelve con video+audio separados
-    (que en mpv llega sin sonido), sino forzando el stream combinado muxed.
+def test_live_stream_resolves_separated():
+    """Directo (en vivo): el HLS de YouTube live NO tiene formato combinado
+    ('best' falla), llega como video y audio en requested_formats separados.
 
-    Simula las dos pasadas de yt-dlp: la primera (formato estandar) devuelve
-    un directo con requested_formats separados; la segunda (forzada a 'best')
-    devuelve un solo URL muxed."""
+    El audio HLS viene SIN la key 'acodec' (solo vcodec 'none'); se lo debe
+    detectar igual y devolver (video, audio), no solo el video (que queda
+    mudo en mpv)."""
     import search as search_mod
     import yt_dlp
 
@@ -2120,37 +2120,28 @@ def test_live_stream_resolves_combined():
             return False
 
         def extract_info(self, url, download=False):  # noqa: ARG002
-            fmt = self.opts.get("format", "")
-            if "bestvideo" in fmt and "best[height" in fmt:
-                return {
-                    "id": "live1",
-                    "title": "Directo de prueba",
-                    "live_status": "is_live",
-                    "is_live": True,
-                    "requested_formats": [
-                        {"vcodec": "avc1", "acodec": "none", "url": "https://hls/v.m3u8"},
-                        {"vcodec": "none", "acodec": "mp4a", "url": "https://hls/a.m3u8"},
-                    ],
-                }
             return {
                 "id": "live1",
                 "title": "Directo de prueba",
                 "live_status": "is_live",
                 "is_live": True,
-                "url": "https://hls/combined.m3u8",
+                "requested_formats": [
+                    {"vcodec": "avc1", "acodec": "none", "url": "https://hls/v.m3u8"},
+                    {"vcodec": "none", "url": "https://hls/a.m3u8"},
+                ],
             }
 
     original = yt_dlp.YoutubeDL
     yt_dlp.YoutubeDL = FakeYDL
     try:
         res = search_mod.resolve_stream_url("https://youtube.com/watch?v=live1")
-        assert res is not None and res[0] == "https://hls/combined.m3u8", res
-        assert res[1] is None, "el directo debe ser un unico stream combinado, sin audio aparte"
+        assert res is not None, res
+        assert res[0] == "https://hls/v.m3u8", res
+        assert res[1] == "https://hls/a.m3u8", f"el audio HLS debe detectarse: {res}"
     finally:
         yt_dlp.YoutubeDL = original
 
-    assert len(calls) >= 2, f"esperaba 2 pasadas (normal + combinada), vi {len(calls)}"
-    assert calls[1] == f"best[height<={search_mod.MAX_HEIGHT}]", calls
+    assert len(calls) == 1, f"no debe re-resolverse con 'best' (falla en directos), vi {calls}"
 
 
 def test_fmt_duration_live_shows_dashes():
@@ -2216,7 +2207,7 @@ def run():
     asyncio.run(test_playlist_background_expansion_does_not_duplicate())
     asyncio.run(test_playlist_background_expansion_ignores_swapped_queue())
     asyncio.run(test_pick_next_waits_for_expansion_no_early_wrap())
-    test_live_stream_resolves_combined()
+    test_live_stream_resolves_separated()
     test_fmt_duration_live_shows_dashes()
     asyncio.run(test_quality_button_in_card_keyboard())
     asyncio.run(test_quality_selector_opens_for_admin())

@@ -40,7 +40,9 @@ completa). El 📋 muestra la lista completa mientras se va expandiendo, y la
 posición se **guarda**: al reiniciar, retoma la misma canción y la misma página
 del 📋 donde iba.
 
-Los videos **en vivo** se reproducen con su audio normal; las duraciones
+Los videos **en vivo** se reproducen con su audio normal: el HLS del directo
+se resuelve como video y audio separados (YouTube no entrega directos en un
+solo stream combinado) y ambos se pasan a mpv. Las duraciones
 desconocidas aparecen como `--:--`.
 
 ## Tarjeta de reproducción

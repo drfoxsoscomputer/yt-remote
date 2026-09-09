@@ -72,9 +72,13 @@ hace wrap prematuro: si la expansión sigue corriendo y llegás al último tema
 cargado, espera la anexión en vez de volver al primero. La playlist, la canción,
 el cursor y la página del 📋 SE PERSISTEN (al reiniciar se restaura la posición
 real). Fix ▶️: antes descartaba la playlist (set_current limpiaba los items).
-Fix de videos EN VIVO sin sonido: se fuerza el formato combinado muxed
-(`best[height<=N]`) en vez de video+audio separados, y las duraciones
-desconocidas se muestran como "--:--" (no "0:00"). 102 tests verdes.
+Fix de videos EN VIVO sin sonido: el HLS de un directo de YouTube NO tiene
+formato combinado muxed; se resuelve como video+audio separados y el audio
+se detecta aunque yt-dlp no declare la key `acodec` (viene solo con
+`vcodec: none`). Eliminada la re-resolución con `best[height<=N]` del Fix
+anterior (siempre fallaba en directos y marcaba un error falso). Las
+duraciones desconocidas se muestran como "--:--" (no "0:00"). 102 tests
+verdes.
 
 - **Mensaje de la lista (2026-09-08, ronda 7)**: decisión del usuario NO
   trabajar sobre el comando sino rediseñar el 📋: lista como mensaje separado,
@@ -426,7 +430,7 @@ Presentación ≠ estado de dominio. 1 test ajustado + 1 nuevo (si resolve falla
   quick-load (`test_playlist_feedback_renders_in_card`, `test_playlist_expand_times_out`,
   `test_playlist_quick_load_starts_immediately`, `test_playlist_background_expansion_does_not_duplicate`,
   `test_playlist_background_expansion_ignores_swapped_queue`, `test_pick_next_waits_for_expansion_no_early_wrap`),
-  y live (`test_live_stream_resolves_combined`, `test_fmt_duration_live_shows_dashes`).
+  y live (`test_live_stream_resolves_separated`, `test_fmt_duration_live_shows_dashes`).
   **102 tests verdes en total**.
 
 ### Detalles técnicos nuevos (ronda 8)
@@ -446,10 +450,12 @@ Presentación ≠ estado de dominio. 1 test ajustado + 1 nuevo (si resolve falla
   restaurar el cursor se clampa al rango real y la página se valida (int, 0+).
   Cerrar el 📋 NO resetea la página (la reapertura usa la última; el render
   clampa rangos inválidos).
-- **Fix live sin sonido**: `resolve_stream_url`, cuando `live_status == is_live`,
-  re-resuelve forzando `best[height<=MAX_HEIGHT]` (un solo URL muxed) porque el
-  HLS de un directo con video+audio separados llega mudo en mpv.
-  `_fmt_duration(0|None)` → "--:--".
+- **Fix live sin sonido**: el HLS de un directo de YouTube NO tiene formato
+  combinado muxed (la re-resolución con `best[height<=MAX_HEIGHT]` del Fix del
+  Paso 6 siempre fallaba y dejaba un error falso en `last_resolve_error`). El
+  directo se resuelve como video+audio separados y `_stream_from_info` detecta
+  el audio HLS aunque yt-dlp no declare la key `acodec` (el formato llega solo
+  con `vcodec: "none"`). `_fmt_duration(0|None)` → "--:--".
 - **Fix ▶️ descartaba la playlist**: `_toggle_play_pause` llamaba
   `_play_item(..., preserve_current=False)` → `set_current` → `_items=[]`.
   Ahora es `preserve_current=self.queue.has_playlist`.
