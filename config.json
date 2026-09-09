@@ -2,5 +2,6 @@
   "telegram_token": "TU_TOKEN_AQUI",
   "mpv_path": "runtime\\mpv\\mpv.exe",
   "default_role": "user",
-  "max_results": 5
+  "max_results": 5,
+  "kick_after_hours": 0
 }
