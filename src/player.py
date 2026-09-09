@@ -8,12 +8,52 @@ import asyncio
 import json
 import os
 import subprocess
+import tempfile
 import threading
 import time
 from pathlib import Path
 from typing import Callable
 
 MPV_PIPE = r"\\.\pipe\mpv-ytremote"
+
+# Nombre del master .m3u8 temporal que une video+audio de un directo HLS.
+# Se sobrescribe en cada load: no se acumulan archivos.
+_LIVE_MASTER_NAME = "ytremote_live.m3u8"
+
+
+def _is_hls_url(url: str) -> bool:
+    """True si la URL apunta a un playlist HLS (.m3u8), p.ej. un directo."""
+    return ".m3u8" in url.lower()
+
+
+def _build_master_playlist(
+    video_url: str,
+    audio_url: str,
+    *,
+    bandwidth: int = 0,
+    codecs: str = "avc1.64001F,mp4a.40.2",
+    resolution: str = "",
+) -> str:
+    """Construye un master HLS minimo: video child como unica variante y
+    audio child como su rendicion EXT-X-MEDIA (mismo grupo, DEFAULT=YES).
+
+    mpv/ffmpeg reciben video y audio juntos en UN demuxer HLS y los
+    sincronizan segun el spec (live edge compartido). Sin esto, cada
+    sub-playlist de un directo se carga con su propio live edge y el
+    audio queda permanentemente desfasado del video.
+    """
+    group = "yt-remote-audio0"
+    lines = [
+        "#EXTM3U",
+        f'#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID="{group}",NAME="Default",'
+        f'DEFAULT=YES,AUTOSELECT=YES,URI="{audio_url}"',
+    ]
+    attrs = [f'CODECS="{codecs}"', f"BANDWIDTH={bandwidth}", f'AUDIO="{group}"']
+    if resolution:
+        attrs.append(f"RESOLUTION={resolution}")
+    lines.append("#EXT-X-STREAM-INF:" + ",".join(attrs))
+    lines.append(video_url)
+    return "\n".join(lines)
 
 # Segundos que esperamos que mpv cree el named pipe antes de rendirnos.
 _PIPE_WAIT_TIMEOUT = 15.0
@@ -378,12 +418,31 @@ class Player:
         mientras el video se carga, mpv descarta la pista al completar el load
         y queda video sin sonido.
 
+        Un DIRECTO HLS es distinto: video y audio llegan como sub-playlists
+        independientes (loadfile + audio-add dejaba cada una con su propio
+        live edge => audio desfasado). Se construye un master .m3u8 temporal
+        que las une en un solo demuxer HLS y mpv sincroniza A/V nativamente.
+
         Tras el audio-add VERIFICA con 'track-list' que haya una pista de
         audio con 'selected'; si no, lo reintenta una vez mas. Asi los videos
         sin sonido no pasan sin diagnostico.
         """
         self._file_loaded_event.clear()
         self._loaded.append((url, audio_url))
+        use_master = False
+        fallback_audio = audio_url
+        if audio_url and _is_hls_url(url) and _is_hls_url(audio_url):
+            use_master = True
+            master = Path(tempfile.gettempdir()) / _LIVE_MASTER_NAME
+            try:
+                master.write_text(
+                    _build_master_playlist(url, audio_url), encoding="utf-8"
+                )
+            except OSError:
+                use_master = False
+            else:
+                url = master.as_posix()
+                audio_url = None
         await self.command("loadfile", url, "replace")
         if audio_url:
             try:
@@ -400,6 +459,22 @@ class Player:
                 await asyncio.sleep(0.3)
                 if await self._has_audio_track():
                     break
+        elif use_master:
+            # El master ya trae el audio dentro; si aun asi el track-list no
+            # lo muestra, se reintenta con el audio child como plan B.
+            try:
+                await asyncio.wait_for(
+                    asyncio.to_thread(self._file_loaded_event.wait),
+                    timeout=_PIPE_WAIT_TIMEOUT,
+                )
+            except asyncio.TimeoutError:
+                pass
+            if not await self._has_audio_track():
+                for attempt in range(2):
+                    await self.command("audio-add", fallback_audio, "select")
+                    await asyncio.sleep(0.3)
+                    if await self._has_audio_track():
+                        break
         self._track_active = True
 
     async def _has_audio_track(self) -> bool:

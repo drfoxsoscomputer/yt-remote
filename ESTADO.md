@@ -87,6 +87,27 @@ mostraba nada salvo la navegación; ahora muestra el tema sonando como botón
 cierre del selector de calidad usaba "✖ Cerrar" (✖ se ve negro); pasó a "❌",
 idéntico al del paginado. Test nuevo `test_list_radio_shows_current`.
 
+**Ronda 10 — sync de directos y cancelar /buscar (2026-09-09).** Dos bugs del
+usuario: (1) el AUDIO se escuchaba desfasado del video en directos de YouTube
+Live. Causa: en vivo el HLS llega como video y audio en sub-playlists
+independientes, y `load()` los cargaba con `loadfile` + `audio-add` — cada
+demuxer calcula su propio live edge y el audio queda corrido. Fix:
+`player.load()` detecta un par de URLs `.m3u8` y construye un master `.m3u8`
+temporal (`%TEMP%\ytremote_live.m3u8`, sobrescrito en cada load) que une el
+video child con el audio child como grupo `EXT-X-MEDIA` (misma variante):
+UN solo demuxer HLS y mpv sincroniza A/V según el spec. Respeta `MAX_HEIGHT`
+porque el master referencia exactamente el video que eligió yt-dlp; si el
+track-list no muestra audio, cae a `audio-add` viejo como plan B. DASH normal
+intacto. (2) El listado de `/buscar` quedaba ARRIBA de la card: el wrapper
+`_with_card_reposition` re-renderizaba la card mientras el listado seguía en
+pantalla. Fix: flag `_search_list_pending` (se setea al mostrar resultados, se
+limpia al elegir, cancelar o ante un `/buscar`/`/play` nuevo) hace que el
+wrapper NO mueva la card mientras el listado está visible → la card queda
+arriba. Además, el listado termina con un botón "❌ Cancelar" (`pick:cancel`)
+que lo borra con su desvanecimiento sin reproducir nada y deja la card
+visible; elegir una canción mantiene el flujo actual (borra el listado con
+fade + card nueva con miniatura). 6 tests nuevos. **109 tests verdes**.
+
 - **Mensaje de la lista (2026-09-08, ronda 7)**: decisión del usuario NO
   trabajar sobre el comando sino rediseñar el 📋: lista como mensaje separado,
   paginación 10 por página [◀ ❌ ▶], solo admin/dj eligen, ❌ lo usa cualquiera,
@@ -308,6 +329,12 @@ Presentación ≠ estado de dominio. 1 test ajustado + 1 nuevo (si resolve falla
   retry de `send_photo`.
 
 ## Pendientes / ToDo
+- [ ] **Revalidar la ronda 10 en vivo**: probar un directo de YouTube Live en
+   Telegram por unos minutos y confirmar que el audio ya NO va desfasado del
+   video (fix del master .m3u8 local); probar `/buscar artista - cancion` con
+   la card a la vista (que el listado quede ABAJO de la card, cancelar lo
+   borra y deja la card, y elegir muestre la card nueva con la miniatura).
+   Aprobación del usuario antes de commit/push.
 - [ ] **Revalidar la ronda 8 en vivo**: probar en Telegram una playlist larga
    (link → arranca YA con "Playlist (15/N)", resto en segundo plano con la card
    avisando "✅ Playlist cargada: N temas", 📋 con todo), un video EN VIVO (que
@@ -439,6 +466,18 @@ Presentación ≠ estado de dominio. 1 test ajustado + 1 nuevo (si resolve falla
   `test_playlist_background_expansion_ignores_swapped_queue`, `test_pick_next_waits_for_expansion_no_early_wrap`),
   y live (`test_live_stream_resolves_separated`, `test_fmt_duration_live_shows_dashes`).
   **103 tests verdes en total** (74 en test_card, 17 en persistence, 12 en roles).
+
+### Tests de la ronda 10 (6 nuevos)
+- **Ronda 10**: `test_build_master_playlist_joins_video_and_audio` (el master
+  local une video child + audio child con el mismo grupo EXT-X-MEDIA),
+  `test_search_keyboard_has_cancel_button` (el listado termina con ❌ Cancelar
+  y el flag pendiente queda True), `test_pick_cancel_removes_list_and_keeps_card`
+  (cancelar borra el listado con fade, no toca la card, no reproduce),
+  `test_pick_result_clears_pending_search` (elegir limpia el flag),
+  `test_with_card_reposition_skips_while_search_pending` (con listado visible
+  la card NO se mueve), `test_cmd_play_link_resets_pending_search` (un link
+  nuevo descarta el listado pendiente). **109 tests verdes en total**
+  (80 en test_card, 17 en persistence, 12 en roles).
 
 ### Detalles técnicos nuevos (ronda 8)
 - **Quick-load + expansión de fondo**: `search.quick_playlist(url, N)` usa

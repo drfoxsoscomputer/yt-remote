@@ -2184,6 +2184,159 @@ def test_fmt_duration_live_shows_dashes():
     assert search_mod._fmt_duration(3600 + 2 * 60 + 7) == "1:02:07"
 
 
+def test_build_master_playlist_joins_video_and_audio():
+    """Directo (sync): el master .m3u8 local une el video child con el audio
+    child como grupo EXT-X-MEDIA (mismo ID, DEFAULT). Un solo demuxer HLS
+    sincroniza A/V segun el spec: no hay dos live edges independientes."""
+    from player import _build_master_playlist, _is_hls_url
+
+    assert _is_hls_url("https://x/hls_playlist/.../index.m3u8?sig=1")
+    assert not _is_hls_url("https://x/googlevideo/video.mp4?range=1-2")
+    master = _build_master_playlist(
+        "https://hls/v.m3u8", "https://hls/a.m3u8", resolution="1280x720"
+    )
+    assert master.startswith("#EXTM3U")
+    assert 'TYPE=AUDIO,GROUP-ID="yt-remote-audio0"' in master
+    assert "DEFAULT=YES" in master
+    assert 'URI="https://hls/a.m3u8"' in master
+    # La unica variante referencia el MISMO grupo de audio del EXT-X-MEDIA.
+    assert 'AUDIO="yt-remote-audio0"' in master
+    assert "https://hls/v.m3u8" in master
+    assert "RESOLUTION=1280x720" in master
+
+
+async def test_search_keyboard_has_cancel_button():
+    """El listado de /buscar termina con un boton ❌ Cancelar (pick:cancel) y
+    queda marcado como pendiente (la card arriba no se reposiciona)."""
+    import bot as bot_mod
+    from search import SearchResult
+
+    b = make_bot()
+    original_search = bot_mod.search
+    original_resolve = _patch_resolve(
+        bot_mod, {"u1": ("s1", None), "u2": ("s2", None)}
+    )
+    try:
+        bot_mod.search = lambda q, n: [
+            SearchResult(url="u1", title="T1", duration="3:00", thumbnail=""),
+            SearchResult(url="u2", title="T2", duration="3:00", thumbnail=""),
+        ]
+        upd = FakeMessageUpdate("/buscar")
+        await b._run_search(
+            upd, SimpleNamespace(args=[], bot=b._app.bot), "artista cancion"
+        )
+    finally:
+        bot_mod.resolve_stream_url = original_resolve
+        bot_mod.search = original_search
+        if b._anticipate_task is not None:
+            b._anticipate_task.cancel()
+    edited = [e for e in b._app.bot.edited if "Resultados para" in str(e[2])]
+    assert edited, b._app.bot.edited
+    markup = edited[-1][3]["reply_markup"]
+    rows = markup.inline_keyboard
+    assert len(rows) == 3, rows  # 2 resultados + fila de cancelar
+    assert [btn.text for btn in rows[-1]] == ["❌ Cancelar"], rows
+    assert rows[-1][0].callback_data == "pick:cancel", rows
+    assert b._search_list_pending is True
+
+
+async def test_pick_cancel_removes_list_and_keeps_card():
+    """Cancelar el listado (❌ Cancelar) lo borra con su desvanecimiento,
+    deja la card que estaba arriba intacta y no reproduce nada."""
+    from search import SearchResult
+
+    b = make_bot()
+    b._card_chat_id = 44
+    b._card_message_id = 7
+    b._search_cache["pick:0"] = SearchResult(
+        url="u1", title="T1", duration="3:00", thumbnail=""
+    )
+    b._search_list_pending = True
+    played = []
+
+    async def fake_play(*args, **kwargs) -> bool:
+        played.append(args)
+        return True
+
+    b._play_item = fake_play
+    upd = FakeUpdate("pick:cancel", message_id=500, chat_id=44)
+    deleted = []
+    msg = SimpleNamespace(message_id=500)
+
+    async def _delete():
+        deleted.append(500)
+
+    async def _edit(*a, **k):
+        deleted.append("edit")
+
+    msg.delete = _delete
+    msg.edit_message_text = _edit
+    upd.callback_query.message = msg
+    await b.on_callback(upd, SimpleNamespace(args=[], bot=b._app.bot))
+    assert deleted == [500], deleted  # se borro el mensaje del listado
+    assert (44, 7) not in [(d[0], d[1]) for d in b._app.bot.deleted], b._app.bot.deleted
+    assert played == [], "cancelar no reproduce nada"
+    assert b._search_list_pending is False
+    assert b._search_cache == {}
+
+
+async def test_pick_result_clears_pending_search():
+    """Elegir un resultado de /buscar deja de marcar el listado como pendiente:
+    el listado ya se quito y la card nueva puede reposicionarse."""
+    from search import SearchResult
+
+    b = make_bot()
+    b._card_chat_id = 44
+    b._card_message_id = 7
+    b._search_list_pending = True
+    b._search_cache["pick:0"] = SearchResult(
+        url="u1", title="T1", duration="3:00", thumbnail=""
+    )
+
+    async def fake_play(update, item, **kwargs):
+        return True
+
+    b._play_item = fake_play
+    upd = FakeUpdate("pick:0", message_id=500, chat_id=44)
+    await b.on_callback(upd, SimpleNamespace(args=[]))
+    assert b._search_list_pending is False
+
+
+async def test_with_card_reposition_skips_while_search_pending():
+    """Con el listado de /buscar aun en pantalla, el wrapper NO re-renderiza la
+    card: queda arriba del listado, sin borrar ni reenviar."""
+    b = make_bot()
+    b._card_chat_id = 44
+    b._card_message_id = 7
+    b._search_list_pending = True
+    ran = []
+
+    async def handler(update, context):
+        ran.append(1)
+
+    wrapped = b._with_card_reposition(handler)
+    await wrapped(FakeMessageUpdate("/x"), SimpleNamespace(args=[]))
+    assert ran == [1]
+    assert b._app.bot.deleted == [], b._app.bot.deleted
+    assert b._app.bot.sent == [], b._app.bot.sent
+
+
+async def test_cmd_play_link_resets_pending_search():
+    """Un link pegado en /play descarta el listado pendiente: el flag se limpia
+    y la card vuelve a poder reposicionarse al final."""
+    b = make_bot()
+    b._search_list_pending = True
+
+    async def fake_play_link(update, context, query):
+        pass
+
+    b._play_link_or_playlist = fake_play_link
+    await b.cmd_play(
+        FakeMessageUpdate(""), SimpleNamespace(args=["https://youtu.be/abc"])
+    )
+    assert b._search_list_pending is False
+
+
 def run():
     test_control_keyboard_and_status()
     test_artist_seed_literal_or_channel()
@@ -2229,6 +2382,12 @@ def run():
     asyncio.run(test_reposition_card_deletes_old_and_sends_new())
     asyncio.run(test_pick_removes_orphan_card())
     asyncio.run(test_with_card_reposition_repositions_existing())
+    asyncio.run(test_pick_cancel_removes_list_and_keeps_card())
+    asyncio.run(test_pick_result_clears_pending_search())
+    asyncio.run(test_with_card_reposition_skips_while_search_pending())
+    asyncio.run(test_cmd_play_link_resets_pending_search())
+    asyncio.run(test_search_keyboard_has_cancel_button())
+    test_build_master_playlist_joins_video_and_audio()
     asyncio.run(test_passive_text_repositions_card())
     asyncio.run(test_playlist_feedback_renders_in_card())
     asyncio.run(test_playlist_expand_times_out())
