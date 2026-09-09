@@ -148,6 +148,7 @@ class FakeUpdate:
     def __init__(self, data, message_id=7, chat_id=44, user_id=77):
         self.data = data
         self.answered = None
+        self.answered_kwargs = {}
 
         class _Query:
             def __init__(self, parent, uid):
@@ -161,6 +162,7 @@ class FakeUpdate:
 
             async def answer(self, *args, **kwargs):
                 self.parent.answered = args
+                self.parent.answered_kwargs = kwargs
 
             async def edit_message_text(self, *args, **kwargs):
                 self.parent.answered = ("edit",) + args
@@ -838,6 +840,131 @@ async def test_resume_starts_player_when_not_running():
         bot_mod.resolve_stream_url = lambda url: None
 
 
+async def test_toggle_play_pause_keeps_playlist():
+    """El ▶ con mpv apagado y playlist ACTIVA NO debe descartar la cola:
+    reanuda el item actual posicionado (preserve_current=True) y _items
+    queda intacto. Antes, _play_item con preserve_current=False llamaba
+    set_current y borraba la playlist (rar: lista vacia tras reiniciar)."""
+    import bot as bot_mod
+    from queue_manager import QueueItem
+
+    bot_mod.resolve_stream_url = lambda url: ("stream-" + url, None)
+    try:
+        b = make_bot()
+        fp = cast(Any, b.player)
+        fp.running = False
+        items = [
+            QueueItem(url="A", title="A"),
+            QueueItem(url="B", title="B"),
+            QueueItem(url="C", title="C"),
+        ]
+        b.queue.set_playlist(items)
+        b._paused = False  # "sonando", pero mpv apagado (tras reinicio/stop)
+
+        await b._toggle_play_pause()
+        assert fp.starts == 1, "debe llamar player.start()"
+        assert fp.loaded == [("stream-A", None)], fp.loaded
+        assert b.queue.has_playlist, "la playlist NO debe descartarse"
+        assert [i.url for i in b.queue._items] == ["A", "B", "C"]
+        assert b.queue.current is not None and b.queue.current.url == "A"
+    finally:
+        bot_mod.resolve_stream_url = lambda url: None
+
+
+async def test_restore_cursor_and_list_page():
+    """Paso 2: al cargar el estado se restaura la posicion real dentro de la
+    playlist (no el tema 0) y la pagina del 📋 en la que iba el usuario."""
+    import bot as bot_mod
+    from queue_manager import QueueItem
+
+    bot_mod.resolve_stream_url = lambda url: ("stream-" + url, None)
+    try:
+        b = make_bot()
+        items = [
+            QueueItem(url=f"u{i}", title=f"T{i}") for i in range(10)
+        ]
+        b.queue._items = items
+        b.queue._cursor = 7
+        b._list_page = 2
+
+        b._persist_flush()
+        loaded = b._state.load()
+        assert loaded["cursor"] == 7, loaded
+        assert loaded["list_page"] == 2, loaded
+
+        b2 = make_bot()
+        b2._state.save(loaded)
+        b2._load_persisted_state()
+        assert b2.queue._cursor == 7, b2.queue._cursor
+        assert b2.queue.current is not None and b2.queue.current.url == "u7"
+        assert b2._list_page == 2, b2._list_page
+    finally:
+        bot_mod.resolve_stream_url = lambda url: None
+
+
+async def test_restore_cursor_clamped_to_range():
+    """Paso 2: un cursor persistido fuera de rango (playlist mas corta o
+    estado antiguo con cursor grande) se clampa al ultimo indice valido."""
+    import bot as bot_mod
+    from queue_manager import QueueItem
+
+    bot_mod.resolve_stream_url = lambda url: ("stream-" + url, None)
+    try:
+        b = make_bot()
+        loaded = {
+            "version": 1,
+            "cursor": 9999,
+            "list_page": 50,
+            "playlist": [
+                {"url": "u0", "title": "A", "duration_seconds": 0},
+                {"url": "u1", "title": "B", "duration_seconds": 0},
+            ],
+        }
+        b._state.save(loaded)
+        b._load_persisted_state()
+        assert b.queue._cursor == 1, b.queue._cursor
+        assert b.queue.current is not None and b.queue.current.url == "u1"
+        assert b._list_page == 50, "la pagina se clampa en el render, no al cargar"
+    finally:
+        bot_mod.resolve_stream_url = lambda url: None
+
+
+async def test_restore_cursor_corrupt_falls_to_zero():
+    """Paso 2: un cursor o pagina corruptos (no int) caen a 0 sin explotar."""
+    import bot as bot_mod
+    from queue_manager import QueueItem
+
+    bot_mod.resolve_stream_url = lambda url: ("stream-" + url, None)
+    try:
+        b = make_bot()
+        loaded = {
+            "version": 1,
+            "cursor": "abc",
+            "list_page": -5,
+            "playlist": [
+                {"url": "u0", "title": "A", "duration_seconds": 0},
+                {"url": "u1", "title": "B", "duration_seconds": 0},
+            ],
+        }
+        b._state.save(loaded)
+        b._load_persisted_state()
+        assert b.queue._cursor == 0
+        assert b.queue.current is not None and b.queue.current.url == "u0"
+        assert b._list_page == 0
+    finally:
+        bot_mod.resolve_stream_url = lambda url: None
+
+
+async def test_close_list_keeps_page():
+    """Paso 2: cerrar la lista NO resetea la pagina: una reapertura (o un
+    reinicio) continuan en la pagina donde iba el usuario."""
+    b = make_bot()
+    b._list_page = 3
+    await b._close_list_message()
+    assert b._list_page == 3
+    assert b._list_message_id is None
+
+
 async def test_next_prefetch_starts_player():
     """Fase 1: el /next con stream ya resuelto (prefetch) debe prender mpv
     antes de cargar, igual que /resume y ▶."""
@@ -1177,8 +1304,9 @@ async def test_passive_text_repositions_card():
 
 
 async def test_playlist_feedback_renders_in_card():
-    """Expandir una playlist avisa en la card (⏳ Expandiendo) sin dejar un
-    mensaje suelto clavado en el chat, y al final reproduce desde la lista."""
+    """Arrancar una playlist avisa en la card (⏳ Arrancando) sin dejar un
+    mensaje suelto clavado en el chat, y reproduce YA el primer track con el
+    total real de la lista (quick_playlist) mientras el resto carga aparte."""
     import bot as bot_mod
     from search import SearchResult
 
@@ -1194,21 +1322,30 @@ async def test_playlist_feedback_renders_in_card():
     b._play_item = fake_play
 
     orig_pl = bot_mod.is_playlist_url
+    orig_quick = bot_mod.quick_playlist
     orig_exp = bot_mod.expand_playlist
     bot_mod.is_playlist_url = lambda q: True
-    bot_mod.expand_playlist = lambda q, n: [
-        SearchResult(url="u1", title="T1", duration="3:00", thumbnail="")
-    ]
+    bot_mod.quick_playlist = lambda q, n: (
+        [SearchResult(url="u1", title="T1", duration="3:00", thumbnail="")], 39
+    )
+    bot_mod.expand_playlist = lambda q, n: []
     try:
         upd = FakeMessageUpdate("https://youtube.com/playlist?list=XYZ")
         await b._play_link_or_playlist(upd, SimpleNamespace(args=[]), upd.message.text)
+        if b._expand_task is not None:
+            await b._expand_task
     finally:
         bot_mod.is_playlist_url = orig_pl
+        bot_mod.quick_playlist = orig_quick
         bot_mod.expand_playlist = orig_exp
-    cards_log = [e for e in b._app.bot.edited if "⏳ Expandiendo playlist" in str(e[2])]
+    cards_log = [e for e in b._app.bot.edited if "Arrancando playlist" in str(e[2])]
     assert cards_log, b._app.bot.edited
-    assert not [s for s in b._app.bot.sent if "Expandiendo" in str(s[1])], b._app.bot.sent
+    assert not [s for s in b._app.bot.sent if "Arrancando" in str(s[1])], b._app.bot.sent
     assert len(played) == 1, played
+    # El feedback final reporta el total REAL de la lista (39), no solo los N
+    # del arranque rapido, y avisa que el resto carga en segundo plano.
+    assert any("Playlist (1/39)" in t for t, _ in upd.sent), upd.sent
+    assert any("segundo plano" in t for t, _ in upd.sent), upd.sent
 
 
 async def test_quality_button_in_card_keyboard():
@@ -1492,29 +1629,539 @@ async def test_quality_same_level_is_ignored():
         search_mod.MAX_HEIGHT = original_height
 
 
+async def test_list_button_opens_separate_message():
+    """El 📋 abre la lista como MENSAJE aparte (la card no se pisa) con
+    botones de tema para dj y la navegacion con ❌."""
+    from queue_manager import QueueItem
+
+    b = make_bot()
+    b.queue.set_playlist(
+        [QueueItem(url=f"u{i}", title=f"Tema {i}") for i in range(3)]
+    )
+    upd = FakeUpdate("ctl:lista", user_id=77, chat_id=44)
+    await b._on_control(upd, SimpleNamespace(args=[]), "lista")
+    assert b._list_message_id is not None
+    assert len(b._app.bot.sent) == 1, "la lista es un mensaje nuevo"
+    text = b._app.bot.sent[0][1]
+    assert text.startswith("Lista:"), text
+    kb = b._app.bot.sent[0][2]["reply_markup"]
+    rows = kb.inline_keyboard
+    # dj: un boton de tema por fila (posicion global + titulo completo) y la
+    # nav [· ❌ ·] (una sola pagina).
+    assert [btn.text for btn in rows[0]] == ["▶️ 1. Tema 0"]
+    assert [btn.text for btn in rows[1]] == ["2. Tema 1"]
+    assert [btn.text for btn in rows[2]] == ["3. Tema 2"]
+    assert [btn.text for btn in rows[3]] == ["·", "❌", "·"], rows[3]
+    # La card no se edita ni se desvanece.
+    assert b._app.bot.edited == []
+    assert b._app.bot.deleted == []
+
+
+async def test_list_open_for_user_no_track_buttons():
+    """Un user ve la lista pero NO recibe botones de tema: solo navegacion."""
+    from queue_manager import QueueItem
+
+    b = make_bot()
+    b.roles.set_role(50, "user")
+    b.queue.set_playlist(
+        [QueueItem(url=f"u{i}", title=f"Tema {i}") for i in range(3)]
+    )
+    await b._on_control(
+        FakeUpdate("ctl:lista", user_id=50, chat_id=44),
+        SimpleNamespace(args=[]),
+        "lista",
+    )
+    assert b._list_can_select is False
+    kb = b._app.bot.sent[0][2]["reply_markup"]
+    rows = kb.inline_keyboard
+    assert len(rows) == 1, "user: sin botones de tema, solo navegacion"
+    assert [btn.text for btn in rows[0]] == ["·", "❌", "·"]
+
+
+async def test_list_paginates_with_arrows():
+    """21 temas se muestran de 10 en 10 (3 paginas: 10+10+1); ◀ ▶ editan el
+    mensaje abierto: el header muestra pagina actual/total y los BOTONES son
+    la lista en si (titulo completo, unico lugar donde se ve cada tema)."""
+    from queue_manager import QueueItem
+
+    b = make_bot()
+    b.queue.set_playlist(
+        [QueueItem(url=f"u{i}", title=f"Tema {i}") for i in range(21)]
+    )
+    await b._on_control(
+        FakeUpdate("ctl:lista", user_id=77, chat_id=44),
+        SimpleNamespace(args=[]),
+        "lista",
+    )
+    kb = b._app.bot.sent[0][2]["reply_markup"]
+    rows = kb.inline_keyboard
+    assert len(rows) == 11, "pagina 1: 10 temas + navegacion"
+    assert rows[0][0].text == "▶️ 1. Tema 0"
+    assert rows[9][0].text == "10. Tema 9"
+    assert [btn.text for btn in rows[10]] == ["·", "❌", "▶"]
+    # El texto del mensaje es SOLO el header: pagina actual y total.
+    text1 = b._app.bot.sent[0][1]
+    assert text1 == "Lista (pag 1/3):", text1
+
+    edited_before = len(b._app.bot.edited)
+    await b._on_list_callback(
+        FakeUpdate("lst:next", user_id=77, chat_id=44), SimpleNamespace(args=[])
+    )
+    assert b._list_page == 1
+    kb2 = b._app.bot.edited[-1][3]["reply_markup"]
+    rows2 = kb2.inline_keyboard
+    assert rows2[0][0].text == "11. Tema 10"
+    assert rows2[9][0].text == "20. Tema 19"
+    assert [btn.text for btn in rows2[10]] == ["◀", "❌", "▶"]
+    # El texto editado es SOLO el header de la pagina 2.
+    assert b._app.bot.edited[-1][2] == "Lista (pag 2/3):"
+
+    await b._on_list_callback(
+        FakeUpdate("lst:prev", user_id=77, chat_id=44), SimpleNamespace(args=[])
+    )
+    assert b._list_page == 0
+    kb3 = b._app.bot.edited[-1][3]["reply_markup"]
+    assert kb3.inline_keyboard[0][0].text == "▶️ 1. Tema 0"
+    assert b._app.bot.edited[-1][2] == "Lista (pag 1/3):"
+
+    # La ultima pagina no avanza: ▶ desaparece de la nav.
+    b._list_page = 2
+    kb4 = b._list_keyboard()
+    assert len(kb4.inline_keyboard) == 2, "pagina 3: 1 solo tema + nav"
+    assert kb4.inline_keyboard[0][0].text == "21. Tema 20"
+    assert [btn.text for btn in kb4.inline_keyboard[-1]] == ["◀", "❌", "·"]
+    # El header de la pagina 3 anuncia la pagina final (caso del usuario).
+    text3 = b._queue_list_text(2)
+    assert text3 == "Lista (pag 3/3):", text3
+    # El placeholder · es inerte: no edita nada.
+    edited_before = len(b._app.bot.edited)
+    await b._on_list_callback(
+        FakeUpdate("lst:noop", user_id=77, chat_id=44), SimpleNamespace(args=[])
+    )
+    assert len(b._app.bot.edited) == edited_before, "noop no edita nada"
+
+
+async def test_list_reopen_deletes_old_and_sends_new():
+    """Reabrir con lista abierta: se borra la anterior (con fade) y se manda
+    una fresca (nunca se edita la lista existente)."""
+    from queue_manager import QueueItem
+
+    b = make_bot()
+    b.queue.set_playlist(
+        [QueueItem(url=f"u{i}", title=f"Tema {i}") for i in range(3)]
+    )
+    await b._on_control(
+        FakeUpdate("ctl:lista", user_id=77, chat_id=44),
+        SimpleNamespace(args=[]),
+        "lista",
+    )
+    first_id = b._list_message_id
+    await b._on_control(
+        FakeUpdate("ctl:lista", user_id=77, chat_id=44),
+        SimpleNamespace(args=[]),
+        "lista",
+    )
+    assert (44, first_id) in b._app.bot.deleted, "la lista vieja se desvanece"
+    assert len(b._app.bot.sent) == 2, "se manda una lista fresca"
+    assert b._list_message_id == 101, b._list_message_id  # fake numera 100, 101...
+
+
+async def test_list_select_plays_and_closes():
+    """Elegir un tema (dj): salta a la posicion, reproduce YA y la lista se
+    cierra con desvanecimiento."""
+    from queue_manager import QueueItem
+
+    b = make_bot()
+    b.queue.set_playlist(
+        [
+            QueueItem(url=f"u{i}", title=f"Tema {i}", channel="GP Band")
+            for i in range(5)
+        ]
+    )
+
+    async def fake_stream_for(url):
+        return (f"stream-{url}", None)
+
+    b._stream_for = fake_stream_for
+    await b._on_control(
+        FakeUpdate("ctl:lista", user_id=77, chat_id=44),
+        SimpleNamespace(args=[]),
+        "lista",
+    )
+    list_id = b._list_message_id
+    current = b.queue.current
+    assert current is not None and current.title == "Tema 0"
+    upd = FakeUpdate("lst:4", user_id=77, chat_id=44)
+    await b._on_list_callback(upd, SimpleNamespace(args=[]))
+    current = b.queue.current
+    assert current is not None and current.title == "Tema 3", "salto a la posicion 4 (1-based)"
+    assert b.player.loaded and b.player.loaded[-1] == ("stream-u3", None), b.player.loaded
+    assert b.player.resumed >= 1
+    assert b._list_message_id is None, "la lista se cierra al elegir"
+    assert (44, list_id) in b._app.bot.deleted, "la lista se desvanece al elegir"
+
+
+async def test_list_user_cannot_select():
+    """Un user tocando un tema recibe la alerta; la lista sigue abierta."""
+    from queue_manager import QueueItem
+
+    b = make_bot()
+    b.roles.set_role(50, "user")
+    b.queue.set_playlist(
+        [QueueItem(url=f"u{i}", title=f"Tema {i}") for i in range(5)]
+    )
+    await b._on_control(
+        FakeUpdate("ctl:lista", user_id=50, chat_id=44),
+        SimpleNamespace(args=[]),
+        "lista",
+    )
+    list_id = b._list_message_id
+    upd = FakeUpdate("lst:3", user_id=50, chat_id=44)
+    await b._on_list_callback(upd, SimpleNamespace(args=[]))
+    assert upd.answered_kwargs.get("show_alert") is True
+    assert "Solo el admin o un dj" in upd.answered_kwargs.get("text", "")
+    assert b._list_message_id == list_id, "la lista sigue abierta"
+    assert b._app.bot.deleted == [], "nada se borra"
+    assert b.player.loaded == [], "nada se reproduce"
+
+
+async def test_list_close_deletes_for_anyone():
+    """El ❌ lo cierra CUALQUIERA (user o dj): la lista se desvanece."""
+    from queue_manager import QueueItem
+
+    for role in ("user", "dj"):
+        b = make_bot()
+        if role == "user":
+            b.roles.set_role(77, "user")
+        b.queue.set_playlist(
+            [QueueItem(url=f"u{i}", title=f"Tema {i}") for i in range(3)]
+        )
+        await b._on_control(
+            FakeUpdate("ctl:lista", user_id=77, chat_id=44),
+            SimpleNamespace(args=[]),
+            "lista",
+        )
+        list_id = b._list_message_id
+        await b._on_list_callback(
+            FakeUpdate("lst:close", user_id=77, chat_id=44), SimpleNamespace(args=[])
+        )
+        assert (44, list_id) in b._app.bot.deleted, f"{role}: ❌ desvanece la lista"
+        assert b._list_message_id is None
+
+
+async def test_list_open_empty_queue_toast():
+    """Cola vacia: el 📋 solo responde el toast, no envia ningun mensaje."""
+    b = make_bot()
+    upd = FakeUpdate("ctl:lista", user_id=77, chat_id=44)
+    await b._on_control(upd, SimpleNamespace(args=[]), "lista")
+    assert upd.answered == ("La lista esta vacia.",), upd.answered
+    assert b._app.bot.sent == [], "no se envia lista vacia"
+
+
+async def test_list_select_already_playing_keeps_open():
+    """Elegir el tema actual: toast 'Ya esta sonando' y la lista NO se cierra."""
+    from queue_manager import QueueItem
+
+    b = make_bot()
+    b.queue.set_playlist(
+        [QueueItem(url=f"u{i}", title=f"Tema {i}") for i in range(3)]
+    )
+    await b._on_control(
+        FakeUpdate("ctl:lista", user_id=77, chat_id=44),
+        SimpleNamespace(args=[]),
+        "lista",
+    )
+    list_id = b._list_message_id
+    upd = FakeUpdate("lst:1", user_id=77, chat_id=44)
+    await b._on_list_callback(upd, SimpleNamespace(args=[]))
+    assert "Ya esta sonando" in upd.answered_kwargs.get("text", ""), upd.answered
+    assert b._list_message_id == list_id, "no se cierra"
+    assert b._app.bot.deleted == []
+
+
+async def test_list_select_out_of_range_keeps_open():
+    """Posicion inexistente: toast 'Numero fuera de rango', la lista sigue."""
+    from queue_manager import QueueItem
+
+    b = make_bot()
+    b.queue.set_playlist(
+        [QueueItem(url=f"u{i}", title=f"Tema {i}") for i in range(3)]
+    )
+    await b._on_control(
+        FakeUpdate("ctl:lista", user_id=77, chat_id=44),
+        SimpleNamespace(args=[]),
+        "lista",
+    )
+    list_id = b._list_message_id
+    upd = FakeUpdate("lst:99", user_id=77, chat_id=44)
+    await b._on_list_callback(upd, SimpleNamespace(args=[]))
+    assert "Numero fuera de rango" in upd.answered_kwargs.get("text", "")
+    assert b._list_message_id == list_id
+    assert b._app.bot.deleted == []
+
+
 async def test_playlist_expand_times_out():
     """Un link de playlist colgado no congela el bot: el wait_for con
-    _RESOLVE_TIMEOUT expira y se responde el error en vez de colgarse."""
+    _QUICK_TIMEOUT expira y se responde el error en vez de colgarse."""
     import bot as bot_mod
 
     b = make_bot()
     upd = FakeMessageUpdate("https://youtube.com/playlist?list=XYZ")
     orig_pl = bot_mod.is_playlist_url
-    orig_exp = bot_mod.expand_playlist
-    orig_timeout = bot_mod._RESOLVE_TIMEOUT
+    orig_quick = bot_mod.quick_playlist
+    orig_timeout = bot_mod._QUICK_TIMEOUT
     bot_mod.is_playlist_url = lambda q: True
-    bot_mod.expand_playlist = lambda q, n: time.sleep(5) or []
-    bot_mod._RESOLVE_TIMEOUT = 0.3
+    bot_mod.quick_playlist = lambda q, n: time.sleep(5) or ([], 0)
+    bot_mod._QUICK_TIMEOUT = 0.3
     try:
         inicio = time.monotonic()
         await b._play_link_or_playlist(upd, SimpleNamespace(args=[]), upd.message.text)
         transcurrido = time.monotonic() - inicio
     finally:
         bot_mod.is_playlist_url = orig_pl
-        bot_mod.expand_playlist = orig_exp
-        bot_mod._RESOLVE_TIMEOUT = orig_timeout
+        bot_mod.quick_playlist = orig_quick
+        bot_mod._QUICK_TIMEOUT = orig_timeout
     assert transcurrido < 4, f"tardo {transcurrido:.1f}s, el timeout no funciono"
     assert any("No se pudo expandir" in t for t, _ in upd.sent), upd.sent
+
+
+async def test_playlist_quick_load_starts_immediately():
+    """Paso 3 (arranque al toque): una playlist arranca YA con los primeros N
+    (quick_playlist) sin esperar la expansion completa; el mensaje reporta
+    el total real y que el resto carga en segundo plano."""
+    import bot as bot_mod
+    from search import SearchResult
+
+    b = make_bot()
+    b._card_chat_id = 44
+    b._card_message_id = 7
+    played = []
+
+    async def fake_play(update, item, **kwargs):
+        played.append(item)
+        return True
+
+    b._play_item = fake_play
+
+    orig_pl = bot_mod.is_playlist_url
+    orig_quick = bot_mod.quick_playlist
+    orig_exp = bot_mod.expand_playlist
+    bot_mod.is_playlist_url = lambda q: True
+    bot_mod.quick_playlist = lambda q, n: (
+        [SearchResult(url=f"u{i}", title=f"T{i}", duration="3:00", thumbnail="") for i in range(n)],
+        1882,
+    )
+    bot_mod.expand_playlist = lambda q, n: []
+    try:
+        assert b._expanding_total == 0, "arranque: aun sin expansion"
+        upd = FakeMessageUpdate("https://youtube.com/playlist?list=XYZ")
+        await b._play_link_or_playlist(upd, SimpleNamespace(args=[]), upd.message.text)
+        # El total y la URL quedan registrados para la expansion de fondo.
+        assert b._expanding_total == 1882
+        assert b._expanding_playlist_url == "https://youtube.com/playlist?list=XYZ"
+        if b._expand_task is not None:
+            await b._expand_task
+    finally:
+        bot_mod.is_playlist_url = orig_pl
+        bot_mod.quick_playlist = orig_quick
+        bot_mod.expand_playlist = orig_exp
+
+    assert len(played) == 1, played
+    q = b.queue
+    assert q.has_playlist
+    assert len(q._items) == 15, f"quick-load debe cargar 15, trajo {len(q._items)}"
+    assert b.queue.current is not None and b.queue.current.url == "u0"
+    # El mensaje de exito reporta 15/1882 y avisa del segundo plano.
+    assert any("Playlist (15/1882)" in t for t, _ in upd.sent), upd.sent
+    assert any("segundo plano" in t for t, _ in upd.sent), upd.sent
+
+
+async def test_playlist_background_expansion_does_not_duplicate():
+    """Paso 3/4: la expansion de fondo anexa SOLO los tracks que no estaban
+    (el quick-load ya cargo los primeros N, no debe duplicarlos) y mantiene
+    el orden a continuacion de lo cargado."""
+    import bot as bot_mod
+    from search import SearchResult
+
+    b = make_bot()
+    b._card_chat_id = 44
+    b._card_message_id = 7
+
+    orig_pl = bot_mod.is_playlist_url
+    orig_quick = bot_mod.quick_playlist
+    orig_exp = bot_mod.expand_playlist
+    bot_mod.is_playlist_url = lambda q: True
+    bot_mod.quick_playlist = lambda q, n: (
+        [SearchResult(url=f"u{i}", title=f"T{i}", duration="3:00", thumbnail="") for i in range(2)],
+        4,
+    )
+    # La expansion completa incluye tambien los 2 primeros (igual URL): el
+    # dedupe debe dejar solo los 2 nuevos al final.
+    bot_mod.expand_playlist = lambda q, n: [
+        SearchResult(url="u0", title="T0", duration="3:00", thumbnail=""),
+        SearchResult(url="u1", title="T1", duration="3:00", thumbnail=""),
+        SearchResult(url="u2", title="T2", duration="3:00", thumbnail=""),
+        SearchResult(url="u3", title="T3", duration="3:00", thumbnail=""),
+    ]
+
+    async def fake_play(update, item, **kwargs):
+        return True
+
+    b._play_item = fake_play
+    try:
+        upd = FakeMessageUpdate("https://youtube.com/playlist?list=XYZ")
+        await b._play_link_or_playlist(upd, SimpleNamespace(args=[]), upd.message.text)
+        # La expansion de fondo ya fue lanzada por el arranque: esperarla a
+        # que complete (los datos mockeados terminan al vuelo).
+        if b._expand_task is not None:
+            await b._expand_task
+    finally:
+        bot_mod.is_playlist_url = orig_pl
+        bot_mod.quick_playlist = orig_quick
+        bot_mod.expand_playlist = orig_exp
+
+    assert [i.url for i in b.queue._items] == ["u0", "u1", "u2", "u3"], [
+        i.url for i in b.queue._items
+    ]
+    assert b._expanding_playlist is False
+
+
+async def test_playlist_background_expansion_ignores_swapped_queue():
+    """Paso 3/4: una expansion de UNA playlist vieja no anexa sus datos a la
+    cola si el usuario ya arranco otra playlist (la URL ya no es la vigente):
+    la tarea caduca se descarta sin tocar la cola."""
+    import bot as bot_mod
+    from search import SearchResult
+
+    b = make_bot()
+    b._card_chat_id = 44
+    b._card_message_id = 7
+
+    # Escenario sin expansión activa: la URL vieja se considera no vigente
+    # (no hay self._expanding_playlist), asi que la expansion no anexa nada.
+    b._expanding_playlist = False
+    b._expanding_playlist_url = None
+    orig_exp = bot_mod.expand_playlist
+    bot_mod.expand_playlist = lambda q, n: [
+        SearchResult(url="u1", title="T1", duration="3:00", thumbnail="")
+    ]
+    try:
+        from queue_manager import QueueItem
+
+        b.queue.set_playlist([QueueItem(url="cur", title="Cur")])
+        await b._expand_playlist_background("https://youtube.com/playlist?list=OLD")
+    finally:
+        bot_mod.expand_playlist = orig_exp
+
+    assert [i.url for i in b.queue._items] == ["cur"], (
+        "una expansion caduca no debe anexar nada a la cola"
+    )
+
+
+async def test_pick_next_waits_for_expansion_no_early_wrap():
+    """Paso 4: si el arranque al toque sigue expandiendo y el cursor esta en
+    el ULTIMO tema cargado, el siguiente NO hace wrap prematuro: espera a que
+    la expansion anexe mas (el peek devuelve el tema nuevo, no el primero)."""
+    import bot as bot_mod
+    import asyncio as _asyncio
+    from queue_manager import QueueItem
+
+    b = make_bot()
+    b._card_chat_id = 44
+    b._card_message_id = 7
+
+    items = [QueueItem(url=f"u{i}", title=f"T{i}") for i in range(2)]
+    b.queue.set_playlist(items)
+    b.queue._cursor = 1  # estamos en el ULTIMO item cargado (u1)
+    b._expanding_playlist = True
+    b._expanding_playlist_url = "https://youtube.com/playlist?list=XYZ"
+    b._expanding_total = 3
+
+    # La expansion ficticia: dentro de 0.3s anexa u2 y termina.
+    async def expansion_fake():
+        await _asyncio.sleep(0.3)
+        b.queue.add(QueueItem(url="u2", title="T2"))
+        b._expanding_playlist = False
+        b._expanding_playlist_url = None
+        b._expanding_total = 0
+
+    tarea = _asyncio.create_task(expansion_fake())
+    try:
+        actual = cast(QueueItem, b.queue.current)
+        candidato, de_cola, err = await b._pick_next_candidate(actual)
+        assert candidato is not None and candidato.url == "u2", candidato
+        assert de_cola is True
+    finally:
+        if not tarea.done():
+            tarea.cancel()
+
+
+def test_live_stream_resolves_combined():
+    """Paso 6: un video EN VIVO no se resuelve con video+audio separados
+    (que en mpv llega sin sonido), sino forzando el stream combinado muxed.
+
+    Simula las dos pasadas de yt-dlp: la primera (formato estandar) devuelve
+    un directo con requested_formats separados; la segunda (forzada a 'best')
+    devuelve un solo URL muxed."""
+    import search as search_mod
+    import yt_dlp
+
+    calls = []
+
+    class FakeYDL:
+        def __init__(self, opts):
+            self.opts = opts
+            calls.append(opts.get("format", ""))
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return False
+
+        def extract_info(self, url, download=False):  # noqa: ARG002
+            fmt = self.opts.get("format", "")
+            if "bestvideo" in fmt and "best[height" in fmt:
+                return {
+                    "id": "live1",
+                    "title": "Directo de prueba",
+                    "live_status": "is_live",
+                    "is_live": True,
+                    "requested_formats": [
+                        {"vcodec": "avc1", "acodec": "none", "url": "https://hls/v.m3u8"},
+                        {"vcodec": "none", "acodec": "mp4a", "url": "https://hls/a.m3u8"},
+                    ],
+                }
+            return {
+                "id": "live1",
+                "title": "Directo de prueba",
+                "live_status": "is_live",
+                "is_live": True,
+                "url": "https://hls/combined.m3u8",
+            }
+
+    original = yt_dlp.YoutubeDL
+    yt_dlp.YoutubeDL = FakeYDL
+    try:
+        res = search_mod.resolve_stream_url("https://youtube.com/watch?v=live1")
+        assert res is not None and res[0] == "https://hls/combined.m3u8", res
+        assert res[1] is None, "el directo debe ser un unico stream combinado, sin audio aparte"
+    finally:
+        yt_dlp.YoutubeDL = original
+
+    assert len(calls) >= 2, f"esperaba 2 pasadas (normal + combinada), vi {len(calls)}"
+    assert calls[1] == f"best[height<={search_mod.MAX_HEIGHT}]", calls
+
+
+def test_fmt_duration_live_shows_dashes():
+    """Paso 6: un video EN VIVO no tiene duracion fija; un 0 no debe
+    mostrarse como '0:00' engañoso sino como '--:--'."""
+    import search as search_mod
+
+    assert search_mod._fmt_duration(0) == "--:--"
+    assert search_mod._fmt_duration(None) == "--:--"
+    assert search_mod._fmt_duration(3 * 60 + 5) == "3:05"
+    assert search_mod._fmt_duration(3600 + 2 * 60 + 7) == "1:02:07"
 
 
 def run():
@@ -1543,6 +2190,11 @@ def run():
     asyncio.run(test_nav_playlist_unaffected())
     asyncio.run(test_toggle_play_pause_starts_player_when_off())
     asyncio.run(test_resume_starts_player_when_not_running())
+    asyncio.run(test_toggle_play_pause_keeps_playlist())
+    asyncio.run(test_restore_cursor_and_list_page())
+    asyncio.run(test_restore_cursor_clamped_to_range())
+    asyncio.run(test_restore_cursor_corrupt_falls_to_zero())
+    asyncio.run(test_close_list_keeps_page())
     asyncio.run(test_next_prefetch_starts_player())
     asyncio.run(test_stop_conserves_state_and_rewinds())
     asyncio.run(test_stop_does_not_clear_queue())
@@ -1560,6 +2212,12 @@ def run():
     asyncio.run(test_passive_text_repositions_card())
     asyncio.run(test_playlist_feedback_renders_in_card())
     asyncio.run(test_playlist_expand_times_out())
+    asyncio.run(test_playlist_quick_load_starts_immediately())
+    asyncio.run(test_playlist_background_expansion_does_not_duplicate())
+    asyncio.run(test_playlist_background_expansion_ignores_swapped_queue())
+    asyncio.run(test_pick_next_waits_for_expansion_no_early_wrap())
+    test_live_stream_resolves_combined()
+    test_fmt_duration_live_shows_dashes()
     asyncio.run(test_quality_button_in_card_keyboard())
     asyncio.run(test_quality_selector_opens_for_admin())
     asyncio.run(test_quality_select_applies_and_persists())
@@ -1570,6 +2228,16 @@ def run():
     asyncio.run(test_quality_lock_discards_while_control_busy())
     asyncio.run(test_quality_above_1080_is_ignored())
     asyncio.run(test_quality_same_level_is_ignored())
+    asyncio.run(test_list_button_opens_separate_message())
+    asyncio.run(test_list_open_for_user_no_track_buttons())
+    asyncio.run(test_list_paginates_with_arrows())
+    asyncio.run(test_list_reopen_deletes_old_and_sends_new())
+    asyncio.run(test_list_select_plays_and_closes())
+    asyncio.run(test_list_user_cannot_select())
+    asyncio.run(test_list_close_deletes_for_anyone())
+    asyncio.run(test_list_open_empty_queue_toast())
+    asyncio.run(test_list_select_already_playing_keeps_open())
+    asyncio.run(test_list_select_out_of_range_keeps_open())
     print("TARJETA TESTS OK")
 
 

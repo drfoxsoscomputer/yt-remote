@@ -50,6 +50,15 @@ Ej:   /buscar Jesus Adrian Romero   reproduce temas de Jesus Adrian Romero.
 Si pega un link de YouTube directo, el bot reproduce ese video sin
 buscar nada.
 
+Si el link es de una PLAYLIST o mix de YouTube, el bot arranca YA con los
+primeros temas y sigue cargando el resto en segundo plano (avisa cuando
+quedó completa). El boton 📋 muestra la lista completa mientras crece y la
+posición se guarda: al reiniciar el programa, retoma la misma canción y la
+misma página de la lista.
+
+Los videos EN VIVO se reproducen con sonido normal y las duraciones
+desconocidas se ven como --:--.
+
 
 LA TARJETA DE REPRODUCCIÓN
 --------------------------
@@ -118,7 +127,9 @@ Solo admin:
   /removeuser <id>               quita acceso
 
 Todos (user, dj, admin):
-  /lista                          muestra la lista; /lista N salta al tema N
+  (la lista se ve con el boton 📋 de la tarjeta: un mensaje aparte,
+   paginado de 10 en 10, que cualquiera cierra con el boton ❌; solo dj o
+   admin pueden elegir un tema tocandolo)
 
 Un user que quiera ser dj puede escribir /solicitar para pedirle al
 admin que le dé acceso.
@@ -128,7 +139,7 @@ ROLES Y PERMISOS
 ----------------
   admin  — puede hacer todo + dar/quitar acceso + cambiar la calidad
   dj     — buscar, controlar musica (tarjeta y comandos)
-  user   — solo puede ver la lista con /lista o el boton 📋
+  user   — solo puede ver la lista con el boton 📋 (sin elegir temas)
 
 Por defecto solo el dueño es admin. Para darle acceso a otros,
 necesita su ID de Telegram y use /adduser.

@@ -33,7 +33,7 @@ from player import Player
 from persistence import StateStore
 from queue_manager import QueueItem, QueueManager
 from roles import VALID_ROLES, RoleManager
-from search import SearchResult, is_playlist_url, expand_playlist, is_youtube_link, search, resolve_stream_url, thumbnail_from_url, last_resolve_error, set_max_height
+from search import SearchResult, is_playlist_url, expand_playlist, quick_playlist, is_youtube_link, search, resolve_stream_url, thumbnail_from_url, last_resolve_error, set_max_height
 import setup_cli as setup
 
 logging.basicConfig(
@@ -47,8 +47,20 @@ logger = logging.getLogger(__name__)
 # en secuencia) y el bot dejaria de responder botones y comandos.
 _RESOLVE_TIMEOUT = 20.0
 
+# Arranque al toque de playlists: los primeros tracks se cargan al instante
+# (una sola llamada rapida de yt-dlp con playlistend) y el RESTO se expande
+# en segundo plano. El techo tecnico de seguridad: YouTube no permite
+# playlists de mas de 5000 items, asi que no hay tope de usuario.
+_QUICK_TRACKS = 15
+_QUICK_TIMEOUT = 15.0
+_MAX_PLAYLIST = 5000
+_EXPAND_TIMEOUT = 300.0
+
 # Niveles de calidad disponibles para el admin. 1080 es el tope maximo.
 QUALITY_LEVELS = (144, 240, 360, 480, 720, 1080)
+
+# Mensaje de lista (boton 📋): temas visibles por pagina.
+_LIST_PAGE_SIZE = 10
 
 
 class YTRemoteBot:
@@ -104,6 +116,23 @@ class YTRemoteBot:
         # Tope de resolucion elegido por el admin (None = 1080 por defecto).
         # Se aplica a search.MAX_HEIGHT y se persiste en state.json.
         self._max_height: int | None = None
+        # Mensaje de la lista (boton 📋): referencias efimeras (no se
+        # persisten, la lista muere al reiniciar) + pagina visible de 10.
+        self._list_chat_id: int | None = None
+        self._list_message_id: int | None = None
+        self._list_page: int = 0
+        # Determina si el mensaje de la lista abierto muestra botones de tema
+        # (True si lo abrio un admin/dj). Fijo durante la vida del mensaje:
+        # al paginar no cambia aunque lo pages un user.
+        self._list_can_select: bool = False
+        # True mientras la expansion de fondo de una playlist esta activa y
+        # False apenas termina. Sirve para no cerrar el listado con wrap
+        # prematuro mientras la cola sigue creciendo. Tambien sujeta el total
+        # real de la lista (playlist_count) para el feedback de la card.
+        self._expanding_playlist: bool = False
+        self._expanding_playlist_url: str | None = None
+        self._expanding_total: int = 0
+        self._expand_task: asyncio.Task | None = None
         # Seria la re-creacion de la tarjeta (borrar + enviar de nuevo): dos
         # updates seguidos no deben borrar dos veces para duplicar la card.
         self._card_lock: asyncio.Lock = asyncio.Lock()
@@ -138,6 +167,8 @@ class YTRemoteBot:
             "paused": self._paused,
             "current": self.queue.current.to_dict() if self.queue.current else None,
             "playlist": [i.to_dict() for i in self.queue._items],
+            "cursor": self.queue._cursor if self.queue.has_playlist else 0,
+            "list_page": self._list_page,
             "history": history,
             "radio_artist": self._radio_artist,
             "max_height": self._max_height,
@@ -177,8 +208,15 @@ class YTRemoteBot:
                 pass
         if loaded.get("playlist"):
             try:
-                self.queue._items = [QueueItem.from_dict(i) for i in loaded["playlist"]]
-                self.queue._cursor = 0
+                items = [QueueItem.from_dict(i) for i in loaded["playlist"]]
+                self.queue._items = items
+                # Restaurar la posicion real dentro de la playlist (con
+                # validacion de rango: un cursor corrupto cae a 0).
+                try:
+                    cursor = int(loaded.get("cursor", 0) or 0)
+                except (TypeError, ValueError):
+                    cursor = 0
+                self.queue._cursor = max(0, min(cursor, len(items) - 1))
             except Exception:
                 pass
         if loaded.get("history"):
@@ -193,6 +231,14 @@ class YTRemoteBot:
         self._card_chat_id = card.get("chat_id")
         self._card_message_id = card.get("message_id")
         self._card_is_photo = bool(card.get("is_photo"))
+
+        # Pagina del listado 📋 en la que iba el usuario: se restaura para
+        # no volver siempre al inicio tras un reinicio (validada >= 0).
+        try:
+            pagina = int(loaded.get("list_page", 0) or 0)
+        except (TypeError, ValueError):
+            pagina = 0
+        self._list_page = max(0, pagina)
 
         # Tope de resolucion: un valor persistido invalido (>1080, caida del
         # tope antiguo) se ignora y se vuelve a 1080 por defecto.
@@ -257,7 +303,6 @@ class YTRemoteBot:
         app.add_handler(CommandHandler("buscar", self._with_card_reposition(self._require_chat(self._require("dj", self.cmd_play)))))
         app.add_handler(CommandHandler("play", self._with_card_reposition(self._require_chat(self._require("dj", self.cmd_play)))))
         app.add_handler(CommandHandler("solicitar", self._with_card_reposition(self._require_chat(self.cmd_solicitar))))
-        app.add_handler(CommandHandler("lista", self._with_card_reposition(self._require_chat(self.cmd_queue))))
         app.add_handler(
             CommandHandler(
                 "adduser", self._with_card_reposition(self._require_chat(self._require("admin", self.cmd_adduser)))
@@ -1016,6 +1061,24 @@ class YTRemoteBot:
         flag distingue "la radio se acabo" (catalogo agotado) de "no pude
         buscar" (red caida / yt-dlp fallo) para dar un mensaje util al user.
         """
+        # Si el arranque al toque sigue expandiendo la playlist en segundo
+        # plano y el cursor esta en el ULTIMO tema cargado, el peek devolveria
+        # un wrap prematuro (la cola aun no tiene el resto). Espero un rato a
+        # que la expansion anexe mas; con un tope de seguridad: si no llega
+        # nada en ~30s (expansion lenta o fallo silencioso), la reproduccion
+        # sigue con lo que hay (la playlist quedo en eso).
+        _expand_esperas = 0
+        while (
+            self._expanding_playlist
+            and self.queue._items
+            and self.queue._cursor == len(self.queue._items) - 1
+            and _expand_esperas < 30
+        ):
+            _expand_esperas += 1
+            try:
+                await asyncio.sleep(1.0)
+            except asyncio.CancelledError:
+                raise
         peeked = self.queue.peek(0)
         if peeked is not None:
             return peeked, True, False
@@ -1093,19 +1156,19 @@ class YTRemoteBot:
 
         Args:
             por_error: si es True, el motivo fue un fallo de red y se sugiere
-                usar /lista en vez de asumir que se acabo el catalogo.
+                usar el boton 📋 en vez de asumir que se acabo el catalogo.
         """
         ancla = self._radio_artist
         if ancla:
             if por_error:
                 return (
                     f"No pude buscar la siguiente cancion de {ancla} "
-                    f"(error de red). Usa /lista para elegir otro tema."
+                    f"(error de red). Usa el boton 📋 de la tarjeta para elegir otro tema."
                 )
-            return f"Se acabo la radio de {ancla}: no hay mas canciones de este artista en YouTube. Usa /lista para elegir otro tema."
+            return f"Se acabo la radio de {ancla}: no hay mas canciones de este artista en YouTube. Usa el boton 📋 de la tarjeta para elegir otro tema."
         if por_error:
-            return "No pude buscar la siguiente cancion (error de red). Usa /lista para elegir otro tema."
-        return "No encontre otra cancion para la radio. Usa /lista para elegir."
+            return "No pude buscar la siguiente cancion (error de red). Usa el boton 📋 de la tarjeta para elegir otro tema."
+        return "No encontre otra cancion para la radio. Usa el boton 📋 de la tarjeta."
 
     def _schedule_prefetch(self, current: QueueItem) -> None:
         """Anticipa el siguiente track (el mesonero no espera).
@@ -1309,30 +1372,32 @@ class YTRemoteBot:
             # que se borra al terminar (exito o fallo) para no ensuciar.
             pending_id = None
             if await self._card_exists_in(chat_id):
-                await self._render_card("⏳ Expandiendo playlist…")
+                await self._render_card("⏳ Arrancando playlist…")
             else:
                 try:
                     pending = await context.bot.send_message(
-                        chat_id, "⏳ Expandiendo playlist/mix, un momento..."
+                        chat_id, "⏳ Arrancando playlist, un momento..."
                     )
                     pending_id = pending.message_id
                 except Exception:
                     pending_id = None
             try:
                 try:
-                    tracks = await asyncio.wait_for(
-                        asyncio.to_thread(expand_playlist, query, 50),
-                        timeout=_RESOLVE_TIMEOUT,
+                    first_tracks, total = await asyncio.wait_for(
+                        asyncio.to_thread(quick_playlist, query, _QUICK_TRACKS),
+                        timeout=_QUICK_TIMEOUT,
                     )
                 except asyncio.TimeoutError:
                     logger.warning(
-                        "Expansion de playlist agotada (%ss): %s", _RESOLVE_TIMEOUT, query
+                        "Arranque de playlist agotado (%ss): %s", _QUICK_TIMEOUT, query
                     )
-                    tracks = []
+                    first_tracks, total = [], 0
             except Exception as exc:  # noqa: BLE001
-                logger.warning("Error expandiendo playlist: %s", exc)
-                tracks = []
-            if not tracks:
+                logger.warning("Error arrancando playlist: %s", exc)
+                first_tracks, total = [], 0
+            if not first_tracks:
+                # Sin arranque rapido no hay playlist: no molestar al usuario
+                # con datos parciales, se avisa el fallo como antes.
                 if pending_id is not None:
                     try:
                         await context.bot.delete_message(chat_id, pending_id)
@@ -1355,18 +1420,21 @@ class YTRemoteBot:
                     thumbnail=t.thumbnail,
                     channel=t.channel,
                 )
-                for t in tracks
+                for t in first_tracks
             ]
             self.queue.set_playlist(items)
             self._persist_dirty()
             first = items[0]
             self._radio_artist = first.channel or ""
+            # El resto de la lista (hasta el techo tecnico) se trae en segundo
+            # plano: el usuario ya escucha el primer track mientras carga.
+            self._start_playlist_expansion(query, total)
             started = await self._play_item(update, first, preserve_current=True)
             if started:
                 await self._reply(
                     update,
-                    f"▶️ Playlist ({len(tracks)}): {first.title}\n"
-                    f"Bucle activo: suena en orden y se repite; /lista para verla.",
+                    f"▶️ Playlist ({len(items)}/{total or '…'}): {first.title}\n"
+                    f"Tocando YA; el resto se carga en segundo plano (boton 📋 para verla).",
                 )
             return
 
@@ -1377,6 +1445,116 @@ class YTRemoteBot:
         started = await self._play_item(update, item)
         if not started:
             return
+
+    def _start_playlist_expansion(self, url: str, total: int) -> None:
+        """Lanza la expansion de fondo de una playlist.
+
+        Si ya hay una expansion activa de OTRA playlist, se cancela: el
+        anexo de la lista vieja al final de la nueva ensuciaria la cola.
+        """
+        if self._expanding_playlist and self._expanding_playlist_url != url:
+            self._cancel_playlist_expansion()
+        self._expanding_playlist_url = url
+        self._expanding_total = total
+        if self._expanding_playlist:
+            return
+        self._expanding_playlist = True
+        self._expand_task = asyncio.create_task(self._expand_playlist_background(url))
+
+    def _cancel_playlist_expansion(self) -> None:
+        """Cancela la expansion en curso (si existe): se usa al arrancar
+        otra playlist para que la lista vieja no se anexe a la nueva."""
+        if self._expand_task is not None:
+            try:
+                self._expand_task.cancel()
+            except Exception:  # noqa: BLE001
+                pass
+            self._expand_task = None
+        self._expanding_playlist = False
+        self._expanding_playlist_url = None
+        self._expanding_total = 0
+
+    async def _expand_playlist_background(self, url: str) -> None:
+        """Trae el resto de la playlist por detras y lo anexa a la cola.
+
+        Corre como tarea aparte (asyncio) tras el arranque al toque: no
+        congela los botones ni la resolucion de streams.
+        """
+        try:
+            extra = await asyncio.wait_for(
+                asyncio.to_thread(expand_playlist, url, _MAX_PLAYLIST),
+                timeout=_EXPAND_TIMEOUT,
+            )
+        except asyncio.TimeoutError:
+            logger.warning(
+                "Expansion de playlist agotada (%ss): %s", _EXPAND_TIMEOUT, url
+            )
+            extra = []
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Error expandiendo playlist en segundo plano: %s", exc)
+            extra = []
+        finally:
+            self._expand_task = None
+
+        # Al terminar, la expansion SOLO se deja ver si sigue siendo la misma
+        # (misma URL): si el usuario arranco otra playlist (o la cancelo / no
+        # trajo nada), la tarea vieja es de datos caducos y no debe tocar la
+        # cola nueva. Sea el camino que sea, siempre se cierran los flags.
+        vigente = self._expanding_playlist and self._expanding_playlist_url == url
+        self._expanding_playlist = False
+        self._expanding_playlist_url = None
+        self._expanding_total = 0
+        if not vigente:
+            return
+        if not extra:
+            return
+
+        # Anexar SOLO lo que no tenemos ya (el quick-load cargo las primeras
+        # N y la expansion completa vuelve a incluir las mismas, no duplicar).
+        existentes: set[str] = {i.url for i in self.queue._items}
+        nuevos = []
+        for t in extra:
+            if t.url in existentes:
+                continue
+            nuevos.append(
+                QueueItem(
+                    url=t.url,
+                    title=t.title,
+                    duration_seconds=t.duration_seconds,
+                    thumbnail=t.thumbnail,
+                    channel=t.channel,
+                )
+            )
+        if not self.queue.has_playlist:
+            # El usuario ya cambio de cola mientras expandiamos: descartar
+            # sin tocar la nueva (nunca pisar una lista que el usuario eligio
+            # despues).
+            self._expanding_playlist = False
+            self._expanding_playlist_url = None
+            self._expanding_total = 0
+            return
+        for item in nuevos:
+            self.queue.add(item)
+        if nuevos:
+            self._persist_dirty()
+            logger.info(
+                "Playlist expandida en segundo plano: +%d temas (total %d)",
+                len(nuevos), len(self.queue._items),
+            )
+            # Aviso efimero en la card (si existe): la playlist quedo completa
+            # y el 📋 ya muestra todos los temas.
+            if self._card_chat_id is not None:
+                total_actual = len(self.queue._items)
+                try:
+                    await self._render_card(
+                        f"✅ Playlist cargada: {total_actual} temas.",
+                        self._card_chat_id,
+                    )
+                except Exception:  # noqa: BLE001 - puramente informativo
+                    pass
+        self._expanding_playlist = False
+        self._expanding_playlist_url = None
+        self._expanding_total = 0
 
     async def _run_search(
         self, update: Update, context: ContextTypes.DEFAULT_TYPE, query: str
@@ -1482,6 +1660,10 @@ class YTRemoteBot:
         if query.data and query.data.startswith("cl:calidad:"):
             # Selector de calidad de la tarjeta (cl:calidad:N / cl:calidad:cerrar).
             await self._on_quality_callback(update, context)
+            return
+        if query.data and query.data.startswith("lst:"):
+            # Botones del mensaje de la lista (temas, paginacion, cerrar).
+            await self._on_list_callback(update, context)
             return
         await query.answer()
         if not query.data or not query.data.startswith("pick:"):
@@ -1660,7 +1842,14 @@ class YTRemoteBot:
         if self.queue.current is None:
             return
         if not self.player.is_running:
-            await self._play_item(update, self.queue.current)
+            # Con playlist activa, reanudar NO debe descartar la cola: el item
+            # actual ya esta posicionado (items[cursor]). Sin playlist (radio /
+            # cancion suelta) sigue el camino de set_current de siempre.
+            await self._play_item(
+                update,
+                self.queue.current,
+                preserve_current=self.queue.has_playlist,
+            )
             return
         if self._paused:
             await self.player.play()
@@ -1739,12 +1928,12 @@ class YTRemoteBot:
                     await query.answer(f"Volumen: {self._volume}%")
                     reflect_status = False
                 elif action == "lista":
-                    # El boton 📋 muestra la lista encima de la tarjeta: se
-                    # edita el mismo mensaje, ahora con el listado (los botones
-                    # de control siguen pegados abajo).
-                    text = self._queue_list_text() or "La lista esta vacia."
-                    await self._render_card(text, chat_id)
-                    reflect_status = False  # no pisa la lista recien mostrada
+                    # El boton 📋 abre la lista como MENSAJE aparte en el
+                    # chat: la card NO se pisa (queda con su estado intacto).
+                    if chat_id is None:
+                        return
+                    await self._open_queue_list(query, user_id, chat_id)
+                    reflect_status = False  # la card no se re-renderiza
                 elif action == "calidad":
                     # Solo admin puede abrir el selector de calidad.
                     if user_id is None or not self.roles.has_role(user_id, "admin"):
@@ -2241,58 +2430,216 @@ class YTRemoteBot:
         self._persist_dirty()
         await self._reply(update, f"🔊 Volumen: {vol}")
 
-    async def cmd_queue(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-        n = None
-        if context.args:
+    def _queue_list_text(self, page: int = 0) -> str | None:
+        """Encabezado del mensaje de la lista (None si esta vacia).
+
+        Muestra pagina actual y total: "Lista (pag 2/3):", o "Lista:" si hay
+        una sola pagina. Es el UNICO texto del mensaje: el listado en si son
+        los BOTONES paginados (decision 7b: la lista se muestra una sola vez,
+        sin texto plano duplicado).
+        """
+        items = self.queue.all()
+        cur = self.queue.current
+        if not items:
+            if cur is None:
+                return None
+            return "Lista:"
+        pages = max(1, (len(items) + _LIST_PAGE_SIZE - 1) // _LIST_PAGE_SIZE)
+        if pages <= 1:
+            return "Lista:"
+        page = max(0, min(page, pages - 1))
+        return f"Lista (pag {page + 1}/{pages}):"
+
+    def _list_keyboard(self) -> InlineKeyboardMarkup:
+        """Teclado del mensaje de la lista: pagina de 10 temas (solo si el
+        mensaje lo abrió un admin/dj) + navegacion con el boton ❌ siempre
+        presente.
+
+        Cada boton es el tema con su posicion global y el titulo COMPLETO
+        (sin truncar); el actual arranca con "▶️ ". El flag fijo
+        `_list_can_select` decide si hay botones de tema: al paginar no
+        cambia aunque lo pages un user. La fila de navegacion mantiene 3
+        slots para que el ❌ quede centrado; el slot vacio usa "·" (callback
+        inerte `lst:noop`).
+        """
+        items = self.queue.all()
+        current = self.queue.current
+        pages = max(1, (len(items) + _LIST_PAGE_SIZE - 1) // _LIST_PAGE_SIZE)
+        page = max(0, min(self._list_page, pages - 1))
+        start = page * _LIST_PAGE_SIZE
+
+        rows: list[list[InlineKeyboardButton]] = []
+        if self._list_can_select:
+            segment = items[start : start + _LIST_PAGE_SIZE]
+            for idx, it in enumerate(segment, start=start + 1):
+                label = it.title.strip()
+                rows.append(
+                    [
+                        InlineKeyboardButton(
+                            f"{'▶️ ' if it is current else ''}{idx}. {label}",
+                            callback_data=f"lst:{idx}",
+                        )
+                    ]
+                )
+
+        prev = (
+            InlineKeyboardButton("◀", callback_data="lst:prev")
+            if pages > 1 and page > 0
+            else InlineKeyboardButton("·", callback_data="lst:noop")
+        )
+        close = InlineKeyboardButton("❌", callback_data="lst:close")
+        next_ = (
+            InlineKeyboardButton("▶", callback_data="lst:next")
+            if pages > 1 and page < pages - 1
+            else InlineKeyboardButton("·", callback_data="lst:noop")
+        )
+        rows.append([prev, close, next_])
+        return InlineKeyboardMarkup(rows)
+
+    async def _close_list_message(self) -> None:
+        """Borra el mensaje de la lista abierto (con su desvanecimiento) y
+        limpia las referencias. Tolera que el mensaje ya no exista.
+
+        La pagina del listado NO se resetea: queda persistida para que una
+        reapertura (o un reinicio) continuen donde iba el usuario.
+        """
+        chat = self._list_chat_id
+        msg = self._list_message_id
+        self._list_chat_id = None
+        self._list_message_id = None
+        self._list_can_select = False
+        if msg is not None and chat is not None:
             try:
-                n = int(context.args[0])
-            except ValueError:
-                n = None
+                await self._app.bot.delete_message(chat, msg)
+            except Exception as exc:  # noqa: BLE001 - no romper el flujo
+                logger.warning("No se pudo borrar el mensaje de la lista: %s", exc)
 
-        # Reproducir el tema de la posición elegida (/lista N). La lista es
-        # fija y queda intacta: jump_to solo mueve el cursor (bucle).
-        if n is not None:
-            cur = self.queue.current
-            item = self.queue.jump_to(n)
-            if item is None:
-                await self._reply(update, "Numero fuera de rango. /lista para ver la lista.")
-                return
-            if item is cur:
-                await self._reply(update, f"Ya esta sonando: {item.title}")
-                return
-            started = await self._play_item(update, item, preserve_current=True)
-            if started:
-                await self._reply(update, f"▶️ Reproduciendo: {item.title}")
-            return
+    async def _open_queue_list(
+        self, query, user_id: int | None, chat_id: int
+    ) -> None:
+        """Boton 📋 de la card: abre la lista como MENSAJE aparte.
 
-        # Lista visible: la playlist completa SIEMPRE con el actual marcado
-        # [▶️] en su posición (los 25 temas se ven siempre, no se consumen).
-        # La lista la renderiza un helper reutilizado por el boton 📋 de la
-        # tarjeta persistente, para que ambos muestren el mismo formato.
+        La card nunca se pisa: se envia un mensaje nuevo en el chat con la
+        pagina ACTUAL (texto + botones paginados al unisono; el render clampa
+        la pagina al rango valido). Si ya habia una lista abierta, se borra la
+        anterior (con su desvanecimiento) y se manda una fresca (decision del
+        usuario: nunca editar una lista existente). Cola vacia: solo responde
+        el toast, no envia nada.
+        """
         text = self._queue_list_text()
         if text is None:
-            await self._reply(update, "La lista esta vacia.")
+            try:
+                await query.answer("La lista esta vacia.")
+            except Exception:  # noqa: BLE001
+                pass
             return
-        await self._reply(update, text)
+        await self._close_list_message()
+        self._list_can_select = user_id is not None and self.roles.has_role(user_id, "dj")
+        try:
+            msg = await self._app.bot.send_message(
+                chat_id, text, reply_markup=self._list_keyboard()
+            )
+        except Exception as exc:  # noqa: BLE001 - no romper la card
+            logger.warning("No se pudo enviar el mensaje de la lista: %s", exc)
+            return
+        self._list_chat_id = chat_id
+        self._list_message_id = msg.message_id
 
-    def _queue_list_text(self) -> str | None:
-        """Texto de la lista actual (None si esta vacia).
+    async def _edit_list_message(self) -> None:
+        """Pagina el mensaje de la lista abierto (◀ ▶): edita TEXTO + botones
+        de la pagina nueva (la misma pagina en ambos, se sincronizan). El
+        mensaje no se recrea; el flag de seleccion no cambia con la pagina."""
+        if self._list_chat_id is None or self._list_message_id is None:
+            return
+        text = self._queue_list_text(self._list_page)
+        if text is None:
+            return
+        try:
+            await self._app.bot.edit_message_text(
+                text,
+                chat_id=self._list_chat_id,
+                message_id=self._list_message_id,
+                reply_markup=self._list_keyboard(),
+            )
+        except Exception as exc:  # noqa: BLE001 - no romper el flujo
+            logger.warning("No se pudo paginar la lista: %s", exc)
 
-        Compartido entre /lista y el boton 📋 de la tarjeta persistente.
+    async def _list_answer(
+        self, query, text: str | None = None, show_alert: bool = False
+    ) -> None:
+        """Responde un callback de la lista; el toast es prescindible, si
+        falla la API se ignora."""
+        try:
+            await query.answer(text=text, show_alert=show_alert)
+        except Exception:  # noqa: BLE001
+            pass
+
+    async def _on_list_callback(
+        self, update: Update, context: ContextTypes.DEFAULT_TYPE
+    ) -> None:
+        """Botones del mensaje de la lista (callback `lst:*`).
+
+        - `lst:close`: CUALQUIER usuario cierra: borra el mensaje de la lista
+          (con su desvanecimiento).
+        - `lst:prev`/`lst:next`: cualquiera pagina (se edita TEXTO + botones
+          del mensaje abierto; ambos muestran la misma pagina).
+        - `lst:N`: solo admin/dj (alerta si no): salta a la cancion N de la
+          cola y la reproduce de inmediato; la lista se borra al salir.
+        - `lst:noop`: placeholder inerte, se responde mudo.
+
+        Cada callback se responde UNA sola vez (un answer por query).
         """
-        cur = self.queue.current
-        items = self.queue.all()
-        if cur is None and not items:
-            return None
-        lines = []
-        if items:
-            for i, it in enumerate(items, start=1):
-                mark = " [▶️]" if it is cur else ""
-                lines.append(f"{i}.{mark} {it.title}")
-        else:
-            if cur is not None:
-                lines.append(f"1. [▶️] {cur.title}")
-        return "Lista:\n" + "\n".join(lines)
+        query = update.callback_query
+        data = query.data or ""
+        action = data.split(":", 1)[1] if data.startswith("lst:") else ""
+        user_id = query.from_user.id if query.from_user else None
+
+        if action in ("", "noop"):
+            await self._list_answer(query)
+            return
+
+        if action in ("prev", "next"):
+            self._list_page += -1 if action == "prev" else 1
+            await self._edit_list_message()
+            await self._list_answer(query)
+            return
+
+        if action == "close":
+            await self._list_answer(query)
+            await self._close_list_message()
+            return
+
+        try:
+            position = int(action)
+        except ValueError:
+            await self._list_answer(query)
+            return
+
+        if user_id is None or not self.roles.has_role(user_id, "dj"):
+            await self._list_answer(
+                query, "Solo el admin o un dj pueden elegir.", show_alert=True
+            )
+            return
+
+        async with self._control_lock:
+            self._from_card = True
+            try:
+                current = self.queue.current
+                item = self.queue.jump_to(position)
+                if item is None:
+                    await self._list_answer(query, "Numero fuera de rango.")
+                    return
+                if item is current:
+                    # Elegir el tema que YA suena: no salta, no cierra la lista.
+                    # Se compara contra el actual ANTES del jump (jump_to ya
+                    # movio el cursor y la posicion 1 es el item actual).
+                    await self._list_answer(query, f"Ya esta sonando: {item.title}")
+                    return
+                await self._list_answer(query)
+                await self._close_list_message()
+                await self._play_item(update, item, preserve_current=True)
+            finally:
+                self._from_card = False
 
     async def cmd_now(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         cur = self.queue.current
