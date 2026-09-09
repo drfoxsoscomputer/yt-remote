@@ -83,6 +83,10 @@ class YTRemoteBot:
         self._net_offline: bool = False
         # cache: callback_data -> SearchResult para los botones de busqueda
         self._search_cache: dict[str, SearchResult] = {}
+        # True mientras el listado de resultados de /buscar sigue en pantalla.
+        # En ese lapso la card NO se reposiciona: queda arriba del listado.
+        # Se limpia al elegir, al cancelar o ante un /buscar o /play nuevo.
+        self._search_list_pending: bool = False
         # Candado anti-colision de botones: una sola accion de control a la
         # vez. Si ya hay una en curso (p.ej. resolviendo el stream de un
         # salto), los toques extra se descartan al instante en vez de
@@ -575,6 +579,10 @@ class YTRemoteBot:
         desvanecimiento y se re-envia al final: los mensajes quedan arriba y
         la tarjeta pasa a ser la ultima visualizacion. Si el handler creo la
         tarjeta desde cero (no existia), no se reposiciona (ya quedo de ultima).
+
+        Excepcion: mientras el listado de resultados de /buscar sigue en
+        pantalla (_search_list_pending), NO se reposiciona: la card queda
+        donde esta, arriba del listado, y elegir/cancelar la gestiona el pick.
         """
 
         async def wrapper(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -582,6 +590,9 @@ class YTRemoteBot:
             existia = await self._card_exists_in(chat_id)
             await handler(update, context)
             if existia and await self._card_exists_in(chat_id):
+                if self._search_list_pending:
+                    # Listado de /buscar visible: la card no se mueve.
+                    return
                 await self._reposition_card(chat_id)  # type: ignore[arg-type]
 
         wrapper.__name__ = getattr(handler, "__name__", "wrapper")
@@ -1336,6 +1347,9 @@ class YTRemoteBot:
                 "Tambien puedes pegar un link de YouTube.",
             )
             return
+        # Todo /buscar o /play nuevo reemplaza al intento anterior: la card
+        # vuelve a poder reposicionarse (un listado nuevo re-setea el flag).
+        self._search_list_pending = False
         if is_youtube_link(query):
             await self._play_link_or_playlist(update, context, query)
             return
@@ -1614,12 +1628,19 @@ class YTRemoteBot:
         # URLs de los resultados que van a anticiparse abajo.
         self._clear_stream_cache()
         self._search_cache.clear()
+        # Mientras el listado esta en pantalla la card NO se reposiciona: la
+        # proxima edicion del wrapper se salta para dejar la card arriba, al
+        # alcance del ojo, con los resultados debajo. Se limpia en el pick.
+        self._search_list_pending = True
         keyboard = []
         for i, r in enumerate(results):
             cb = f"pick:{i}"
             self._search_cache[cb] = r
             label = f"{i+1}. {r.title} ({r.duration})"
             keyboard.append([InlineKeyboardButton(label, callback_data=cb)])
+        # Boton de salida: si el listado no se elige, cancelar lo borra (con
+        # su desvanecimiento) y la card que estaba arriba queda visible.
+        keyboard.append([InlineKeyboardButton("❌ Cancelar", callback_data="pick:cancel")])
 
         # El mesonero: se anticipan los streams de los resultados en la cola
         # de resolucion serial, para que elegir uno suene casi al instante.
@@ -1665,6 +1686,18 @@ class YTRemoteBot:
             # Botones del mensaje de la lista (temas, paginacion, cerrar).
             await self._on_list_callback(update, context)
             return
+        if query.data == "pick:cancel":
+            # Cancelar el listado de /buscar: se borra (con su desvanecimiento)
+            # sin reproducir nada y sin mover la card. El listado queda limpio
+            # y el cache se descarta; la card que estaba arriba queda visible.
+            self._search_list_pending = False
+            self._search_cache.clear()
+            await query.answer("Busqueda cancelada.")
+            try:
+                await query.message.delete()
+            except Exception as exc:  # noqa: BLE001 - no romper el flujo
+                logger.warning("No se pudo borrar el listado al cancelar: %s", exc)
+            return
         await query.answer()
         if not query.data or not query.data.startswith("pick:"):
             return
@@ -1672,6 +1705,9 @@ class YTRemoteBot:
         if result is None:
             await query.edit_message_text("Esa busqueda ya expiro, busca de nuevo.")
             return
+
+        # El usuario eligio un resultado: el listado deja de estar en pantalla.
+        self._search_list_pending = False
 
         # Confirmar la eleccion: la tarjeta persistente (mini reproductor con
         # miniatura + estado + botones) ES la unica confirmacion; _play_item

@@ -40,10 +40,10 @@ completa). El 📋 muestra la lista completa mientras se va expandiendo, y la
 posición se **guarda**: al reiniciar, retoma la misma canción y la misma página
 del 📋 donde iba.
 
-Los videos **en vivo** se reproducen con su audio normal: el HLS del directo
-se resuelve como video y audio separados (YouTube no entrega directos en un
-solo stream combinado) y ambos se pasan a mpv. Las duraciones
-desconocidas aparecen como `--:--`.
+Los videos **en vivo** se reproducen con su audio normal y **sincronizado**:
+el HLS del directo se resuelve como video y audio separados (YouTube no
+entrega directos en un solo stream combinado), se unen en un único playlist
+y mpv los sincroniza. Las duraciones desconocidas aparecen como `--:--`.
 
 ## Tarjeta de reproducción
 
@@ -65,6 +65,12 @@ termina. Use `/buscar` con otro nombre para cambiar de cantante.
 La tarjeta queda siempre como el último mensaje del chat: cuando usted escribe
 un comando o un mensaje, la tarjeta se desvanece y reaparece abajo, al final
 de la conversación.
+
+Cuando `/buscar` muestra los resultados, la tarjeta **no se mueve**: queda arriba
+y el listado de 5 canciones aparece debajo. Si no le gusta ninguna, toque
+**❌ Cancelar** al final de la lista y esta se desvanecerá, quedando de nuevo la
+tarjeta a la vista. Al elegir una canción, la lista se borra y se muestra la
+tarjeta nueva con su miniatura.
 
 ## Calidad de video
 
