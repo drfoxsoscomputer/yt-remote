@@ -556,7 +556,8 @@ class YTRemoteBot:
 
         async def wrapper(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             if not self._chat_allowed(update):
-                logger.info("Rechazado mensaje de chat no permitido.")
+                chat_id = update.effective_chat.id if update.effective_chat else None
+                logger.info("Rechazado mensaje de chat no permitido (chat_id=%s).", chat_id)
                 return
             await handler(update, context)
 
@@ -2287,7 +2288,7 @@ class YTRemoteBot:
                     await self._notify_admin(f"Fallo al re-resolver {candidate.title}: {exc}")
                     return
                 stream_url, audio_url = resolved
-        # Audio arrancando: recien aca se commitea el nuevo tema en la cola.
+        # Audio arrancando: recien aqui se commitea el nuevo tema en la cola.
         self.queue._current = candidate
         self.queue._items = []
         self.queue._cursor = 0
