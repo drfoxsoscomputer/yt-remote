@@ -92,6 +92,13 @@ La calidad es un **tope máximo**: si un video no tiene la resolución elegida,
 usa la mayor que no la supere (1080 es el máximo soportado). El cambio queda
 **guardado** en la PC (estado del bot) y sobrevive a reinicios.
 
+El botón `👥 Usuarios` de la tarjeta abre la gestión de roles. Todos lo ven,
+pero solo un **admin** puede tocarlo: la lista de usuarios llega a su **chat
+privado** (en el grupo no aparece nada). Tocar un usuario alterna su rol entre
+`user` y `dj` (se ve en vivo en la botonera); el botón `❌` aplica todos los
+cambios y avisa a cada usuario de su rol nuevo. El rol `admin` no se cambia
+desde la lista.
+
 ## Comandos
 
 | Comando | Rol | Descripción |
@@ -99,26 +106,28 @@ usa la mayor que no la supere (1080 es el máximo soportado). El cambio queda
 | `/buscar <artista> - <canción>` | dj, admin | Busca y reproduce del artista indicado |
 | `/buscar <artista>` | dj, admin | Busca un artista (sin canción específica) |
 | `/buscar <link>` | dj, admin | Reproduce un link de YouTube directo |
-| `/adduser <id> <rol>` | admin | Dar acceso (dj, admin) |
-| `/removeuser <id>` | admin | Quitar acceso |
 | `/solicitar` | user | Solicitar acceso de dj al admin |
+| `/reglas` | admin | Re-envía y fija (pin) el mensaje de reglas del grupo |
 
 **Todos los roles** pueden tocar el botón 📋 (ver lista). Los demás
-botones de la tarjeta (▶ ⏮ ⏭ ⏹ 🔊) son solo para dj y admin; el botón
-⚙️ Calidad es exclusivo de **admin**.
+botones de la tarjeta (▶ ⏮ ⏭ ⏹ 🔊) son solo para dj y admin; los botones
+⚙️ Calidad y 👥 Usuarios son exclusivos de **admin**.
 
 ## Roles
 
 | Rol | Qué puede hacer |
 |-----|----------------|
-| admin | Todo + dar/quitar acceso a otros |
+| admin | Todo + gestionar usuarios (botón 👥) y calidad (botón ⚙️) |
 | dj | Buscar, controlar reproducción (tarjeta y comandos) |
 | user | Solo ver la lista con el botón 📋 (sin elegir temas) |
 
-Por defecto solo el dueño es admin. Use `/adduser` con el ID de
-Telegram de la otra persona para darle acceso dj o admin.
+Por defecto solo el dueño es admin. Para dar acceso a otra persona, use el
+botón `👥 Usuarios` de la tarjeta: la lista llega a su chat privado y basta
+tocar al usuario para alternarlo entre dj y user.
 
-Un user puede escribir `/solicitar` para pedir acceso de dj al admin.
+Un user puede escribir `/solicitar` para pedir acceso de dj al admin: al
+admin le llega un aviso por privado con la indicación de abrir la lista con
+el botón 👥.
 
 ## Variables de entorno
 
@@ -161,3 +170,11 @@ Edite `config.json` para ajustar:
 - `mpv_path` — ruta al ejecutable de mpv
 - `default_role` — rol por defecto para usuarios nuevos
 - `max_results` — cantidad de resultados al buscar (por defecto 5)
+- `kick_after_hours` — horas de tolerancia para invitados (rol `user`). Con un
+  valor mayor a 0, el bot fija el mensaje de reglas al iniciar y **retira del
+  grupo** (kick, puede volver con el enlace de invitación) a todo usuario que
+  supere ese plazo sin rol dj/admin. En `0` (por defecto) la auto-expulsión
+  está **desactivada**. Requiere que el bot sea admin del grupo.
+  Al unirse, el invitado recibe una bienvenida con el plazo si está activo;
+  y al cambiarle el rol, se le avisa por privado (o en el grupo si nunca
+  habló con el bot).

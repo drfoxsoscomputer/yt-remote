@@ -23,10 +23,18 @@ botones, radio automatica por artista, roles (admin/dj/user).
 ## Estructura
 - `src/main.py` — entrada; sys.path al parent y run_polling.
 - `src/bot.py` — YTRemoteBot: comandos `/buscar` (dj+), `/now`,
-   `/pause`, `/resume`, `/next`, `/prev`, `/stop`, `/volume`, `/adduser`,
-   `/removeuser`, `/solicitar`; wrapper `_require(rol)`; tarjeta persistente
-   con botones; mensaje de lista (boton 📋) con paginacion y callbacks `lst:`;
-   callbacks con thumbnails y `_search_cache`.
+   `/pause`, `/resume`, `/next`, `/prev`, `/stop`, `/volume`, `/solicitar`,
+   `/reglas`; wrapper `_require(rol)`; tarjeta persistente
+   con botones (fila 3: ⚙️ Calidad + 👥 Usuarios, ambos solo admin); editor
+   de usuarios en el chat privado del admin (callbacks `mem:*`, staging en
+   vivo, commit con ❌); bienvenida a nuevos miembros (new_chat_members);
+   auto-expulsión de invitados (job `_auto_kick_job`, kick ban+unban); reglas
+   fijadas automáticas (`_ensure_pinned_rules`); mensaje de lista (boton 📋)
+   con paginacion y callbacks `lst:`; callbacks con thumbnails y
+   `_search_cache`.
+- `src/roles.py` — RoleManager: esquema `{"roles": {...}, "users": {id:
+   {"name", "joined_at"}}}`; registro de usuarios conocidos y migración
+   retrocompatible del formato viejo `{id: rol}`.
 - `src/search.py` — `is_youtube_link()` + `search()` via yt-dlp; `SearchResult`.
 - `src/player.py` — clase Player, IPC de mpv por named pipe
    `\\.\pipe\mpv-ytremote`. Usa `--idle=yes` para mantener el pipe vivo.
@@ -34,12 +42,12 @@ botones, radio automatica por artista, roles (admin/dj/user).
    anti-ping-pong maxlen 500).
 - `src/config.py` — `load_config()`; lee token PRIMERO de `.env`, fallback
    `config.json`; resuelve `mpv_path` relativo al PROJECT_ROOT; error claro
-   si falta token; lee `OWNER_ID` y `ALLOWED_CHAT_ID`.
+   si falta token; lee `OWNER_ID` y `ALLOWED_CHAT_ID`; `kick_after_hours`.
 - `src/setup_cli.py` — utilidades para `ytremote.bat`: `is_configured()`,
    `write_env()`, `set/get_allowed_chat_id()`, y el comando `launch` (wizard
    interactivo + arranque del bot).
-- `config.json` — NO sensibles: `mpv_path`, `default_role`, `max_results`;
-   token placeholder.
+- `config.json` — NO sensibles: `mpv_path`, `default_role`, `max_results`,
+   `kick_after_hours` (0 = auto-expulsión off); token placeholder.
 - `.env` — TOKEN REAL + `OWNER_ID` + `ALLOWED_CHAT_ID` (ignorado por git).
 - `.env.example` — plantilla segura de configuracion (versionada).
 - `ytremote.bat` — lanzador minimo ASCII estilo Albion (4 lineas, sin BOM/
@@ -56,6 +64,28 @@ botones, radio automatica por artista, roles (admin/dj/user).
    en GitHub.
 
 ## Estado actual
+**Trabajo listo SIN publicar (2026-09-09): gestor de usuarios con botón 👥**
+Reemplaza el flujo `/adduser`/`/removeuser`: el botón `👥 Usuarios` de la
+tarjeta (fila 3, junto a ⚙️) envía la lista de usuarios al chat PRIVADO del
+admin; tocar un usuario alterna user↔dj en vivo y ❌ aplica los cambios y
+avisa a cada uno de su rol nuevo (DM con fallback al grupo). Quitados
+`/adduser` y `/removeuser` (ya no están en el menú ni en la ayuda);
+`/solicitar` solo para user y avisa al admin cómo abrir la 👥. `/start`
+responde por rol. Los usuarios conocidos se registran solos (se unen,
+escriben, tocan botones, /start) en `data/roles.json`, que migra el formato
+viejo. Auto-expulsión opcional de invitados (`kick_after_hours` en
+`config.json`, 0 = off): bienvenida con @mentión al unirse, fase de reglas
+fijadas automáticamente al arrancar (`/reglas` la re-fija a mano) y kick
+(ban+unban) pasado el plazo; admin/dj exentos; requiere bot admin del grupo.
+Los usuarios conocidos se registran solos en `data/roles.json` a su primer
+contacto.
+**123 tests verdes** (4 suites: card/roles/persistence/members). Los tests ya
+NO tocan el `data/roles.json` real: `test_card.py` redirige `roles.ROLES_PATH`
+a un archivo temporal a nivel de módulo (una prueba de la suite card había
+contaminado el real con IDs falsos que aparecieron en la lista del botón 👥;
+durante el re-test en vivo se borró el archivo y el bot lo recrea solo con el
+dueño como admin).
+
 **v0.4.0 publicado el 2026-09-09 en https://github.com/drfoxsoscomputer/yt-remote/releases/tag/v0.4.0**
 ZIP `yt-remote-v0.4.0-portable.zip`. Incluye todo lo de v0.3.1 mas: la ronda
 de calidad (boton ⚙️, tope 1080, card sin re-crear), la Ronda 8 (playlist al
@@ -373,6 +403,14 @@ Presentación ≠ estado de dominio. 1 test ajustado + 1 nuevo (si resolve falla
   retry de `send_photo`.
 
 ## Pendientes / ToDo
+- [ ] **Revalidar en vivo el gestor de usuarios** (2026-09-09): que el botón
+  👥 Usuarios envíe la lista al chat privado de un admin, alternar user↔dj en
+  vivo, ❌ aplicar con aviso de rol nuevo; que dj/user vean 👥 pero bloqueado;
+  que /reglas fije el mensaje; y si el usuario prende `kick_after_hours`, que
+  un invitado reciba la bienvenida con plazo y sea retirado pasado el tiempo.
+  Aprobación del usuario antes de commit/push.
+- [ ] **Release v0.5.0** (cuando apruebe lo anterior): bump minor, zip portable
+  nuevo, docs al día (ya están), commit + push autorizados por el usuario.
 - [x] **Push + release v0.4.0 (2026-09-09)**: main pusheado (`6b62d87..98f3c20`),
    tag `v0.4.0` creado, release publicado con `yt-remote-v0.4.0-portable.zip`
    (42.5 MB, 2299 archivos, sin `.env`). 112 tests verdes y revalidado en vivo.
@@ -460,6 +498,26 @@ Presentación ≠ estado de dominio. 1 test ajustado + 1 nuevo (si resolve falla
    botones de control, /buscar requiere dj, /solicitar llega al admin.
 
 ## Decisiones recientes
+- **Gestor de usuarios con botón 👥 (2026-09-09)**: la gestión de roles sale
+  del chat del grupo (no hay "mensaje solo para el admin" en Telegram): el
+  botón `👥 Usuarios` de la tarjeta envía la lista al chat PRIVADO del admin.
+  Tocar alterna user↔dj en vivo (staging) y ❌ aplica con aviso; el rol admin
+  no se toca desde la lista. Se quitaron `/adduser` y `/removeuser`.
+- **Auto-expulsión opcional de invitados (2026-09-09)**: `kick_after_hours`
+  nueva clave de config.json (0 = off). Con horas > 0 el bot fija las reglas
+  de bienvenida al arrancar, la bienvenida del grupo avisa el plazo y un job
+  aplica kick suave (ban+unban, puede volver por enlace) a roles user vencidos;
+  admin/dj exentos y los sin timestamp migrado quedan exentos.
+- **Aislamiento de roles en tests (2026-09-09)**: las suites habían empezado a
+  escribir en el `data/roles.json` real (el `__init__` registra al dueño y los
+  callbacks a los usuarios; una prueba de card además muta `b.roles` después de
+  construir). Fijado redirigiendo `roles.ROLES_PATH` a un temp a nivel de
+  módulo en `test_card.py` (efecto global en card/roles/members vía import).
+  Verificado: las 4 suites quedan verdes y el archivo real no se recrea.
+- **Bienvenida y notificaciones en español neutro (2026-09-09)**: los textos
+  de bienvenida, reglas, aviso de rol nuevo y /start por rol se escriben en
+  español neutro (tono Venezuela) por la regla de artefactos; corregidos los
+  borradores que tenían tono rioplatense.
 - **Idioma de artefactos (2026-09-09)**: todo artefacto escrito (commits,
   README, guias, comentarios de codigo, strings de UI) se redacta en espanol
   neutro con tono Venezuela: sin voseo, sin giros rioplatenses, sin modismos
@@ -491,6 +549,12 @@ Presentación ≠ estado de dominio. 1 test ajustado + 1 nuevo (si resolve falla
   semver, no el "build N" anterior.
 
 ## Tests / verificacion
+- Gestor de usuarios: botón 👥 solo admin, lista al privado, toggle en vivo,
+  commit ❌ con aviso por DM, protección de rol admin, guards del handler
+  `mem:*`, bienvenida (new_chat_members), reglas con/sin kick, fallback
+  DM→grupo y auto-expulsión (ban+unban) — `src/test_members.py` (11 tests).
+- 123 tests verdes en 4 suites: `test_card.py`, `test_roles.py`,
+  `test_persistence.py`, `test_members.py` (cada una con `python src\test_*.py`).
 - Player IPC: mpv arranca en idle, acepta set_volume/get_property, se cierra. Verificado.
 - Busqueda: yt-dlp devuelve resultados reales; `is_youtube_link()` correcto.
 - Config: token/OWNER_ID/ALLOWED_CHAT_ID desde `.env`; `.env` ignorado, `.env.example`

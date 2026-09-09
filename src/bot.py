@@ -9,6 +9,7 @@ from collections import deque
 import asyncio
 import logging
 import os
+import time
 
 from telegram import (
     BotCommand,
@@ -32,7 +33,7 @@ from config import Config
 from player import Player
 from persistence import StateStore
 from queue_manager import QueueItem, QueueManager
-from roles import VALID_ROLES, RoleManager
+from roles import RoleManager
 from search import SearchResult, is_playlist_url, expand_playlist, quick_playlist, is_youtube_link, search, resolve_stream_url, thumbnail_from_url, last_resolve_error, set_max_height
 import setup_cli as setup
 
@@ -61,6 +62,9 @@ QUALITY_LEVELS = (144, 240, 360, 480, 720, 1080)
 
 # Mensaje de lista (boton 📋): temas visibles por pagina.
 _LIST_PAGE_SIZE = 10
+
+# Editor de usuarios (boton 👥): usuarios conocidos visibles por pagina.
+_MEMBERS_PAGE_SIZE = 10
 
 
 class YTRemoteBot:
@@ -129,6 +133,14 @@ class YTRemoteBot:
         # (True si lo abrio un admin/dj). Fijo durante la vida del mensaje:
         # al paginar no cambia aunque lo pages un user.
         self._list_can_select: bool = False
+        # Editor de usuarios (boton 👥): la lista vive en el chat PRIVADO del
+        # admin. Los cambios quedan "staged" (sin persistir en roles.json)
+        # hasta el boton ❌ (commit); tocar un usuario dos veces lo revierte.
+        self._members_chat_id: int | None = None
+        self._members_message_id: int | None = None
+        self._members_user_id: int | None = None
+        self._members_page: int = 0
+        self._members_staged: dict[int, str] = {}
         # True mientras la expansion de fondo de una playlist esta activa y
         # False apenas termina. Sirve para no cerrar el listado con wrap
         # prematuro mientras la cola sigue creciendo. Tambien sujeta el total
@@ -309,16 +321,24 @@ class YTRemoteBot:
         app.add_handler(CommandHandler("solicitar", self._with_card_reposition(self._require_chat(self.cmd_solicitar))))
         app.add_handler(
             CommandHandler(
-                "adduser", self._with_card_reposition(self._require_chat(self._require("admin", self.cmd_adduser)))
+                "reglas",
+                self._with_card_reposition(self._require_chat(self._require("admin", self.cmd_reglas))),
             )
         )
-        app.add_handler(
-            CommandHandler(
-                "removeuser",
-                self._with_card_reposition(self._require_chat(self._require("admin", self.cmd_removeuser))),
-            )
-        )
+        # Editor de usuarios (boton 👥): los callbacks mem:* viven en el chat
+        # PRIVADO del admin. El handler corre con guard propio (ver
+        # _on_members_callback) y DEBE registrarse antes del callback generico
+        # para no ser tragado por el filtro de chat permitido del grupo.
+        app.add_handler(CallbackQueryHandler(self._on_members_callback, pattern="^mem:"))
         app.add_handler(CallbackQueryHandler(self._require_chat(self.on_callback)))
+        # Alguien se unio al grupo: queda registrado (timestamp del conteo 24h)
+        # y recibe la bienvenida que apunta a las reglas fijadas.
+        app.add_handler(
+            MessageHandler(
+                filters.StatusUpdate.NEW_CHAT_MEMBERS,
+                self._require_chat(self._on_new_members),
+            )
+        )
         # Cualquier mensaje de texto en el chat (alguien escribio algo) re-posiciona
         # la tarjeta como ultimo mensaje. Va despues de los comandos para no
         # interceptarlos; el handler no responde nada.
@@ -347,6 +367,9 @@ class YTRemoteBot:
             # Aviso de comandos perdidos: se lee el backlog ANTES de que el
             # polling lo consuma (post_init corre antes del start).
             await self._notify_pending_dropped(_app.bot)
+            # Reglas del grupo fijadas al arranque (si el kick esta activado):
+            # el mensaje de bienvenida apunta a ellas como referencia ↑.
+            await self._ensure_pinned_rules(_app.bot)
             # Menú de comandos: al escribir "/" Telegram muestra esta lista.
             bot = _app.bot
             try:
@@ -355,8 +378,6 @@ class YTRemoteBot:
                         BotCommand("start", "Info del bot"),
                         BotCommand("buscar", "Buscar artista o link para reproducir (dj+)"),
                         BotCommand("solicitar", "Pedir acceso de dj al admin"),
-                        BotCommand("adduser", "Dar acceso (admin)"),
-                        BotCommand("removeuser", "Quitar acceso (admin)"),
                     ]
                 )
             except Exception as exc:  # noqa: BLE001 - no debe tumbar el arranque
@@ -375,6 +396,9 @@ class YTRemoteBot:
             # Vigilante de conexion: detecta la caida de red del polling y,
             # al volver, descarta el backlog acumulado con aviso al usuario.
             app.job_queue.run_repeating(self._net_watch_job, interval=15, first=15)
+            # Auto-expulsion de invitados (config.kick_after_hours): revisa
+            # cada 5 minutos si algun usuario con rol 'user' supero el plazo.
+            app.job_queue.run_repeating(self._auto_kick_job, interval=300, first=60)
         # Errores de red del polling marcan el bot como offline.
         app.add_error_handler(self._on_bot_error)
         app.run_polling  # noqa: B018  (validar metodo disponible)
@@ -606,8 +630,160 @@ class YTRemoteBot:
         tarjeta como ultimo mensaje (se desvanece la vieja y aparece abajo).
         No responde nada: el bot solo mantiene la tarjeta a la vista."""
         chat_id = update.effective_chat.id if update.effective_chat else None
+        self._register_known_user(update.effective_user)
         if await self._card_exists_in(chat_id):
             await self._reposition_card(chat_id)  # type: ignore[arg-type]
+
+    def _register_known_user(self, user) -> None:
+        """Registra al autor de un update en el registro de usuarios conocidos
+        (si ya existe, solo refresca el nombre; nunca rearma su fecha)."""
+        if user is None or user.id is None:
+            return
+        name = (
+            getattr(user, "full_name", None)
+            or getattr(user, "first_name", None)
+            or getattr(user, "username", None)
+            or str(user.id)
+        )
+        self.roles.register_user(user.id, name)
+
+    async def _on_new_members(
+        self, update: Update, context: ContextTypes.DEFAULT_TYPE
+    ) -> None:
+        """Alguien se unio al grupo: registrado con su timestamp (origen del
+        conteo de las 24h) y recibe la bienvenida por el grupo. El propio bot
+        (cuando lo agregan) no genera bienvenida."""
+        message = update.message
+        if message is None or message.chat is None:
+            return
+        bot_id: int | None = None
+        try:
+            bot_id = context.bot.id
+        except Exception:  # noqa: BLE001 - el id es solo para auto-exclusion
+            bot_id = None
+        for member in message.new_chat_members or []:
+            if member.id == bot_id:
+                continue
+            self._register_known_user(member)
+            name = (
+                getattr(member, "full_name", None)
+                or getattr(member, "first_name", None)
+                or getattr(member, "username", None)
+                or str(member.id)
+            )
+            mention = f"@{member.username}" if getattr(member, "username", None) else name
+            text = (
+                f"👋 ¡Bienvenido {mention}!\n"
+                "Eres un usuario invitado. Las reglas del grupo están fijadas arriba ↑.\n"
+                "Para acceder a los controles del bot (ser DJ): escriba /solicitar "
+                "o pida al admin que lo habilite con el botón 👥 Usuarios de la tarjeta."
+            )
+            if (self.config.kick_after_hours or 0) > 0:
+                horas = int(self.config.kick_after_hours)
+                text += f"\nAcceso de invitado: {horas} h. Pasado el plazo se lo retira del grupo si no tiene rol dj/admin."
+            try:
+                await context.bot.send_message(message.chat.id, text)
+            except Exception as exc:  # noqa: BLE001 - no romper la entrada
+                logger.warning("No se pudo enviar la bienvenida: %s", exc)
+
+    def rules_text(self) -> str:
+        """Mensaje de reglas del grupo (se fija como referencia de bienvenida).
+
+        El plazo invitado aparece solo si la auto-expulsion esta activada
+        (kick_after_hours > 0 en config.json).
+        """
+        lines = [
+            "📌 YT-Remote — Reglas del grupo",
+            "🎧 Bot que reproduce música (YouTube) en la PC de casa.",
+            "",
+            "• Roles: user (espectador), dj (controla la reproducción), admin.",
+            "• Para ser DJ: escriba /solicitar o pida al admin que lo habilite con el botón 👥 Usuarios de la tarjeta.",
+        ]
+        horas = int(self.config.kick_after_hours or 0)
+        if horas > 0:
+            lines.append(
+                f"• Acceso de invitado: {horas} h. Pasado el plazo, si no tiene rol "
+                "dj/admin, se lo retira del grupo; puede volver con el enlace de invitación."
+            )
+        lines += [
+            "• /buscar es solo para dj+: elija un resultado y se reproduce.",
+            "• La tarjeta del reproductor la usan todos; ⚙️ Calidad y 👥 Usuarios son solo del admin.",
+            "• La canción en reproducción se ve en un mensaje aparte con 📋 (lista de la cola).",
+        ]
+        return "\n".join(lines)
+
+    async def _ensure_pinned_rules(self, bot) -> None:
+        """Fija las reglas del grupo si la auto-expulsion esta activa y el
+        mensaje fijado no es nuestro. No tumba el arranque si falla (el bot
+        necesita ser admin del grupo con permiso de fijar mensajes)."""
+        chat = self.config.allowed_chat_id
+        if chat is None or (self.config.kick_after_hours or 0) <= 0:
+            return
+        try:
+            info = await bot.get_chat(chat)
+            pinned = getattr(info, "pinned_message", None)
+            me = await bot.get_me()
+            if pinned is not None and getattr(pinned.from_user, "id", None) == me.id:
+                return
+            msg = await bot.send_message(chat, self.rules_text())
+            await bot.pin_chat_message(chat, msg.message_id)
+            logger.info("Reglas del grupo fijadas.")
+        except Exception as exc:  # noqa: BLE001 - no debe tumbar el arranque
+            logger.warning(
+                "No se pudo fijar las reglas: %s (¿el bot es admin del grupo?)", exc
+            )
+
+    async def cmd_reglas(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """Admin: envía y fija (pin) el mensaje de reglas del grupo."""
+        chat = update.effective_chat
+        chat_id = chat.id if chat else None
+        if chat_id is None:
+            return
+        try:
+            msg = await context.bot.send_message(chat_id, self.rules_text())
+            await context.bot.pin_chat_message(chat_id, msg.message_id)
+            await self._reply(update, "Reglas fijadas como mensaje del grupo.")
+        except Exception as exc:  # noqa: BLE001 - no romper el flujo
+            logger.warning("No se pudo fijar las reglas: %s", exc)
+            await self._reply(
+                update,
+                "No pude fijar las reglas. El bot debe ser admin del grupo con permiso de fijar mensajes.",
+            )
+
+    async def _dm_or_group(self, target_user_id: int, text: str) -> None:
+        """Envia un mensaje privado a un usuario; si falla (nunca inicio un
+        chat con el bot), cae al grupo permitido. Nunca rompe el flujo."""
+        try:
+            await self._app.bot.send_message(target_user_id, text)
+            return
+        except Exception:  # noqa: BLE001 - el DM es un intento, no una garantia
+            logger.info(
+                "No se pudo notificar por privado al usuario %s; cae al grupo.",
+                target_user_id,
+            )
+        chat = self.config.allowed_chat_id
+        if chat is None:
+            return
+        try:
+            await self._app.bot.send_message(chat, text)
+        except Exception as exc:  # noqa: BLE001 - no romper el flujo
+            logger.warning("No se pudo notificar en el grupo: %s", exc)
+
+    async def _notify_role_change(self, user_id: int, role: str) -> None:
+        """Avisa a un usuario que su rol cambio (DM con fallback al grupo)."""
+        name = self.roles.get_name(user_id) or str(user_id)
+        if role == "dj":
+            text = (
+                f"🎧 ¡Listo {name}! Ahora eres DJ.\n"
+                "Puedes usar: /buscar artista - canción · botones ▶ ⏸ ⏭ ⏹ · "
+                "🔊 volumen · 📋 lista de la cola."
+            )
+        else:
+            text = (
+                f"👤 {name}, ya no eres DJ.\n"
+                "Puedes pedir el rol de nuevo con /solicitar."
+            )
+        await self._dm_or_group(user_id, text)
 
     async def _reply(self, update, text: str, **kwargs):
         """Envia un mensaje de respuesta, manejando tanto CallbackQuery como Message.
@@ -737,7 +913,7 @@ class YTRemoteBot:
 
         Fila 1: ⏮ anterior | ▶/⏸ alternar play-pause | ⏭ siguiente | ⏹ detener
         Fila 2: 🔊−10 | <volumen actual> | 🔊+10 | 📋 lista
-        Fila 3: ⚙️ Calidad: Np (solo admin puede usarla)
+        Fila 3: ⚙️ Calidad: Np | 👥 Usuarios (solo admin puede usarlas)
         """
         play_pause = "▶️" if self._paused else "⏸️"
         keyboard = [
@@ -757,7 +933,8 @@ class YTRemoteBot:
                 InlineKeyboardButton(
                     f"⚙️ Calidad: {(self._max_height or 1080)}p",
                     callback_data="ctl:calidad",
-                )
+                ),
+                InlineKeyboardButton("👥 Usuarios", callback_data="ctl:usuarios"),
             ],
         ]
         return InlineKeyboardMarkup(keyboard)
@@ -1285,8 +1462,8 @@ class YTRemoteBot:
             lines.append("• /buscar — buscar y reproducir un artista o link")
 
         if level >= 2:  # admin
-            lines.append("• /adduser <id> <rol> — dar acceso (dj, admin)")
-            lines.append("• /removeuser <id> — quitar acceso")
+            lines.append("• 👥 Usuarios — gestionar roles (la lista llega a tu chat privado)")
+            lines.append("• /reglas — re-fijar el mensaje de reglas del grupo")
 
         return "\n".join(lines)
 
@@ -1297,6 +1474,7 @@ class YTRemoteBot:
         user = update.effective_user
         user_id = user.id if user else "?"
         user_id_int = user.id if user else None
+        self._register_known_user(user)
         user_role = self.roles.get_role(user_id_int) if user_id_int is not None else "user"
 
         # Imprime el ID del chat en la consola para que el usuario pueda copiarlo.
@@ -1325,7 +1503,22 @@ class YTRemoteBot:
             await self._reply(update, "Este bot no esta habilitado en este chat.")
             return
 
-        await self._reply(update, "YT-Remote activo.\n\n" + f"Comandos disponibles para su rol ({user_role}):\n" + self.help_for_role(user_role))
+        if user_role == "user":
+            await self._reply(
+                update,
+                "YT-Remote reproduce música (YouTube) en la PC de casa.\n\n"
+                "Las reglas del grupo están en el mensaje fijado ↑.\n"
+                "Para controlar la reproducción (ser DJ) y usar /buscar: "
+                "escriba /solicitar o pida al admin que lo habilite con el "
+                "botón 👥 Usuarios de la tarjeta.",
+            )
+        else:
+            await self._reply(
+                update,
+                "YT-Remote activo.\n\n"
+                + f"Comandos disponibles para su rol ({user_role}):\n"
+                + self.help_for_role(user_role),
+            )
 
     async def cmd_play(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         """Busca y reproduce en un solo paso desde /buscar.
@@ -1675,6 +1868,7 @@ class YTRemoteBot:
 
     async def on_callback(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         query = update.callback_query
+        self._register_known_user(query.from_user)
         if query.data and query.data.startswith("ctl:"):
             # Un boton de la tarjeta persistente del mini reproductor.
             await self._on_control(update, context, query.data.split(":", 1)[1])
@@ -1980,6 +2174,14 @@ class YTRemoteBot:
                     # botones de control); el texto/miniatura no se tocan.
                     await self._swap_card_keyboard(self._quality_keyboard())
                     reflect_status = False  # no pisa el selector abierto
+                elif action == "usuarios":
+                    # Solo admin: la lista de usuarios se envia a su chat
+                    # PRIVADO (en el grupo no aparece nada, solo el toast).
+                    if user_id is None or not self.roles.has_role(user_id, "admin"):
+                        await query.answer("Solo el admin puede gestionar usuarios.", show_alert=True)
+                        return
+                    await self._open_members_list(query, user_id)
+                    reflect_status = False
                 else:
                     return
             finally:
@@ -2692,6 +2894,372 @@ class YTRemoteBot:
             finally:
                 self._from_card = False
 
+    def _members_text(self, page: int = 0) -> str:
+        """Encabezado del mensaje del editor de usuarios (boton 👥): contador
+        total de usuarios + pagina actual/total + contador de cambios
+        pendientes de aplicar."""
+        users = self.roles.known_users()
+        pages = max(1, (len(users) + _MEMBERS_PAGE_SIZE - 1) // _MEMBERS_PAGE_SIZE)
+        page = max(0, min(page, pages - 1))
+        header = f" Usuarios ({len(users)}):"
+        if pages > 1:
+            header += f" · pag {page + 1}/{pages}"
+        pendientes = len(self._members_staged)
+        if pendientes:
+            header += f" · {pendientes} cambio{'s' if pendientes != 1 else ''} pendiente{'s' if pendientes != 1 else ''}"
+        return header
+
+    def _members_keyboard(self) -> InlineKeyboardMarkup:
+        """Teclado del editor de usuarios: una fila-boton por usuario con su
+        rol actual (o el rol staged si el admin lo esta cambiando) + [◀ ❌ ✔ ▶].
+
+        Iconos: 👤 user · 🎧 dj · 🔒 admin (el rol del admin no se toca).
+
+        El ✔ (aplicar) solo aparece cuando HAY cambios staged; si no hay, se
+        muestra un `·` placeholder. El ❌ (cancelar) siempre está visible: sin
+        staged simplemente cierra (toast "Sin cambios."). El ✔ no cierra solo:
+        pide confirmación con alerta Sí/No.
+        """
+        users = self.roles.known_users()
+        pages = max(1, (len(users) + _MEMBERS_PAGE_SIZE - 1) // _MEMBERS_PAGE_SIZE)
+        page = max(0, min(self._members_page, pages - 1))
+        start = page * _MEMBERS_PAGE_SIZE
+
+        rows: list[list[InlineKeyboardButton]] = []
+        for u in users[start : start + _MEMBERS_PAGE_SIZE]:
+            role = self._members_staged.get(u["id"], u["role"])
+            icon = "🎧" if role == "dj" else "🔒" if role == "admin" else "👤"
+            rows.append(
+                [
+                    InlineKeyboardButton(
+                        f"{icon} {u['name']}",
+                        callback_data=f"mem:user:{u['id']}",
+                    )
+                ]
+            )
+
+        prev = (
+            InlineKeyboardButton("◀", callback_data="mem:prev")
+            if pages > 1 and page > 0
+            else InlineKeyboardButton("·", callback_data="mem:noop")
+        )
+        cancel = InlineKeyboardButton("❌", callback_data="mem:cancel")
+        # ✔ solo cuando hay cambios pendientes; de lo contrario placeholder.
+        commit = (
+            InlineKeyboardButton("✔", callback_data="mem:commit")
+            if self._members_staged
+            else InlineKeyboardButton("·", callback_data="mem:noop")
+        )
+        next_ = (
+            InlineKeyboardButton("▶", callback_data="mem:next")
+            if pages > 1 and page < pages - 1
+            else InlineKeyboardButton("·", callback_data="mem:noop")
+        )
+        rows.append([prev, cancel, commit, next_])
+        return InlineKeyboardMarkup(rows)
+
+    async def _open_members_list(self, query, admin_id: int) -> None:
+        """Boton 👥 de la card: envia el editor de usuarios al chat PRIVADO
+        del admin. En el grupo no aparece ningun mensaje; el admin solo ve el
+        toast de confirmacion. Si el bot no puede escribirle por privado (el
+        admin nunca inicio chat con el bot), avisa con una alerta."""
+        users = self.roles.known_users()
+        if not users:
+            try:
+                await query.answer("No hay usuarios registrados.", show_alert=True)
+            except Exception:  # noqa: BLE001 - toast prescindible
+                pass
+            return
+        try:
+            msg = await self._app.bot.send_message(
+                admin_id,
+                self._members_text(),
+                reply_markup=self._members_keyboard(),
+            )
+        except Exception as exc:  # noqa: BLE001 - no romper la card
+            logger.info("No se pudo enviar la lista de usuarios al privado: %s", exc)
+            try:
+                await query.answer(
+                    "Abre un chat privado conmigo y envía /start.",
+                    show_alert=True,
+                )
+            except Exception:  # noqa: BLE001
+                pass
+            return
+        self._members_chat_id = admin_id
+        self._members_message_id = msg.message_id
+        self._members_user_id = admin_id
+        self._members_page = 0
+        self._members_staged = {}
+        try:
+            await query.answer("Envié la lista de usuarios a tu chat privado.")
+        except Exception:  # noqa: BLE001 - toast prescindible
+            pass
+
+    async def _edit_members_message(self) -> None:
+        """Pagina el editor de usuarios (◀ ▶): edita TEXTO + botones en el
+        mensaje abierto (el mismo, no se recrea)."""
+        if self._members_chat_id is None or self._members_message_id is None:
+            return
+        try:
+            await self._app.bot.edit_message_text(
+                self._members_text(self._members_page),
+                chat_id=self._members_chat_id,
+                message_id=self._members_message_id,
+                reply_markup=self._members_keyboard(),
+            )
+        except Exception as exc:  # noqa: BLE001 - no romper el flujo
+            logger.warning("No se pudo paginar la lista de usuarios: %s", exc)
+
+    async def _close_members_message(self) -> None:
+        """Borra el editor de usuarios (con su desvanecimiento) y limpia el
+        estado de la edicion (incluidos los cambios staged)."""
+        chat = self._members_chat_id
+        msg = self._members_message_id
+        self._members_chat_id = None
+        self._members_message_id = None
+        self._members_user_id = None
+        self._members_page = 0
+        self._members_staged = {}
+        if msg is not None and chat is not None:
+            try:
+                await self._app.bot.delete_message(chat, msg)
+            except Exception as exc:  # noqa: BLE001 - no romper el flujo
+                logger.warning("No se pudo borrar el mensaje de usuarios: %s", exc)
+
+    async def _commit_members_edits(self, query) -> None:
+        """Boton ❌ del editor: aplica TODOS los cambios staged a roles.json,
+        avisa a cada usuario de su rol nuevo y cierra la lista. Si no hubo
+        cambios, solo la cierra sin tocar nada."""
+        staged = dict(self._members_staged)
+        total = len(staged)
+        for uid, role in staged.items():
+            self.roles.set_role(uid, role, self.roles.get_name(uid))
+            try:
+                await self._notify_role_change(uid, role)
+            except Exception:  # noqa: BLE001 - no romper el commit
+                logger.warning("No se pudo notificar el rol nuevo al usuario %s.", uid)
+        await self._close_members_message()
+        try:
+            if total:
+                await query.answer(f"Roles guardados ({total} cambio{'s' if total != 1 else ''}).")
+            else:
+                await query.answer("Sin cambios.")
+        except Exception:  # noqa: BLE001 - toast prescindible
+            pass
+
+    async def _on_members_callback(
+        self, update: Update, context: ContextTypes.DEFAULT_TYPE
+    ) -> None:
+        """Botones del editor de usuarios (callback `mem:*`).
+
+        Corre en el chat PRIVADO del admin que abrio la lista (guard propio,
+        porque este handler no pasa por el filtro de chat del grupo):
+
+        - `mem:user:<id>`: alterna el rol staged del usuario (user <-> dj).
+          Los admins no se tocan. Nada se persiste: solo el contador del
+          header y la etiqueta cambian en vivo.
+        - `mem:prev`/`mem:next`: pagina el editor.
+        - `mem:cancel`: si hay staged, muestra alerta `¿Descartar N cambios?`
+          con botones `mem:cancel-yes`/`mem:cancel-no`; si NO hay staged,
+          cierra directo con toast `Sin cambios.`.
+        - `mem:cancel-yes`: descarta los staged y cierra (toast `Cambios
+          descartados (N).`).
+        - `mem:cancel-no`: restaura el mensaje original (staged intactos).
+        - `mem:commit`: si hay staged, muestra alerta `¿Aplicar N cambios?`
+          con botones `mem:commit-yes`/`mem:commit-no`; sin staged no debe
+          llegar (boton oculto).
+        - `mem:commit-yes`: aplica staged a roles.json, notifica a cada
+          usuario y cierra (toast `Roles guardados (N cambios).`).
+        - `mem:commit-no`: restaura el mensaje original (staged intactos).
+        """
+        query = update.callback_query
+        user = query.from_user
+        if user is None or query.message is None:
+            return
+        chat = query.message.chat
+        if (
+            chat is None
+            or chat.type != "private"
+            or chat.id != user.id
+            or not self.roles.has_role(user.id, "admin")
+        ):
+            try:
+                await query.answer("No tiene permiso para eso.", show_alert=True)
+            except Exception:  # noqa: BLE001
+                pass
+            return
+
+        data = query.data or ""
+        parts = data.split(":")
+
+        async def answer(text: str | None = None, show_alert: bool = False) -> None:
+            try:
+                await query.answer(text=text, show_alert=show_alert)
+            except Exception:  # noqa: BLE001
+                pass
+
+        if len(parts) < 2 or parts[1] in ("", "noop"):
+            await answer()
+            return
+
+        if parts[1] in ("prev", "next"):
+            self._members_page += -1 if parts[1] == "prev" else 1
+            await self._edit_members_message()
+            await answer()
+            return
+
+        # CANCELAR
+        if parts[1] == "cancel":
+            if self._members_staged:
+                total = len(self._members_staged)
+                msg = f"¿Descartar {total} cambio{'s' if total != 1 else ''}?"
+                kb = InlineKeyboardMarkup(
+                    [
+                        [
+                            InlineKeyboardButton(
+                                "❌ Sí, descartar",
+                                callback_data="mem:cancel-yes",
+                            ),
+                            InlineKeyboardButton(
+                                "⚠️ No",
+                                callback_data="mem:cancel-no",
+                            ),
+                        ]
+                    ]
+                )
+                try:
+                    await self._app.bot.edit_message_text(
+                        msg,
+                        chat_id=self._members_chat_id,
+                        message_id=self._members_message_id,
+                        reply_markup=kb,
+                    )
+                except Exception as exc:  # noqa: BLE001
+                    logger.warning("No se pudo editar mensaje confirmacion cancel: %s", exc)
+                await answer()
+                return
+            # Sin staged: cierra directo
+            await self._close_members_message()
+            await answer("Sin cambios.")
+            return
+
+        if parts[1] == "cancel-yes":
+            await self._close_members_message()
+            await answer("Cambios descartados.", show_alert=False)
+            return
+
+        if parts[1] == "cancel-no":
+            await self._edit_members_message()
+            await answer()
+            return
+
+        # APLICAR (COMMIT)
+        if parts[1] == "commit":
+            if self._members_staged:
+                total = len(self._members_staged)
+                msg = f"¿Aplicar {total} cambio{'s' if total != 1 else ''}?"
+                kb = InlineKeyboardMarkup(
+                    [
+                        [
+                            InlineKeyboardButton(
+                                "✔ Sí, aplicar",
+                                callback_data="mem:commit-yes",
+                            ),
+                            InlineKeyboardButton(
+                                "⚠️ No",
+                                callback_data="mem:commit-no",
+                            ),
+                        ]
+                    ]
+                )
+                try:
+                    await self._app.bot.edit_message_text(
+                        msg,
+                        chat_id=self._members_chat_id,
+                        message_id=self._members_message_id,
+                        reply_markup=kb,
+                    )
+                except Exception as exc:  # noqa: BLE001
+                    logger.warning("No se pudo editar mensaje confirmacion commit: %s", exc)
+                await answer()
+                return
+            # Sin staged: no deberia llegar (boton oculto), pero por seguridad
+            await self._close_members_message()
+            await answer("Sin cambios.")
+            return
+
+        if parts[1] == "commit-yes":
+            await self._commit_members_edits(query)
+            return
+
+        if parts[1] == "commit-no":
+            await self._edit_members_message()
+            await answer()
+            return
+
+        # TOGGLE USER
+        if parts[1] != "user" or len(parts) < 3:
+            await answer()
+            return
+        try:
+            uid = int(parts[2])
+        except ValueError:
+            await answer()
+            return
+
+        if uid == user.id:
+            await answer("Tu propio rol no se cambia desde aquí.", show_alert=True)
+            return
+        base = self.roles.get_role(uid)
+        if base == "admin":
+            await answer("El rol del admin no se puede cambiar.", show_alert=True)
+            return
+        current = self._members_staged.get(uid, base)
+        next_role = "dj" if current == "user" else "user"
+        if next_role == base:
+            self._members_staged.pop(uid, None)  # revertir el cambio en vivo
+        else:
+            self._members_staged[uid] = next_role
+        await self._edit_members_message()
+        name = self.roles.get_name(uid) or str(uid)
+        await answer(f"{name} ahora es {next_role}.")
+
+    async def _auto_kick_job(self, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """Expulsa (ban + unban) a los usuarios con rol 'user' que superaron
+        las horas de tolerancia desde su registro (config.kick_after_hours).
+
+        El ban+unban es un "kick": puede volver a entrar con el enlace de
+        invitacion y volver a pedir el rol. Admin y dj estan exentos; quien
+        no tiene timestamp (migrado del formato viejo) no se expulsa. Si el
+        bot no es admin del grupo, el intento falla con log (y no rompe nada).
+        """
+        horas = self.config.kick_after_hours or 0
+        chat = self.config.allowed_chat_id
+        if horas <= 0 or chat is None:
+            return
+        limite = int(time.time()) - int(horas * 3600)
+        for u in self.roles.known_users():
+            if u["role"] != "user":
+                continue
+            joined = u["joined_at"]
+            if not isinstance(joined, int) or joined > limite:
+                continue
+            try:
+                await self._app.bot.ban_chat_member(chat, u["id"])
+                await self._app.bot.unban_chat_member(chat, u["id"])
+                logger.info(
+                    "Expulsado usuario inactivo %s (rol user, mas de %s h).",
+                    u["name"],
+                    int(horas),
+                )
+            except Exception as exc:  # noqa: BLE001 - no tumbar el job
+                logger.warning(
+                    "No se pudo expulsar al usuario %s: %s (¿el bot es admin del grupo?)",
+                    u["id"],
+                    exc,
+                )
+
     async def cmd_now(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         cur = self.queue.current
         if cur is None:
@@ -2699,42 +3267,11 @@ class YTRemoteBot:
         else:
             await self._send_track_card(update, f"▶️ Sonando: {cur.title}", cur)
 
-    async def cmd_adduser(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-        args = context.args or []
-        if len(args) != 2:
-            await self._reply(update, "Uso: /adduser <telegram_user_id> <rol>")
-            return
-        try:
-            user_id = int(args[0])
-        except ValueError:
-            await self._reply(update, "El ID debe ser un numero.")
-            return
-        role = args[1].lower()
-        if role not in VALID_ROLES:
-            await self._reply(update, f"Roles validos: {sorted(VALID_ROLES)}")
-            return
-        self.roles.set_role(user_id, role)
-        await self._reply(update, f"Usuario {user_id} ahora es '{role}'.")
-
-    async def cmd_removeuser(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-        args = context.args or []
-        if not args:
-            await self._reply(update, "Uso: /removeuser <telegram_user_id>")
-            return
-        try:
-            user_id = int(args[0])
-        except ValueError:
-            await self._reply(update, "El ID debe ser un numero.")
-            return
-        if self.roles.remove_user(user_id):
-            await self._reply(update, f"Usuario {user_id} removido.")
-        else:
-            await self._reply(update, f"El usuario {user_id} no estaba registrado.")
-
     async def cmd_solicitar(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         user = update.effective_user
         if user is None:
             return
+        self._register_known_user(user)
         if self.roles.get_role(user.id) != "user":
             await self._reply(update, "Ya tiene un rol asignado.")
             return
@@ -2746,7 +3283,8 @@ class YTRemoteBot:
                     f"📩 Solicitud de acceso\n"
                     f"Usuario: {user.full_name} (ID: {user.id})\n"
                     f"Quiere ser DJ.\n\n"
-                    f"Para darle acceso: /adduser {user.id} dj"
+                    f"Para darle acceso, abra la lista con el botón 👥 Usuarios "
+                    f"de la tarjeta y toque a {user.full_name}."
                 ),
             )
         await self._reply(

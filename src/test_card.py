@@ -19,6 +19,18 @@ from typing import Any, cast
 SRC = Path(__file__).resolve().parent
 sys.path.insert(0, str(SRC))
 
+# Aislar el registro de roles PARA TODO EL PROCESO: el RoleManager default
+# del bot escribe en data/roles.json REAL (el __init__ registra al dueno y
+# los callbacks a los usuarios; los tests mutan b.roles despues de armar el
+# bot). Sin esto, una sola prueba contamina el archivo real con IDs falsos
+# que aparecen luego en la lista del boton 👥. Este redirect alcanza a toda
+# suite que importe test_card (test_roles y test_members incluidos), sin
+# tocar el archivo real nunca.
+import roles as _roles_mod
+
+_ROLES_TEST_DIR = tempfile.mkdtemp()
+_roles_mod.ROLES_PATH = Path(_ROLES_TEST_DIR) / "roles.json"
+
 
 @contextmanager
 def isolated_state_path():
@@ -46,6 +58,8 @@ class FakeBot:
         self.sent = []
         self.edited = []
         self.deleted = []
+        self.banned = []
+        self.unbanned = []
         self.get_me_ok = True
         self.pending_updates = []
 
@@ -73,6 +87,12 @@ class FakeBot:
 
     async def delete_message(self, chat_id, message_id, **kwargs):
         self.deleted.append((chat_id, message_id))
+
+    async def ban_chat_member(self, chat_id, user_id, **kwargs):
+        self.banned.append((chat_id, user_id))
+
+    async def unban_chat_member(self, chat_id, user_id, **kwargs):
+        self.unbanned.append((chat_id, user_id))
 
     async def get_me(self):
         if not self.get_me_ok:
@@ -197,7 +217,8 @@ def make_bot(fail_loads=0):
     )
     # Construir bajo aislamiento completo: el __init__ del bot carga Estado
     # del StateStore default; si  el state.json real trae pausa/artista/
-    # historial de un uso previo, no debe filtrarse a los tests.
+    # historial de un uso previo, no debe filtrarse a los tests. (Los roles
+    # ya estan aislados a nivel modulo: ROLES_PATH apunta a un temp.)
     with isolated_state_path():
         b = bot_mod.YTRemoteBot(config)
     b._app = FakeApp()
@@ -1351,16 +1372,18 @@ async def test_playlist_feedback_renders_in_card():
 
 
 async def test_quality_button_in_card_keyboard():
-    """La tarjeta muestra siempre el boton ancho de calidad (fila 3), visible
-    para todos: '⚙️ Calidad: 1080p' por defecto."""
+    """La tarjeta muestra la fila 3 con calidad y usuarios: '⚙️ Calidad: 1080p'
+    y '👥 Usuarios', visible para todos (el acceso lo controla el handler)."""
     b = make_bot()
     kb = b._control_keyboard()
     rows = kb.inline_keyboard
     assert len(rows) == 3, f"la tarjeta debe tener 3 filas, tiene {len(rows)}"
     quality_btn = rows[2]
-    assert len(quality_btn) == 1, f"la fila 3 es un solo boton ancho: {quality_btn}"
+    assert len(quality_btn) == 2, f"la fila 3 tiene 2 botones: {quality_btn}"
     assert quality_btn[0].text == "⚙️ Calidad: 1080p", quality_btn[0].text
     assert quality_btn[0].callback_data == "ctl:calidad"
+    assert quality_btn[1].text == "👥 Usuarios", quality_btn[1].text
+    assert quality_btn[1].callback_data == "ctl:usuarios"
     b._max_height = 480
     kb = b._control_keyboard()
     assert kb.inline_keyboard[2][0].text == "⚙️ Calidad: 480p"

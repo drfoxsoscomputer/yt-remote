@@ -125,8 +125,10 @@ Solo dj y admin:
   /buscar <link>                 reproduce un link de YouTube directo
 
 Solo admin:
-  /adduser <id> <rol>            da acceso (dj, admin)
-  /removeuser <id>               quita acceso
+  /reglas                            re-envía y fija (pin) el mensaje de reglas
+  (los roles se gestionan con el boton 👥 Usuarios de la tarjeta: la lista
+   llega al chat privado del admin, se toca al usuario para alternar dj/user
+   y ❌ aplica los cambios. En el grupo no aparece nada)
 
 Todos (user, dj, admin):
   (la lista se ve con el boton 📋 de la tarjeta: un mensaje aparte,
@@ -134,17 +136,29 @@ Todos (user, dj, admin):
    admin pueden elegir un tema tocandolo)
 
 Un user que quiera ser dj puede escribir /solicitar para pedirle al
-admin que le dé acceso.
+admin que le dé acceso; al admin le llega el aviso por privado.
 
 
 ROLES Y PERMISOS
 ----------------
-  admin  — puede hacer todo + dar/quitar acceso + cambiar la calidad
+  admin  — puede hacer todo + gestionar usuarios (👥) + cambiar la calidad (⚙️)
   dj     — buscar, controlar musica (tarjeta y comandos)
-  user   — solo puede ver la lista con el boton 📋 (sin elegir temas)
+  user   — solo puede ver la lista con el boton 📋 (sin elegir temas) y pedir
+           el acceso con /solicitar
 
-Por defecto solo el dueño es admin. Para darle acceso a otros,
-necesita su ID de Telegram y use /adduser.
+Por defecto solo el dueño es admin. Para darle acceso a otros, abra la
+lista con el boton 👥 Usuarios de la tarjeta y toque al usuario en su
+chat privado.
+
+EXPULSION AUTOMATICA DE INVITADOS
+---------------------------------
+En config.json, la clave kick_after_hours define las horas de tolerancia del
+rol user (0 = desactivado). Con un valor mayor a 0:
+  - al iniciar, el bot fija (pin) el mensaje de reglas del grupo;
+  - quien se une recibe la bienvenida con el plazo indicado;
+  - pasada la hora, si el invitado sigue sin rol dj/admin, el bot lo retira
+    del grupo (kick: ban + unban; puede volver con el enlace de invitacion).
+Requiere que el bot sea admin del grupo.
 
 
 PROBLEMAS COMUNES

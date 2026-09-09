@@ -4,9 +4,15 @@ Roles:
 - admin: acceso total
 - dj: gestion de reproduccion (play, pause, skip, cola, volumen)
 - user: solo pedir canciones
+
+Persistencia en data/roles.json con dos mapas:
+- "roles": <id> -> rol (admin|dj|user)
+- "users": <id> -> {"name": nombre visible, "joined_at": epoch en el que el
+  bot vio al usuario por primera vez (origen del conteo de la expulsion 24h)}
 """
 
 import json
+import time
 from pathlib import Path
 
 VALID_ROLES = {"admin", "dj", "user"}
@@ -15,21 +21,35 @@ ROLES_PATH = DATA_DIR / "roles.json"
 
 
 class RoleManager:
-    """Gestiona usuarios y sus roles, persistidos en data/roles.json."""
+    """Gestiona usuarios, sus roles y nombres, persistidos en data/roles.json."""
 
     def __init__(self) -> None:
         self._roles: dict[str, str] = {}
+        self._users: dict[str, dict[str, str | int]] = {}
         self._load()
 
     def _load(self) -> None:
-        if ROLES_PATH.exists():
-            with ROLES_PATH.open("r", encoding="utf-8") as f:
-                self._roles = json.load(f)
+        if not ROLES_PATH.exists():
+            return
+        with ROLES_PATH.open("r", encoding="utf-8") as f:
+            data = json.load(f)
+        if isinstance(data, dict) and "roles" in data:
+            self._roles = dict(data.get("roles") or {})
+            self._users = dict(data.get("users") or {})
+        else:
+            # Formato viejo {id: rol}: migra roles y deja el registro de
+            # usuarios vacio (los usuarios se registran solos al aparecer).
+            self._roles = dict(data)
 
     def _save(self) -> None:
         DATA_DIR.mkdir(exist_ok=True)
         with ROLES_PATH.open("w", encoding="utf-8") as f:
-            json.dump(self._roles, f, indent=2, ensure_ascii=False)
+            json.dump(
+                {"roles": self._roles, "users": self._users},
+                f,
+                indent=2,
+                ensure_ascii=False,
+            )
 
     def get_role(self, user_id: int, default: str = "user") -> str:
         key = str(user_id)
@@ -40,19 +60,72 @@ class RoleManager:
         rank = {"user": 0, "dj": 1, "admin": 2}
         return rank.get(self.get_role(user_id), 0) >= rank.get(required, 0)
 
-    def set_role(self, user_id: int, role: str) -> None:
+    def register_user(self, user_id: int, name: str | None) -> bool:
+        """Registra (o actualiza) un usuario conocido. Devuelve True si es nuevo.
+
+        La fecha de entrada (joined_at) se marca UNA sola vez, la primera vez
+        que el bot ve al usuario; actualizar el nombre no la rearma. No toca
+        el rol: quien no tiene rol asignado es "user" por defecto.
+        """
+        key = str(user_id)
+        existing = self._users.get(key)
+        if existing is not None:
+            if name and existing.get("name") != name:
+                existing["name"] = name
+                self._save()
+            return False
+        self._users[key] = {"name": name or key, "joined_at": int(time.time())}
+        self._save()
+        return True
+
+    def set_role(self, user_id: int, role: str, name: str | None = None) -> dict:
+        """Asigna el rol y garantiza la entrada del usuario en el registro."""
         if role not in VALID_ROLES:
             raise ValueError(f"Rol invalido: {role}. Validos: {sorted(VALID_ROLES)}")
-        self._roles[str(user_id)] = role
+        key = str(user_id)
+        self._roles[key] = role
+        entry = self._users.get(key)
+        if entry is None:
+            self._users[key] = {"name": name or key, "joined_at": int(time.time())}
+        elif name:
+            entry["name"] = name
         self._save()
+        return {"id": user_id, "name": self.get_name(user_id) or key, "role": role}
+
+    def toggle_user_role(self, user_id: int) -> str | None:
+        """Alterna user <-> dj. Devuelve el rol nuevo, o None si no se toca
+        (usuario admin o desconocido al sistema de roles)."""
+        current = self.get_role(user_id)
+        if current == "admin":
+            return None
+        new_role = "dj" if current == "user" else "user"
+        self.set_role(user_id, new_role, self.get_name(user_id))
+        return new_role
 
     def remove_user(self, user_id: int) -> bool:
         key = str(user_id)
-        existed = key in self._roles
-        if existed:
+        existed = key in self._roles or key in self._users
+        if key in self._roles:
             del self._roles[key]
+        if key in self._users:
+            del self._users[key]
+        if existed:
             self._save()
         return existed
+
+    def get_name(self, user_id: int) -> str | None:
+        entry = self._users.get(str(user_id))
+        if not entry:
+            return None
+        name = entry.get("name")
+        return name if isinstance(name, str) else None
+
+    def get_joined_at(self, user_id: int) -> int | None:
+        entry = self._users.get(str(user_id))
+        if not entry:
+            return None
+        joined = entry.get("joined_at")
+        return joined if isinstance(joined, int) else None
 
     def all_users(self) -> dict[str, str]:
         return dict(self._roles)
@@ -60,3 +133,24 @@ class RoleManager:
     def get_all_with_role(self, role: str) -> list[int]:
         """Devuelve todos los user IDs que tienen ese rol exacto."""
         return [int(uid) for uid, r in self._roles.items() if r == role]
+
+    def known_users(self) -> list[dict]:
+        """Todos los usuarios conocidos, ordenados por nombre visible.
+
+        Cada entrada: {"id", "name", "role", "joined_at"}. Quien no tiene rol
+        asignado aparece como "user".
+        """
+        ids = set(self._roles) | set(self._users)
+        items: list[dict] = []
+        for uid in ids:
+            entry = self._users.get(uid)
+            items.append(
+                {
+                    "id": int(uid),
+                    "name": (entry.get("name") if entry else None) or uid,
+                    "role": self._roles.get(uid, "user"),
+                    "joined_at": entry.get("joined_at") if entry else None,
+                }
+            )
+        items.sort(key=lambda u: str(u["name"]).lower())
+        return items
