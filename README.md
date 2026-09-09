@@ -3,7 +3,8 @@
 Bot de Telegram para controlar la reproducción de videos de YouTube en su PC.
 Búsqueda por chat, tarjeta de control con botones, radio automática por artista.
 
-**Versión actual:** v0.3.1
+**Versión actual:** v0.3.1 (release). En desarrollo: Ronda 10b — directos con
+whitelist de protocolos y tarjeta honesta (112 tests verdes).
 
 ## Descarga e instalación
 
@@ -46,10 +47,12 @@ entrega directos en un solo stream combinado), se unen en un único playlist
 y mpv los sincroniza. Las duraciones desconocidas aparecen como `--:--`.
 
 Para que un directo cargue, el bot abre mpv con el whitelist de protocolos del
-demuxer de video ampliado (`file, http, https`): sin eso, el playlist local que
-une video y audio no podía bajar sus sub-playlists https y mpv quedaba en
-"Drop files to play here". Si un directo no logra cargar, el bot avisa
-"No se pudo reproducir" en vez de mostrar una tarjeta engañosa.
+demuxer de video ampliado
+(`--demuxer-lavf-o=protocol_whitelist=[file,http,https,tcp,tls,crypto,data]`):
+sin eso, el playlist local que une video y audio no podía bajar sus
+sub-playlists https y mpv quedaba en "Drop files to play here". Si un directo
+no logra cargar, el bot avisa "No se pudo reproducir" en vez de mostrar una
+tarjeta engañosa.
 
 ## Tarjeta de reproducción
 
@@ -91,26 +94,26 @@ usa la mayor que no la supere (1080 es el máximo soportado). El cambio queda
 
 ## Comandos
 
-| Comando | Rol | Descripcion |
+| Comando | Rol | Descripción |
 |---------|-----|-------------|
-| `/buscar <artista> - <cancion>` | dj, admin | Busca y reproduce del artista indicado |
-| `/buscar <artista>` | dj, admin | Busca un artista (sin cancion especifica) |
+| `/buscar <artista> - <canción>` | dj, admin | Busca y reproduce del artista indicado |
+| `/buscar <artista>` | dj, admin | Busca un artista (sin canción específica) |
 | `/buscar <link>` | dj, admin | Reproduce un link de YouTube directo |
 | `/adduser <id> <rol>` | admin | Dar acceso (dj, admin) |
 | `/removeuser <id>` | admin | Quitar acceso |
 | `/solicitar` | user | Solicitar acceso de dj al admin |
 
-**Todos los roles** pueden tocar el boton 📋 (ver lista). Los demas
-botones de la tarjeta (▶ ⏮ ⏭ ⏹ 🔊) son solo para dj y admin; el boton
+**Todos los roles** pueden tocar el botón 📋 (ver lista). Los demás
+botones de la tarjeta (▶ ⏮ ⏭ ⏹ 🔊) son solo para dj y admin; el botón
 ⚙️ Calidad es exclusivo de **admin**.
 
 ## Roles
 
-| Rol | Que puede hacer |
+| Rol | Qué puede hacer |
 |-----|----------------|
 | admin | Todo + dar/quitar acceso a otros |
-| dj | Buscar, controlar reproduccion (tarjeta y comandos) |
-| user | Solo ver la lista con el boton 📋 (sin elegir temas) |
+| dj | Buscar, controlar reproducción (tarjeta y comandos) |
+| user | Solo ver la lista con el botón 📋 (sin elegir temas) |
 
 Por defecto solo el dueño es admin. Use `/adduser` con el ID de
 Telegram de la otra persona para darle acceso dj o admin.
@@ -131,6 +134,26 @@ el archivo `.env` con sus datos. También puede crearlo a mano copiando
 
 El `.env` **no se sube a GitHub** (está en `.gitignore`). El `.env.example`
 muestra el formato y es seguro versionarlo.
+
+## Un solo grupo (chat permitido)
+
+El bot responde solo en **un** chat: el grupo donde el dueño envió el primer
+`/start`. Esa configuración se guarda en `ALLOWED_CHAT_ID` (`.env`). Los
+mensajes de otros chats (privado u otros grupos) se ignoran; en la consola de
+la PC aparece `Rechazado mensaje de chat no permitido (chat_id=...)`.
+
+Para cambiar el grupo permitido:
+
+1. Detenga el bot (`Ctrl+C` en su consola).
+2. Obtenga el ID del grupo nuevo: reenvíe un mensaje del grupo a
+   [@getidsbot](https://t.me/getidsbot); le responde un número negativo (tipo
+   `-100...`).
+3. En la carpeta del bot ejecute:
+   `runtime\python\python.exe src\setup_cli.py set-chat <id>`
+4. Vuelva a iniciar `ytremote.bat` y envíe `/start` de nuevo en el grupo.
+
+Si Telegram le avisa que "este bot no puede unirse a grupos", revise los
+permisos del bot en [@BotFather](https://t.me/BotFather) (`/setjoingroups`).
 
 ## Configuración extra
 
