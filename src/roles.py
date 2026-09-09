@@ -12,11 +12,13 @@ Persistencia en data/roles.json con dos mapas:
 """
 
 import json
+import sqlite3
 import time
 from pathlib import Path
 
 VALID_ROLES = {"admin", "dj", "user"}
 DATA_DIR = Path(__file__).resolve().parent.parent / "data"
+DB_PATH = DATA_DIR / "roles.db"
 ROLES_PATH = DATA_DIR / "roles.json"
 
 
@@ -29,27 +31,53 @@ class RoleManager:
         self._load()
 
     def _load(self) -> None:
-        if not ROLES_PATH.exists():
-            return
-        with ROLES_PATH.open("r", encoding="utf-8") as f:
-            data = json.load(f)
-        if isinstance(data, dict) and "roles" in data:
-            self._roles = dict(data.get("roles") or {})
-            self._users = dict(data.get("users") or {})
-        else:
-            # Formato viejo {id: rol}: migra roles y deja el registro de
-            # usuarios vacio (los usuarios se registran solos al aparecer).
-            self._roles = dict(data)
+        """Carga los roles y usuarios desde la base de datos SQLite."""
+        conn = sqlite3.connect(str(DB_PATH))
+        conn.execute("PRAGMA journal_mode=WAL")
+        try:
+            cur = conn.cursor()
+            cur.execute(
+                "CREATE TABLE IF NOT EXISTS roles (key TEXT PRIMARY KEY, value TEXT)"
+            )
+            cur.execute(
+                "CREATE TABLE IF NOT EXISTS users (key TEXT PRIMARY KEY, value TEXT)"
+            )
+            cur.execute("DELETE FROM roles")
+            cur.execute("DELETE FROM users")
+            # Migración: si existe el archivo JSON viejo, importamos sus datos
+            if ROLES_PATH.exists():
+                try:
+                    with open(ROLES_PATH, "r", encoding="utf-8") as jf:
+                        data = json.load(jf)
+                    if isinstance(data, dict) and "roles" in data:
+                        for k, v in data.get("roles", {}).items():
+                            cur.execute("INSERT INTO roles (key, value) VALUES (?, ?)", (k, v))
+                    if isinstance(data, dict) and "users" in data:
+                        for k, v in data.get("users", {}).items():
+                            cur.execute(
+                                "INSERT INTO users (key, value) VALUES (?, ?)",
+                                (k, json.dumps(v)),
+                            )
+                except Exception:
+                    pass  # Si falla la migración, la BD queda vacía pero válida
+            conn.commit()
+        finally:
+            conn.close()
 
     def _save(self) -> None:
-        DATA_DIR.mkdir(exist_ok=True)
-        with ROLES_PATH.open("w", encoding="utf-8") as f:
-            json.dump(
-                {"roles": self._roles, "users": self._users},
-                f,
-                indent=2,
-                ensure_ascii=False,
+        """Persiste roles y usuarios en la base de datos SQLite."""
+        conn = sqlite3.connect(str(DB_PATH))
+        conn.execute("PRAGMA journal_mode=WAL")
+        cur = conn.cursor()
+        for key, role in self._roles.items():
+            cur.execute("INSERT OR REPLACE INTO roles (key, value) VALUES (?, ?)", (key, role))
+        for key, entry in self._users.items():
+            cur.execute(
+                "INSERT OR REPLACE INTO users (key, value) VALUES (?, ?)",
+                (key, json.dumps(entry)),
             )
+        conn.commit()
+        conn.close()
 
     def get_role(self, user_id: int, default: str = "user") -> str:
         key = str(user_id)
