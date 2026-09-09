@@ -373,10 +373,9 @@ Presentación ≠ estado de dominio. 1 test ajustado + 1 nuevo (si resolve falla
   retry de `send_photo`.
 
 ## Pendientes / ToDo
-- [ ] **Push del trabajo actual (rondas 8-10b + log del chat rechazado)**: 112
-   tests verdes y revalidado en vivo por el usuario. Commits hechos:
-   `783ffca` (fix: log del chat_id) y `81f59aa` (docs). Falta su aprobación
-   explícita para el push.
+- [x] **Push + release v0.4.0 (2026-09-09)**: main pusheado (`6b62d87..98f3c20`),
+   tag `v0.4.0` creado, release publicado con `yt-remote-v0.4.0-portable.zip`
+   (42.5 MB, 2299 archivos, sin `.env`). 112 tests verdes y revalidado en vivo.
 - [x] **Revalidar la ronda 10b en vivo**: probar un directo de YouTube Live
    (p.ej. Vatican Media) en Telegram y confirmar que carga (video+audio
    sincronizados, con miniatura) y que si el load falla el bot responde "No se
