@@ -277,10 +277,13 @@ def resolve_stream_url(youtube_url: str) -> tuple[str, str | None] | None:
     si el video no tiene esa resolucion se toma la mayor que no la supere.
     El fallback combinado ('best[height<=MAX]') tambien respeta el tope.
 
-    VIDEOS EN VIVO (directo): se fuerza el formato COMBINADO ('best') en vez
-    de video+audio separados. Con los streams DASH separados, el HLS del
-    directo llega SIN SONIDO en mpv (el audio no conecta o queda mudo); el
-    formato muxed unico reproduce ambos track a la vez.
+    VIDEOS EN VIVO (directo): se resuelven igual que el resto, con
+    video+audio separados. Antes se forzaba el formato 'best' combinado,
+    que en directos NO existe (YouTube live entrega el HLS como video y
+    audio en playlists separadas), asi que esa re-resolucion fallaba y
+    dejaba un error falso en last_resolve_error. El audio HLS del directo
+    llega sin la key 'acodec' en yt-dlp y _stream_from_info lo detecta por
+    el vcodec 'none'.
 
     Devuelve (video_url, audio_url) o (url, None) si es un stream combinado.
     Devuelve None si no se pudo resolver.
@@ -299,15 +302,6 @@ def resolve_stream_url(youtube_url: str) -> tuple[str, str | None] | None:
         if info is None:
             # _extract_info dejo el motivo real en _RESOLVE_LAST_ERROR.
             continue
-
-        # En directo, el formato video+audio separado suele quedar mudo en
-        # mpv; se vuelve a resolver forzando el stream combinado muxed.
-        if info.get("live_status") == "is_live" or info.get("is_live"):
-            live_extra = dict(extra)
-            live_extra["format"] = f"best[height<={MAX_HEIGHT}]"
-            live_info = _extract_info(client_name, live_extra, youtube_url)
-            if live_info is not None:
-                info = live_info
 
         stream = _stream_from_info(info)
         if stream is not None:
@@ -359,11 +353,20 @@ def _stream_from_info(info: "dict[str, Any]") -> tuple[str, str | None] | None:
             furl = fmt.get("url")
             if not furl:
                 continue
-            if vcodec != "none" and not video_url:
+            if vcodec not in (None, "none") and not video_url:
                 video_url = str(furl)
-            elif acodec != "none" and not audio_url:
+            elif acodec not in (None, "none") and not audio_url:
                 audio_url = str(furl)
-        if video_url:
+            elif vcodec in (None, "none") and not audio_url:
+                # HLS de directos de YouTube: el audio llega SIN la key
+                # 'acodec' (solo trae vcodec 'none'), asi que no se lo
+                # detectaba con el get(acodec, 'none') y quedaba mute.
+                audio_url = str(furl)
+        if video_url or audio_url:
+            if video_url is None and audio_url is not None:
+                # Solo hay audio (raro): se devuelve como stream único.
+                return (audio_url, None)
+            assert video_url is not None  # noqa: S101 - garantizado por el if
             return (video_url, audio_url)
 
     # Fallback: webpage URL (mpv intentara resolver con su ytdl hook)
