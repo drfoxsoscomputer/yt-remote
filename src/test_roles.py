@@ -29,6 +29,7 @@ class InMemoryRoles:
 
     def __init__(self):
         self._roles: dict[str, str] = {}
+        self._users: dict[str, dict] = {}
 
     def get_role(self, user_id: int, default: str = "user") -> str:
         return self._roles.get(str(user_id), default)
@@ -37,10 +38,11 @@ class InMemoryRoles:
         rank = {"user": 0, "dj": 1, "admin": 2}
         return rank.get(self.get_role(user_id), 0) >= rank.get(required, 0)
 
-    def set_role(self, user_id: int, role: str) -> None:
+    def set_role(self, user_id: int, role: str, name: str | None = None) -> None:
         if role not in self.VALID_ROLES:
             raise ValueError(f"Rol invalido: {role}")
         self._roles[str(user_id)] = role
+        self.register_user(user_id, name)
 
     def remove_user(self, user_id: int) -> bool:
         key = str(user_id)
@@ -51,6 +53,39 @@ class InMemoryRoles:
 
     def get_all_with_role(self, role: str) -> list[int]:
         return [int(uid) for uid, r in self._roles.items() if r == role]
+
+    def register_user(self, user_id: int, name: str | None = None) -> bool:
+        key = str(user_id)
+        existing = self._users.get(key)
+        if existing is not None:
+            if name:
+                existing["name"] = name
+            return False
+        self._users[key] = {"name": name or key, "joined_at": int(123)}
+        return True
+
+    def get_name(self, user_id: int) -> str | None:
+        u = self._users.get(str(user_id))
+        return u["name"] if u else None
+
+    def get_joined_at(self, user_id: int) -> int | None:
+        u = self._users.get(str(user_id))
+        return u["joined_at"] if u else None
+
+    def known_users(self):
+        users = []
+        for uid, role in self._roles.items():
+            u = self._users.get(uid, {})
+            users.append(
+                {
+                    "id": int(uid),
+                    "name": u.get("name", uid),
+                    "role": role,
+                    "joined_at": u.get("joined_at"),
+                }
+            )
+        users.sort(key=lambda x: x["name"].lower())
+        return users
 
 
 def make_bot():
@@ -70,6 +105,8 @@ def make_bot():
         owner_id=1,
         allowed_chat_id=None,
     )
+    # La construccion ya no toca el roles.json real: al importar test_card,
+    # este redirige roles.ROLES_PATH a un temp para todo el proceso.
     b = bot_mod.YTRemoteBot(config)
     b._app = FakeApp()
     object.__setattr__(b, "player", FakePlayer())
@@ -262,7 +299,8 @@ async def test_cmd_solicitar_blocks_non_user():
 
 
 async def test_cmd_solicitar_notifies_admins_for_user():
-    """user que escribe /solicitar: mensaje enviado al admin con comando sugerido."""
+    """user que escribe /solicitar: mensaje al admin indicando el boton
+    '👥 Usuarios' de la tarjeta (ya no se sugiere /adduser)."""
     b = make_bot()
     b.roles.set_role(50, "user")
     b.roles.set_role(51, "admin")
@@ -276,15 +314,16 @@ async def test_cmd_solicitar_notifies_admins_for_user():
 
     confirm = [m for m in upd.sent if "solicitud fue enviada" in m[0]]
     assert confirm, f"no hubo confirmacion al user: {upd.sent}"
-    admin_msg = [m for m in app.bot.sent if "adduser" in m[1]]
+    admin_msg = [m for m in app.bot.sent if "Usuarios" in m[1]]
     assert admin_msg, f"no hubo mensaje al admin: {app.bot.sent}"
+    assert "👥 Usuarios" in admin_msg[0][1], f"deberia mencionar el boton: {admin_msg[0][1]}"
     assert str(50) in admin_msg[0][1], f"deberia incluir user ID: {admin_msg[0][1]}"
-    assert "dj" in admin_msg[0][1], f"deberia sugerir rol dj: {admin_msg[0][1]}"
+    assert "abra la lista con el botón 👥 Usuarios" in admin_msg[0][1], admin_msg[0][1]
     print("  OK  test_cmd_solicitar_notifies_admins_for_user")
 
 
 def test_help_for_role_visibility_matrix():
-    """user=nada, dj=1 linea, admin=3 lineas."""
+    """user=nada, dj=1 linea, admin=2 lineas (👥 Usuarios y /reglas)."""
     b = make_bot()
     assert b.help_for_role("user") == "", f"user deberia dar vacio, got: {b.help_for_role('user')!r}"
 
@@ -297,8 +336,10 @@ def test_help_for_role_visibility_matrix():
     admin_lines = [l for l in admin_help.splitlines() if l.strip()]
     assert len(admin_lines) == 3, f"admin deberia dar 3 lineas, got {len(admin_lines)}: {admin_help!r}"
     assert "/buscar" in admin_help
-    assert "/adduser" in admin_help
-    assert "/removeuser" in admin_help
+    assert "👥 Usuarios" in admin_help
+    assert "/reglas" in admin_help
+    assert "/adduser" not in admin_help
+    assert "/removeuser" not in admin_help
     print("  OK  test_help_for_role_visibility_matrix")
 
 

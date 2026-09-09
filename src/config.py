@@ -38,6 +38,7 @@ class Config:
         max_results: int,
         owner_id: int | None = None,
         allowed_chat_id: int | None = None,
+        kick_after_hours: float = 0,
     ) -> None:
         self.token = token
         self.mpv_path = mpv_path
@@ -45,6 +46,7 @@ class Config:
         self.max_results = max_results
         self.owner_id = owner_id
         self.allowed_chat_id = allowed_chat_id
+        self.kick_after_hours = kick_after_hours
 
 
 def load_config() -> Config:
@@ -81,6 +83,13 @@ def load_config() -> Config:
         owner_id=owner_id,
         allowed_chat_id=allowed_chat_id,
     )
+
+    # Expulsion automatica de invitados: horas de tolerancia para un usuario
+    # con rol 'user'. 0 o ausente = desactivada. Un valor invalido cae a 0.
+    try:
+        config.kick_after_hours = max(0.0, float(data.get("kick_after_hours", 0) or 0))
+    except (TypeError, ValueError):
+        config.kick_after_hours = 0.0
 
     if config.token in ("", "TU_TOKEN_AQUI"):
         raise ValueError(
