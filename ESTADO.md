@@ -56,6 +56,16 @@ botones, radio automatica por artista, roles (admin/dj/user).
    en GitHub.
 
 ## Estado actual
+**v0.4.0 publicado el 2026-09-09 en https://github.com/drfoxsoscomputer/yt-remote/releases/tag/v0.4.0**
+ZIP `yt-remote-v0.4.0-portable.zip`. Incluye todo lo de v0.3.1 mas: la ronda
+de calidad (boton ⚙️, tope 1080, card sin re-crear), la Ronda 8 (playlist al
+toque con quick-load y expansion en segundo plano, persistencia de posicion),
+la Ronda 9 (lista en modo radio y boton de cierre ❌ en calidad), la Ronda 10
+(sync de directos HLS con master .m3u8 local + cancelar el listado de /buscar)
+y la Ronda 10b (whitelist de protocolos lavf ampliado para directos + card
+honesta). Tambien el log de chat rechazado con chat_id y los documentos al dia
+en espanol neutro. 112 tests verdes.
+
 **v0.3.1 publicado en https://github.com/drfoxsoscomputer/yt-remote/releases/tag/v0.3.1**
 ZIP `yt-remote-v0.3.1-portable.zip` (~42.4 MB). Incluye el fix de los 4 bugs
 post-v0.3.0 (no reanuda tras apagado, a veces video sin audio, mpv "Drop files",
@@ -63,7 +73,7 @@ errores que no llegan al admin) con el plan Fase 1-6 aprobado por el usuario,
 mas el fix del bot congelado (3ra ronda, timeouts de resolucion) y la card
 siempre al final (4ta ronda).
 
-**En desarrollo (post-v0.3.2): rondas 8, 9, 10 y 10b (112 tests verdes), sin release todavia.**
+**Historial (ya incluido en v0.4.0): rondas 8, 9, 10 y 10b.**
 La Ronda 8 (playlist al toque y persistencia): Al
 pegar un link de playlist/mix: arrancan YA los primeros 15 temas (quick-load) y
 el total real se reporta ("Playlist (15/N): …"), mientras el RESTO se expande en
