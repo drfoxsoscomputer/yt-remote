@@ -364,9 +364,9 @@ Presentación ≠ estado de dominio. 1 test ajustado + 1 nuevo (si resolve falla
 
 ## Pendientes / ToDo
 - [ ] **Push del trabajo actual (rondas 8-10b + log del chat rechazado)**: 112
-   tests verdes y revalidado en vivo por el usuario; falta su aprobación
-   explícita para commit + push del commit pendiente (cambios sin commitear:
-   bot.py con el log del chat_id y ESTADO.md actualizado).
+   tests verdes y revalidado en vivo por el usuario. Commits hechos:
+   `783ffca` (fix: log del chat_id) y `81f59aa` (docs). Falta su aprobación
+   explícita para el push.
 - [x] **Revalidar la ronda 10b en vivo**: probar un directo de YouTube Live
    (p.ej. Vatican Media) en Telegram y confirmar que carga (video+audio
    sincronizados, con miniatura) y que si el load falla el bot responde "No se
