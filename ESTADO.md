@@ -108,6 +108,28 @@ que lo borra con su desvanecimiento sin reproducir nada y deja la card
 visible; elegir una canción mantiene el flujo actual (borra el listado con
 fade + card nueva con miniatura). 6 tests nuevos. **109 tests verdes**.
 
+**Ronda 10b — fix de directos rotos + card honesta (2026-09-09).** El usuario
+reportó que tras el fix de sync (Ronda 10) los directos de YouTube Live YA no
+reproducían: mpv abría pero quedaba en "Drop files or URLs to play here." y la
+card decía "Sonando" sin miniatura. Diagnóstico empírico con el directo de
+Vatican Media (https://www.youtube.com/watch?v=5lfWxoaPGRg): el master `.m3u8`
+LOCAL es un archivo, y el demuxer lavf de mpv restringe su protocol whitelist a
+`file,crypto,data` → los childs https del master no se podían bajar
+(`[lavf] Protocol 'https' not on whitelist 'file,crypto,data'`,
+`hls: parse_playlist error Invalid argument`) y mpv quedaba idle. Descartados:
+childs de yt-dlp (reproducen standalone), contenido del master, `hls://` (no
+existe en este mpv). Fix: mpv arranca con
+`--demuxer-lavf-o=protocol_whitelist=[file,http,https,tcp,tls,crypto,data]`
+(la forma sin corchetes ni siquiera parsea, el valor es un key=value list).
+Verificado: el master local carga video 1280x720 + audio (aac) en UN demuxer,
+sincronizados. Sigue respetando `MAX_HEIGHT` (la variante la eligió yt-dlp).
+De paso (card honesta): `load()` espera file-loaded y si no llega LANZA
+RuntimeError → el bot responde "No se pudo reproducir: ..." en vez de una card
+"Sonando" falsa. Gotcha de runtime: `wait_for` + `to_thread(Event.wait)` NO
+devuelve en el deadline (un thread bloqueado en Event.wait no se cancela, cuelga
+para siempre) → se usa `Event.wait(timeout)` que devuelve False.
+3 tests nuevos. **112 tests verdes**.
+
 - **Mensaje de la lista (2026-09-08, ronda 7)**: decisión del usuario NO
   trabajar sobre el comando sino rediseñar el 📋: lista como mensaje separado,
   paginación 10 por página [◀ ❌ ▶], solo admin/dj eligen, ❌ lo usa cualquiera,
@@ -329,6 +351,11 @@ Presentación ≠ estado de dominio. 1 test ajustado + 1 nuevo (si resolve falla
   retry de `send_photo`.
 
 ## Pendientes / ToDo
+- [ ] **Revalidar la ronda 10b en vivo**: probar un directo de YouTube Live
+   (p.ej. Vatican Media) en Telegram y confirmar que carga (video+audio
+   sincronizados, con miniatura) y que si el load falla el bot responde "No se
+   pudo reproducir" (nunca "Sonando" en idle). Aprobación del usuario antes de
+   push.
 - [ ] **Revalidar la ronda 10 en vivo**: probar un directo de YouTube Live en
    Telegram por unos minutos y confirmar que el audio ya NO va desfasado del
    video (fix del master .m3u8 local); probar `/buscar artista - cancion` con
@@ -478,6 +505,15 @@ Presentación ≠ estado de dominio. 1 test ajustado + 1 nuevo (si resolve falla
   la card NO se mueve), `test_cmd_play_link_resets_pending_search` (un link
   nuevo descarta el listado pendiente). **109 tests verdes en total**
   (80 en test_card, 17 en persistence, 12 en roles).
+
+### Tests de la ronda 10b (3 nuevos)
+- **Ronda 10b**: `test_launch_mpv_amplia_protocol_whitelist` (el lanzamiento de
+  mpv incluye el whitelist de protocolos lavf ampliado),
+  `test_load_master_espera_file_loaded_y_marca_activo` (el master local se
+  envía a mpv y recién se marca el track activo cuando file-loaded confirma),
+  `test_load_sin_file_loaded_lanza_error_real` (sin file-loaded, load() lanza
+  RuntimeError y NO marca el track activo). **112 tests verdes en total**
+  (83 en test_card, 17 en persistence, 12 en roles).
 
 ### Detalles técnicos nuevos (ronda 8)
 - **Quick-load + expansión de fondo**: `search.quick_playlist(url, N)` usa

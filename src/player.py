@@ -204,6 +204,11 @@ class Player:
                 "--terminal=no",
                 "--really-quiet",
                 "--idle=yes",
+                # Un master .m3u8 LOCAL (directos HLS) se apertura con el
+                # demuxer lavf, que por defecto restringe los protocolos a
+                # 'file,crypto,data': los childs https quedarian bloqueados.
+                # Se amplia el whitelist para que el demuxer pueda bajarlos.
+                "--demuxer-lavf-o=protocol_whitelist=[file,http,https,tcp,tls,crypto,data]",
                 # La ventana NO se cierra al terminar la cancion:
                 # keep-open pausa en el ultimo frame (no emite end-file),
                 # force-window mantiene la ventana base siempre visible.
@@ -426,55 +431,43 @@ class Player:
         Tras el audio-add VERIFICA con 'track-list' que haya una pista de
         audio con 'selected'; si no, lo reintenta una vez mas. Asi los videos
         sin sonido no pasan sin diagnostico.
+
+        Si mpv NO confirma el file-loaded dentro del timeout, el load fallo
+        (mpv quedo en idle): se lanza RuntimeError para que el bot muestre un
+        error real en vez de una tarjeta "Sonando" sin miniatura ni sonido.
         """
         self._file_loaded_event.clear()
         self._loaded.append((url, audio_url))
-        use_master = False
-        fallback_audio = audio_url
         if audio_url and _is_hls_url(url) and _is_hls_url(audio_url):
-            use_master = True
+            # Directo HLS: master local que une video + audio en un solo
+            # demuxer (sync A/V nativo mpv). Si no se puede escribir el
+            # archivo, se cae al camino DASH (loadfile child + audio-add).
             master = Path(tempfile.gettempdir()) / _LIVE_MASTER_NAME
             try:
                 master.write_text(
                     _build_master_playlist(url, audio_url), encoding="utf-8"
                 )
             except OSError:
-                use_master = False
+                pass
             else:
                 url = master.as_posix()
                 audio_url = None
         await self.command("loadfile", url, "replace")
+        # Event.wait(timeout) devuelve False al vencer (no usar wait_for +
+        # to_thread: un thread bloqueado en Event.wait no se cancela y colgaria).
+        if not await asyncio.to_thread(
+            self._file_loaded_event.wait, _PIPE_WAIT_TIMEOUT
+        ):
+            # Sin file-loaded no hubo track: mpv quedo en idle. No mentir en
+            # la tarjeta: el bot convierte esto en un error visible.
+            raise RuntimeError("mpv no confirmo la carga del stream (timeout).")
         if audio_url:
-            try:
-                await asyncio.wait_for(
-                    asyncio.to_thread(self._file_loaded_event.wait),
-                    timeout=_PIPE_WAIT_TIMEOUT,
-                )
-            except asyncio.TimeoutError:
-                # Sin file-loaded no hay forma de saber si el video cargo;
-                # igual se intenta el audio-add por si mpv ya lo proceso.
-                pass
+            # DASH: el video ya cargo; agregar el audio separado ahora.
             for attempt in range(2):
                 await self.command("audio-add", audio_url, "select")
                 await asyncio.sleep(0.3)
                 if await self._has_audio_track():
                     break
-        elif use_master:
-            # El master ya trae el audio dentro; si aun asi el track-list no
-            # lo muestra, se reintenta con el audio child como plan B.
-            try:
-                await asyncio.wait_for(
-                    asyncio.to_thread(self._file_loaded_event.wait),
-                    timeout=_PIPE_WAIT_TIMEOUT,
-                )
-            except asyncio.TimeoutError:
-                pass
-            if not await self._has_audio_track():
-                for attempt in range(2):
-                    await self.command("audio-add", fallback_audio, "select")
-                    await asyncio.sleep(0.3)
-                    if await self._has_audio_track():
-                        break
         self._track_active = True
 
     async def _has_audio_track(self) -> bool:
