@@ -45,6 +45,12 @@ el HLS del directo se resuelve como video y audio separados (YouTube no
 entrega directos en un solo stream combinado), se unen en un único playlist
 y mpv los sincroniza. Las duraciones desconocidas aparecen como `--:--`.
 
+Para que un directo cargue, el bot abre mpv con el whitelist de protocolos del
+demuxer de video ampliado (`file, http, https`): sin eso, el playlist local que
+une video y audio no podía bajar sus sub-playlists https y mpv quedaba en
+"Drop files to play here". Si un directo no logra cargar, el bot avisa
+"No se pudo reproducir" en vez de mostrar una tarjeta engañosa.
+
 ## Tarjeta de reproducción
 
 Cuando suena algo aparece una tarjeta con botones:

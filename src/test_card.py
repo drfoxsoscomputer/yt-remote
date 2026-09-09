@@ -7,7 +7,9 @@ Sin red ni mpv real: se stubbea Player y el bot de Telegram.
 """
 
 import asyncio
+import os
 import sys
+import tempfile
 import time
 from contextlib import contextmanager
 from pathlib import Path
@@ -2205,6 +2207,87 @@ def test_build_master_playlist_joins_video_and_audio():
     assert "RESOLUTION=1280x720" in master
 
 
+def test_launch_mpv_amplia_protocol_whitelist():
+    """Directo (fix regresion Ronda 10b): un master .m3u8 LOCAL se apertura
+    con el demuxer lavf, cuyo whitelist por defecto ('file,crypto,data')
+    bloquea los childs https => el directo no cargaba y mpv quedaba en
+    "Drop files". La entrega debe arrancar mpv con el whitelist ampliado."""
+    import player as player_mod
+
+    captured = {}
+
+    class FakePopen:
+        def __init__(self, args, **kwargs):  # noqa: ARG002
+            captured["args"] = args
+
+    original = player_mod.subprocess.Popen
+    player_mod.subprocess.Popen = FakePopen
+    try:
+        player_mod.Player()._launch_mpv()
+    finally:
+        player_mod.subprocess.Popen = original
+
+    assert any(
+        a
+        == "--demuxer-lavf-o=protocol_whitelist=[file,http,https,tcp,tls,crypto,data]"
+        for a in captured["args"]
+    ), captured["args"]
+
+
+async def test_load_master_espera_file_loaded_y_marca_activo():
+    """Directo (sync): load() envia el master LOCAL y recien marca el track
+    activo cuando mpv confirma file-loaded: la card "Sonando" es real."""
+    import player as player_mod
+
+    video = "https://hls/v.m3u8"
+    audio = "https://hls/a.m3u8"
+    original_pipe = player_mod.MPV_PIPE
+    tmp = os.path.join(tempfile.gettempdir(), "mpv_pipe_test.json")
+    open(tmp, "w", encoding="utf-8").close()
+    player_mod.MPV_PIPE = tmp
+    try:
+        p = player_mod.Player()
+        tarea = asyncio.create_task(p.load(video, audio))
+        await asyncio.sleep(0.2)
+        p._file_loaded_event.set()
+        await asyncio.wait_for(tarea, timeout=1.0)
+        with open(tmp, encoding="utf-8") as fh:
+            escrito = fh.read()
+        assert p._track_active is True, "solo activo con file-loaded confirmado"
+        assert p.loaded[-1] == (video, audio)
+        assert "loadfile" in escrito and "ytremote_live.m3u8" in escrito, escrito
+    finally:
+        player_mod.MPV_PIPE = original_pipe
+        if os.path.exists(tmp):
+            os.remove(tmp)
+
+
+async def test_load_sin_file_loaded_lanza_error_real():
+    """Directo (card honesta): si mpv NO confirma file-loaded (load fallido,
+    quedo en idle), load() lanza RuntimeError y no marca el track activo: el
+    bot responde "No se pudo reproducir" en vez de una tarjeta "Sonando"."""
+    import player as player_mod
+
+    original_pipe = player_mod.MPV_PIPE
+    original_timeout = player_mod._PIPE_WAIT_TIMEOUT
+    player_mod.MPV_PIPE = os.path.join(
+        tempfile.gettempdir(), "__mpv_pipe_no_existe__"
+    )
+    player_mod._PIPE_WAIT_TIMEOUT = 0.2
+    try:
+        p = player_mod.Player()
+        try:
+            await p.load("https://hls/v.m3u8", "https://hls/a.m3u8")
+        except RuntimeError as exc:
+            assert "no confirmo la carga" in str(exc)
+        else:
+            raise AssertionError("debia lanzar RuntimeError")
+        assert p._track_active is False
+    finally:
+        player_mod.MPV_PIPE = original_pipe
+        player_mod._PIPE_WAIT_TIMEOUT = original_timeout
+
+
 async def test_search_keyboard_has_cancel_button():
     """El listado de /buscar termina con un boton ❌ Cancelar (pick:cancel) y
     queda marcado como pendiente (la card arriba no se reposiciona)."""
@@ -2388,6 +2471,9 @@ def run():
     asyncio.run(test_cmd_play_link_resets_pending_search())
     asyncio.run(test_search_keyboard_has_cancel_button())
     test_build_master_playlist_joins_video_and_audio()
+    test_launch_mpv_amplia_protocol_whitelist()
+    asyncio.run(test_load_master_espera_file_loaded_y_marca_activo())
+    asyncio.run(test_load_sin_file_loaded_lanza_error_real())
     asyncio.run(test_passive_text_repositions_card())
     asyncio.run(test_playlist_feedback_renders_in_card())
     asyncio.run(test_playlist_expand_times_out())
