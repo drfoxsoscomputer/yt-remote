@@ -766,7 +766,7 @@ class YTRemoteBot:
         if current_row:
             rows.append(current_row)
         rows.append(
-            [InlineKeyboardButton("✖ Cerrar", callback_data="cl:calidad:cerrar")]
+            [InlineKeyboardButton("❌", callback_data="cl:calidad:cerrar")]
         )
         return InlineKeyboardMarkup(rows)
 
@@ -2456,7 +2456,10 @@ class YTRemoteBot:
         presente.
 
         Cada boton es el tema con su posicion global y el titulo COMPLETO
-        (sin truncar); el actual arranca con "▶️ ". El flag fijo
+        (sin truncar); el actual arranca con "▶️ ". En modo radio (sin
+        playlist) no hay temas que listar: se muestra una fila con el tema
+        SONANDO precedido de "▶️ " (informacion, no seleccion); tocarla
+        cierra igual que el ❌. El flag fijo
         `_list_can_select` decide si hay botones de tema: al paginar no
         cambia aunque lo pages un user. La fila de navegacion mantiene 3
         slots para que el ❌ quede centrado; el slot vacio usa "·" (callback
@@ -2469,7 +2472,18 @@ class YTRemoteBot:
         start = page * _LIST_PAGE_SIZE
 
         rows: list[list[InlineKeyboardButton]] = []
-        if self._list_can_select:
+        # Modo radio (sin playlist): no hay items que listar, pero se muestra
+        # el tema que esta sonando con ▶️; tocarlo cierra igual que el ❌.
+        if not self.queue.has_playlist and current is not None:
+            rows.append(
+                [
+                    InlineKeyboardButton(
+                        f"▶️ {current.title.strip()}",
+                        callback_data="lst:close",
+                    )
+                ]
+            )
+        elif self._list_can_select:
             segment = items[start : start + _LIST_PAGE_SIZE]
             for idx, it in enumerate(segment, start=start + 1):
                 label = it.title.strip()

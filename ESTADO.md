@@ -77,8 +77,15 @@ formato combinado muxed; se resuelve como video+audio separados y el audio
 se detecta aunque yt-dlp no declare la key `acodec` (viene solo con
 `vcodec: none`). Eliminada la re-resolución con `best[height<=N]` del Fix
 anterior (siempre fallaba en directos y marcaba un error falso). Las
-duraciones desconocidas se muestran como "--:--" (no "0:00"). 102 tests
+duraciones desconocidas se muestran como "--:--" (no "0:00"). 103 tests
 verdes.
+
+**Ronda 9 — bugs reportados por el usuario (2026-09-08/09).** Dos fix junto al
+fix live: (1) la lista 📋 en modo radio (item suelto, sin playlist) no
+mostraba nada salvo la navegación; ahora muestra el tema sonando como botón
+"▶️ titulo" cuya acción es la misma que cerrar (`lst:close`). (2) El botón de
+cierre del selector de calidad usaba "✖ Cerrar" (✖ se ve negro); pasó a "❌",
+idéntico al del paginado. Test nuevo `test_list_radio_shows_current`.
 
 - **Mensaje de la lista (2026-09-08, ronda 7)**: decisión del usuario NO
   trabajar sobre el comando sino rediseñar el 📋: lista como mensaje separado,
@@ -431,7 +438,7 @@ Presentación ≠ estado de dominio. 1 test ajustado + 1 nuevo (si resolve falla
   `test_playlist_quick_load_starts_immediately`, `test_playlist_background_expansion_does_not_duplicate`,
   `test_playlist_background_expansion_ignores_swapped_queue`, `test_pick_next_waits_for_expansion_no_early_wrap`),
   y live (`test_live_stream_resolves_separated`, `test_fmt_duration_live_shows_dashes`).
-  **102 tests verdes en total**.
+  **103 tests verdes en total** (74 en test_card, 17 en persistence, 12 en roles).
 
 ### Detalles técnicos nuevos (ronda 8)
 - **Quick-load + expansión de fondo**: `search.quick_playlist(url, N)` usa

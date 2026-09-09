@@ -1393,7 +1393,7 @@ async def test_quality_selector_opens_for_admin():
     filas = markup.inline_keyboard
     etiquetas = [btn.text for fila in filas for btn in fila]
     assert "1080 ✓" in etiquetas, etiquetas  # el nivel vigente sale marcado
-    assert "✖ Cerrar" in etiquetas, etiquetas
+    assert "❌" in etiquetas, etiquetas
     # Tope de la app: 1080 es el maximo, no hay 1440 ni 2160.
     assert "1440" not in etiquetas, etiquetas
     assert "2160" not in etiquetas, etiquetas
@@ -1676,6 +1676,35 @@ async def test_list_open_for_user_no_track_buttons():
     rows = kb.inline_keyboard
     assert len(rows) == 1, "user: sin botones de tema, solo navegacion"
     assert [btn.text for btn in rows[0]] == ["·", "❌", "·"]
+
+
+async def test_list_radio_shows_current():
+    """Modo radio (item suelto, sin playlist): la lista NO queda vacia;
+    muestra el tema que esta sonando como boton "▶️ titulo" y tocarlo
+    cierra igual que el ❌ (mismo callback lst:close)."""
+    from queue_manager import QueueItem
+
+    b = make_bot()
+    b.roles.set_role(50, "user")
+    b.queue.set_current(QueueItem(url="u0", title="Tema Sonando"))
+    await b._on_control(
+        FakeUpdate("ctl:lista", user_id=50, chat_id=44),
+        SimpleNamespace(args=[]),
+        "lista",
+    )
+    assert b._list_message_id is not None
+    kb = b._app.bot.sent[0][2]["reply_markup"]
+    rows = kb.inline_keyboard
+    assert rows[0][0].text == "▶️ Tema Sonando", rows
+    assert rows[0][0].callback_data == "lst:close", rows
+    assert [btn.text for btn in rows[1]] == ["·", "❌", "·"]
+
+    list_id = b._list_message_id
+    await b._on_list_callback(
+        FakeUpdate("lst:close", user_id=50, chat_id=44), SimpleNamespace(args=[])
+    )
+    assert b._list_message_id is None, "tocar el tema en radio cierra la lista"
+    assert (44, list_id) in b._app.bot.deleted, "se desvanece al cerrar"
 
 
 async def test_list_paginates_with_arrows():
@@ -2221,6 +2250,7 @@ def run():
     asyncio.run(test_quality_same_level_is_ignored())
     asyncio.run(test_list_button_opens_separate_message())
     asyncio.run(test_list_open_for_user_no_track_buttons())
+    asyncio.run(test_list_radio_shows_current())
     asyncio.run(test_list_paginates_with_arrows())
     asyncio.run(test_list_reopen_deletes_old_and_sends_new())
     asyncio.run(test_list_select_plays_and_closes())
