@@ -63,12 +63,13 @@ errores que no llegan al admin) con el plan Fase 1-6 aprobado por el usuario,
 mas el fix del bot congelado (3ra ronda, timeouts de resolucion) y la card
 siempre al final (4ta ronda).
 
-**En desarrollo (post-v0.3.2): Ronda 8 — playlist al toque y persistencia.** Al
+**En desarrollo (post-v0.3.2): rondas 8, 9, 10 y 10b (112 tests verdes), sin release todavia.**
+La Ronda 8 (playlist al toque y persistencia): Al
 pegar un link de playlist/mix: arrancan YA los primeros 15 temas (quick-load) y
 el total real se reporta ("Playlist (15/N): …"), mientras el RESTO se expande en
 segundo plano hasta 5000 temas (timeout 300s, dedupe por URL, si cambias de
 playlist se cancela la expansión anterior; el 📋 se actualiza solo). El bot no
-hace wrap prematuro: si la expansión sigue corriendo y llegás al último tema
+hace wrap prematuro: si la expansión sigue corriendo y llegas al último tema
 cargado, espera la anexión en vez de volver al primero. La playlist, la canción,
 el cursor y la página del 📋 SE PERSISTEN (al reiniciar se restaura la posición
 real). Fix ▶️: antes descartaba la playlist (set_current limpiaba los items).
@@ -129,6 +130,17 @@ RuntimeError → el bot responde "No se pudo reproducir: ..." en vez de una card
 devuelve en el deadline (un thread bloqueado en Event.wait no se cancela, cuelga
 para siempre) → se usa `Event.wait(timeout)` que devuelve False.
 3 tests nuevos. **112 tests verdes**.
+
+**Chat permitido (grupo unico) + log de rechazo (2026-09-09).** El bot solo
+responde en el chat configurado (`ALLOWED_CHAT_ID`), fijado con el primer
+`/start` del dueno; los mensajes de otros chats (privado u otros grupos) se
+descartan de inmediato. El log de rechazo ahora incluye el `chat_id`
+rechazado para facilitar el diagnostico:
+`Rechazado mensaje de chat no permitido (chat_id=-100...).` Cambiar de grupo
+se hace desde la PC: `runtime\python\python.exe src\setup_cli.py set-chat
+<id>` (el id se obtiene reenviando un mensaje del grupo a @getidsbot, o
+leyendo el `chat_id` del propio log). Revalidado en vivo por el usuario:
+directos cargan sincronizados y el bot responde en el grupo correcto.
 
 - **Mensaje de la lista (2026-09-08, ronda 7)**: decisión del usuario NO
   trabajar sobre el comando sino rediseñar el 📋: lista como mensaje separado,
@@ -301,7 +313,7 @@ Presentación ≠ estado de dominio. 1 test ajustado + 1 nuevo (si resolve falla
    controlar musica, admin = todo. Comando `/solicitar` permite a user pedir
    acceso dj al admin.
 - **Botones de la tarjeta**: user ve todos pero solo dj/admin pueden usarlos**. El
-  user ve todos pero al tocarlos recibe toast "No tenes permiso".
+  user ve todos pero al tocarlos recibe toast "No tiene permiso para eso".
 - **Comando `/solicitar`**: user escribe `/solicitar` y el admin recibe un
    mensaje para decidir si darle o no acceso.
 - **set_my_commands**: menu "/" muestra solo /start /buscar /solicitar /adduser
@@ -351,23 +363,27 @@ Presentación ≠ estado de dominio. 1 test ajustado + 1 nuevo (si resolve falla
   retry de `send_photo`.
 
 ## Pendientes / ToDo
-- [ ] **Revalidar la ronda 10b en vivo**: probar un directo de YouTube Live
+- [ ] **Push del trabajo actual (rondas 8-10b + log del chat rechazado)**: 112
+   tests verdes y revalidado en vivo por el usuario; falta su aprobación
+   explícita para commit + push del commit pendiente (cambios sin commitear:
+   bot.py con el log del chat_id y ESTADO.md actualizado).
+- [x] **Revalidar la ronda 10b en vivo**: probar un directo de YouTube Live
    (p.ej. Vatican Media) en Telegram y confirmar que carga (video+audio
    sincronizados, con miniatura) y que si el load falla el bot responde "No se
-   pudo reproducir" (nunca "Sonando" en idle). Aprobación del usuario antes de
-   push.
-- [ ] **Revalidar la ronda 10 en vivo**: probar un directo de YouTube Live en
+   pudo reproducir" (nunca "Sonando" en idle). Confirmado por el usuario en
+   vivo (2026-09-09): todo funciona.
+- [x] **Revalidar la ronda 10 en vivo**: probar un directo de YouTube Live en
    Telegram por unos minutos y confirmar que el audio ya NO va desfasado del
    video (fix del master .m3u8 local); probar `/buscar artista - cancion` con
    la card a la vista (que el listado quede ABAJO de la card, cancelar lo
    borra y deja la card, y elegir muestre la card nueva con la miniatura).
-   Aprobación del usuario antes de commit/push.
-- [ ] **Revalidar la ronda 8 en vivo**: probar en Telegram una playlist larga
+   Confirmado por el usuario en vivo (2026-09-09).
+- [x] **Revalidar la ronda 8 en vivo**: probar en Telegram una playlist larga
    (link → arranca YA con "Playlist (15/N)", resto en segundo plano con la card
    avisando "✅ Playlist cargada: N temas", 📋 con todo), un video EN VIVO (que
    suene con audio), y reiniciar el bot a mitad de una playlist (que retome la
-   canción y el 📋 en la página correcta). Aprobación del usuario antes de
-   commit/push.
+   canción y el 📋 en la página correcta). Confirmado por el usuario en vivo
+   (2026-09-09).
 - [ ] **Revalidar la lista en vivo (ronda 7)**: probar el 📋 en Telegram
    (admin/dj ve botones de tema, paginar ◀▶, elegir reproduce y cierra, ❌
    cierra para cualquiera, reapertura borra y manda nueva, user abre sin
@@ -435,6 +451,12 @@ Presentación ≠ estado de dominio. 1 test ajustado + 1 nuevo (si resolve falla
    botones de control, /buscar requiere dj, /solicitar llega al admin.
 
 ## Decisiones recientes
+- **Idioma de artefactos (2026-09-09)**: todo artefacto escrito (commits,
+  README, guias, comentarios de codigo, strings de UI) se redacta en espanol
+  neutro con tono Venezuela: sin voseo, sin giros rioplatenses, sin modismos
+  regionales; los terminos tecnicos se mantienen como son y el chat
+  conversacional queda libre. Regla vigente: cualquier artefacto que no la
+  cumpla se corrige.
 - **v0.3.1 bugfix plan (2026-09-07)**: fixes de los 4 bugs post-v0.3.0 (reanudar
   tras apagado, audio sin sonido, stop que borraba, errores invisibles).
   Errores al OWNER_ID directo (chat privado), no al allowed_chat_id. Botones

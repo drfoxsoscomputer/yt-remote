@@ -32,7 +32,9 @@ PASO 3 - ARRANCAR
 2. La primera vez le pide su TOKEN y su ID. Péguelos como indica.
 3. El bot arranca solo. Déjelo abierto.
 4. Cree un grupo en Telegram, agregue el bot y escriba:   /start
-   El bot se configura solo para funcionar ahí.
+   El bot se configura solo para funcionar ahí. Es el chat donde
+   responderá; los mensajes de otros chats (privado u otros grupos)
+   se ignoran.
 
 
 CÓMO BUSCAR Y REPRODUCIR
@@ -150,6 +152,16 @@ PROBLEMAS COMUNES
 - Si al hacer doble clic no pasa nada, vuelva a descargar la versión
   completa desde el repositorio.
 - Si el bot no responde en el grupo, verifique que haya agregado el bot
-  y le haya enviado /start.
+  y le haya enviado /start en ESE grupo. El bot ignora los mensajes de
+  otros chats (privado u otros grupos); en la consola aparece
+  "Rechazado mensaje de chat no permitido".
+- Si el bot ignora un grupo nuevo, cambie el grupo permitido: detenga el
+  bot (Ctrl+C), consiga el ID del grupo reenviando un mensaje a @getidsbot
+  (le responde un número negativo), y ejecute en la carpeta:
+  runtime\python\python.exe src\setup_cli.py set-chat <id>
+  Luego reinicie ytremote.bat y envíe /start en el grupo.
+- Si Telegram dice que "el bot no puede unirse a grupos", revise los
+  permisos del bot en @BotFather (comando /setjoingroups) y los ajustes
+  del grupo.
 - Si un video no se puede reproducir, puede que esté restringido o
   no esté disponible en su país.
