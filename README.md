@@ -2,7 +2,7 @@
   <img src="static/img/logo-ytremote.png" alt="YT-Remote" width="180" />
 </p>
 
-# YT-Remote
+# <p align="center"> YT-Remote </p>
 
 Bot de Telegram para controlar la reproducción de videos de YouTube en su PC.
 Búsqueda por chat, tarjeta de control con botones, radio automática por artista.
