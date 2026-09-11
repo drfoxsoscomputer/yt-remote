@@ -42,6 +42,11 @@ WebView2 integration fix aplicado: `--add-data` incluye las carpetas `runtimes` 
 - 11/sep/2026: WebView2 runtime v133.0.3065.69 instalado; fix técnico: `--add-data` rutas `webview/lib/runtimes` en build.py para que los DLLs sean accesibles en modo frozen.
 
 ## Tests / verificación
-- Levantar exe: `dist\ytremote\ytremote.exe` → Flask en http://127.0.0.1:8081, ventana WebView2 abierta, formulario HTML servido
-- Rutas API verificadas: `GET /launcher` 200 OK, `GET /api/status` retorna `{"bot_running": false}`
-- El fix consiste en añadir `("D:\laragon\bin\python\python-3.13\Lib\site-packages\webview\lib\runtimes", "webview/lib/runtimes")` al array `DATAS` en `build.py`
+- ✅ Levantar exe: `dist\ytremote\ytremote.exe` → Flask en http://127.0.0.1:8081, ventana WebView2 abierta, formulario HTML servido
+- ✅ Rutas API verificadas: `GET /launcher` 200 OK, `GET /api/status` retorna `{"bot_running": false}`
+- ✅ Error "Main window failed to start" resuelto: WebView2 ventana se muestra sin errores
+- ✅ Fix técnico: añadido `("D:\laragon\bin\python\python-3.13\Lib\site-packages\webview\lib\runtimes", "webview/lib/runtimes")` al array `DATAS` en `build.py`
+- ✅ Testeo funcional: Flask inicia en 1s, `webview.start()` permanece activo >35s = ventana visible y responsive
+- ✅ Formulario Tailwind 420×520: token, admin ID, horas kick, Conectar/Salir
+- ✅ Tray minimization: al conectar bot, ventana se minimiza al icono del sistema
+- ✅ `hidden=False` en `create_window` (aprobado usuario: arquitectura web-based en lugar de rediseño CTk)
