@@ -37,8 +37,9 @@ DATAS = [
     ("ytremote.ico", "."),
     ("ytremote.manifest", "."),
     # WebView2 runtimes: necesarias para interop_dll_path() en modo frozen (PyInstaller)
-    # Sin estos, el exe falla con "Main window failed to start" al crear la ventana WebView2
-    ("D:\laragon\bin\python\python-3.13\Lib\site-packages\webview\lib\runtimes", "webview/lib/runtimes"),
+    # Se toman de assets/webview2/runtimes (vendedas en el repo) para que la
+    # build sea portable: no depende del Python ni del site-packages de la máquina.
+    ("assets/webview2/runtimes", "webview/lib/runtimes"),
 ]
 
 # Hidden imports necesarios para el launcher web

@@ -3,8 +3,9 @@
 Bot de Telegram para controlar la reproducción de videos de YouTube en su PC.
 Búsqueda por chat, tarjeta de control con botones, radio automática por artista.
 
-**Versión actual:** v0.4.0 (calidad en la tarjeta, playlist al toque con
-persistencia, directos sincronizados y tarjeta honesta).
+**Versión actual:** v1.0.0 (launcher con ventana, tarjeta de control con
+botones, calidad elegible, playlist con persistencia, directos sincronizados
+y expulsión automática de invitados).
 
 ## Descarga e instalación
 
@@ -14,10 +15,42 @@ dentro de la carpeta (es portable de verdad).
 
 1. Descargue el ZIP desde la página de releases de GitHub
 2. Descomprímalo donde quiera
-3. Doble clic en `ytremote.bat`. La primera vez le guía para configurar
-   su TOKEN y su ID de Telegram (se guardan en `.env`, no se suben a GitHub)
-4. Deje la ventana abierta
+3. Doble clic en `ytremote.exe`. Se abre la ventana del launcher: pegue su
+   TOKEN de bot (créelo con [@BotFather](https://t.me/BotFather)) y su ID de
+   Telegram (consíguelo con [@userinfobot](https://t.me/userinfobot)), y
+   presione **Conectar**
+4. El bot arranca en segundo plano y la ventana se oculta al lado del reloj.
+   Para abrirla de nuevo, doble clic en el ícono de YT-Remote en la bandeja
 5. En un grupo de Telegram agregue el bot y escriba `/start`
+
+## Ventana del launcher
+
+La ventana de YT-Remote es la puerta de entrada del programa:
+
+| Campo | Qué es |
+|-------|--------|
+| Token del bot | El código que le dio `@BotFather` al crear el bot |
+| ID de admin | Su ID numérico de Telegram (primer usuario con rol admin) |
+| Expulsar tras horas | Horas de tolerancia para invitados: `0` desactiva la expulsión |
+
+Botones:
+
+| Botón | Qué hace |
+|-------|---------|
+| **Conectar** | Guarda la configuración en `session.enc` y arranca el bot |
+| **Salir** | Cierra la ventana sin iniciar el bot |
+| **Detener** | Detiene el bot sin borrar la configuración guardada |
+| **Cerrar sesión** | Borra la configuración y vuelve al formulario vacío |
+
+Al cerrar la ventana con la **X**, el programa pregunta: *"¿Minimizar al lado
+del reloj?"* (el bot sigue corriendo) o salir (detiene el bot y cierra). Si
+ya hay una sesión guardada, al abrir el programa el bot se conecta solo y
+pasa al lado del reloj automáticamente. La configuración queda en
+`session.enc`, al lado del ejecutable, y **no se sube a GitHub**.
+
+Solo puede ejecutarse una instancia a la vez: si intenta abrir otra, aparece
+un aviso. La ventana requiere el runtime *Microsoft Edge WebView2* (Windows
+10/11 suelen traerlo; si falta, el programa indica cómo instalarlo).
 
 ## Cómo buscar
 
@@ -131,9 +164,9 @@ el botón 👥.
 
 ## Variables de entorno
 
-La primera vez que ejecute `ytremote.bat`, el wizard le guía para crear
-el archivo `.env` con sus datos. También puede crearlo a mano copiando
-`.env.example` y completando:
+La ventana del launcher le pide estos datos la primera vez y guarda la
+sesión en `session.enc`. Si prefiere configurarlos a mano, copie
+`.env.example` y complete:
 
 | Variable | Obligatoria | Cómo obtenerla |
 |----------|-------------|----------------|
@@ -141,8 +174,8 @@ el archivo `.env` con sus datos. También puede crearlo a mano copiando
 | `OWNER_ID` | sí | Su ID numérico de Telegram con [@userinfobot](https://t.me/userinfobot) |
 | `ALLOWED_CHAT_ID` | no | Se configura solo con el primer `/start` del dueño |
 
-El `.env` **no se sube a GitHub** (está en `.gitignore`). El `.env.example`
-muestra el formato y es seguro versionarlo.
+Ni `.env` ni `session.enc` se suben a GitHub (están en `.gitignore`). El
+`.env.example` muestra el formato y es seguro versionarlo.
 
 ## Un solo grupo (chat permitido)
 
@@ -159,7 +192,7 @@ Para cambiar el grupo permitido:
    `-100...`).
 3. En la carpeta del bot ejecute:
    `runtime\python\python.exe src\setup_cli.py set-chat <id>`
-4. Vuelva a iniciar `ytremote.bat` y envíe `/start` de nuevo en el grupo.
+4. Vuelva a abrir `ytremote.exe` y envíe `/start` de nuevo en el grupo.
 
 Si Telegram le avisa que "este bot no puede unirse a grupos", revise los
 permisos del bot en [@BotFather](https://t.me/BotFather) (`/setjoingroups`).

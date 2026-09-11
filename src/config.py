@@ -1,14 +1,20 @@
-"""Carga de configuracion desde config.json y .env.
+"""Carga de configuracion desde config.json, .env y variables de entorno.
 
-El token de Telegram se lee PRIMERO del archivo .env (que NO se sube a
-GitHub, por seguridad). config.json mantiene valores no sensibles y un
-placeholder de token como respaldo.
+El orden de precedencia del token es: variables de entorno (las pasa el
+launcher al subproceso del bot) -> archivo .env (que NO se sube a GitHub)
+-> config.json (placeholder de respaldo).
 """
 
 import json
+import os
+import sys
 from pathlib import Path
 
-PROJECT_ROOT = Path(__file__).resolve().parent.parent
+if getattr(sys, "frozen", False):
+    # Dentro del .exe: la data vive al lado del ejecutable (portable).
+    PROJECT_ROOT = Path(os.path.dirname(os.path.abspath(sys.executable)))
+else:
+    PROJECT_ROOT = Path(__file__).resolve().parent.parent
 CONFIG_PATH = PROJECT_ROOT / "config.json"
 ENV_PATH = PROJECT_ROOT / ".env"
 
@@ -59,10 +65,21 @@ def load_config() -> Config:
         mpv_path = PROJECT_ROOT / mpv_path
     mpv_path = str(mpv_path)
 
-    # El token real va en .env (no se sube a GitHub). El de config.json es
-    # solo un placeholder de respaldo.
+    # Orden de precedencia: variable de entorno (la setea el launcher) ->
+    # archivo .env -> config.json (placeholder de respaldo).
     env = _read_dotenv()
-    token = env.get("TELEGRAM_TOKEN", str(data.get("telegram_token", "")))
+    token = os.environ.get(
+        "TELEGRAM_TOKEN",
+        env.get("TELEGRAM_TOKEN", str(data.get("telegram_token", ""))),
+    )
+
+    # Ruta de mpv: entorno/JSON (relativa a la raiz del proyecto).
+    env_mpv = os.environ.get("MPV_PATH")
+    raw_mpv = env_mpv or str(data.get("mpv_path", "mpv"))
+    mpv_path = Path(raw_mpv)
+    if not mpv_path.is_absolute():
+        mpv_path = PROJECT_ROOT / mpv_path
+    mpv_path = str(mpv_path)
 
     def _to_int(value: str | None) -> int | None:
         if value is None or str(value).strip() == "":
@@ -72,8 +89,15 @@ def load_config() -> Config:
         except ValueError:
             return None
 
-    owner_id = _to_int(env.get("OWNER_ID"))
-    allowed_chat_id = _to_int(env.get("ALLOWED_CHAT_ID"))
+    def _to_int_env(key: str) -> int | None:
+        return _to_int(os.environ.get(key))
+
+    owner_id = _to_int_env("OWNER_ID")
+    if owner_id is None:
+        owner_id = _to_int(env.get("OWNER_ID"))
+    allowed_chat_id = _to_int_env("ALLOWED_CHAT_ID")
+    if allowed_chat_id is None:
+        allowed_chat_id = _to_int(env.get("ALLOWED_CHAT_ID"))
 
     config = Config(
         token=token,
@@ -87,7 +111,8 @@ def load_config() -> Config:
     # Expulsion automatica de invitados: horas de tolerancia para un usuario
     # con rol 'user'. 0 o ausente = desactivada. Un valor invalido cae a 0.
     try:
-        config.kick_after_hours = max(0.0, float(data.get("kick_after_hours", 0) or 0))
+        kick_raw = os.environ.get("KICK_AFTER_HOURS", data.get("kick_after_hours", 0))
+        config.kick_after_hours = max(0.0, float(kick_raw or 0))
     except (TypeError, ValueError):
         config.kick_after_hours = 0.0
 

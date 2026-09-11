@@ -1,0 +1,26 @@
+{
+  "name": "yt-remote",
+  "version": "1.0.0",
+  "description": "Bot de Telegram para controlar la reproducción de videos de YouTube en su PC. Búsqueda por chat, tarjeta de control con botones, radio automática por artista.",
+  "main": "index.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/drfoxsoscomputer/yt-remote.git"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "type": "commonjs",
+  "bugs": {
+    "url": "https://github.com/drfoxsoscomputer/yt-remote/issues"
+  },
+  "homepage": "https://github.com/drfoxsoscomputer/yt-remote#readme",
+  "devDependencies": {
+    "autoprefixer": "^10.5.6",
+    "postcss": "^8.5.28",
+    "tailwindcss": "^3.4.0"
+  }
+}

@@ -9,7 +9,9 @@ from collections import deque
 import asyncio
 import logging
 import os
+import secrets
 import time
+from typing import Optional
 
 from telegram import (
     BotCommand,
@@ -1519,6 +1521,15 @@ class YTRemoteBot:
                 + f"Comandos disponibles para su rol ({user_role}):\n"
                 + self.help_for_role(user_role),
             )
+
+    async def health_check(self) -> bool:
+        """Verifica que el bot esté saludable (polling activo, token válido)."""
+        try:
+            # Verificar que el bot puede hacer una llamada simple a la API
+            me = await self._app.bot.get_me()
+            return me is not None and me.id == self.config.owner_id
+        except Exception:
+            return False
 
     async def cmd_play(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         """Busca y reproduce en un solo paso desde /buscar.
