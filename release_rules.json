@@ -1,0 +1,87 @@
+{
+  "_comment": "Fuente unica de reglas para armar el ZIP portable. Lo consume build_exe.py. No duplicar estas reglas en otro archivo.",
+  "version": "0.5.0",
+  "zip_name_template": "yt-remote-{version}-portable.zip",
+  "exe_name": "ytremote.exe",
+  "include_top_files": [
+    "ytremote.exe",
+    "config.json",
+    "README.md",
+    "GUIA.txt"
+  ],
+  "exclude_top_files": [
+    "ytremote.bat",
+    "ESTADO.md",
+    "build_exe.py",
+    "requirements.txt",
+    "release_rules.json",
+    "yt-remote-v0.4.0-portable.zip",
+    "yt-remote-v0.5.0-portable.zip",
+    ".env.example",
+    ".env",
+    "launcher.spec",
+    "pytest.ini",
+    "gitleaks.toml"
+  ],
+  "exclude_top_dirs": [
+    ".atl",
+    ".git",
+    ".githooks",
+    ".pytest_cache",
+    "bin",
+    "build",
+    "dist",
+    "scripts"
+  ],
+  "folders": {
+    "src": {
+      "allowed_files": [
+        "__init__.py",
+        "bot.py",
+        "config.py",
+        "main.py",
+        "persistence.py",
+        "player.py",
+        "queue_manager.py",
+        "roles.py",
+        "search.py",
+        "setup_cli.py"
+      ]
+    },
+    "data": {
+      "allowed_files": [
+        ".gitkeep"
+      ]
+    },
+    "runtime": {
+      "mpv": "include_all",
+      "python_core": "include_all",
+      "site_packages_allowlist": [
+        "anyio",
+        "apscheduler",
+        "certifi",
+        "colorama",
+        "h11",
+        "httpcore",
+        "httpx",
+        "idna",
+        "iniconfig",
+        "packaging",
+        "python_telegram_bot",
+        "telegram",
+        "typing_extensions",
+        "tzdata",
+        "tzlocal",
+        "yt_dlp"
+      ],
+      "site_packages_extra_loose_files": [
+        "typing_extensions.py"
+      ],
+      "always_exclude_globs": [
+        "**/__pycache__/**",
+        "**/*.pyc",
+        "**/*.pyo"
+      ]
+    }
+  }
+}

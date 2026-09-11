@@ -1,0 +1,53 @@
+/* tema.css — Estilos adicionales específicos de YT-Remote
+   (Tailwind compilado ya incluye la mayoría; este archivo es para overrides puntuales) */
+
+/* Scrollbar personalizada para tema oscuro */
+::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+::-webkit-scrollbar-track {
+  background: var(--fondo);
+}
+::-webkit-scrollbar-thumb {
+  background: var(--borde);
+  border-radius: 4px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: var(--texto-dim);
+}
+
+/* Animación de entrada suave para el formulario */
+@keyframes fadeInUp {
+  from { opacity: 0; transform: translateY(10px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+#connect-form, #connected-view {
+  animation: fadeInUp 0.3s ease-out;
+}
+
+/* Focus visible accesible */
+*:focus-visible {
+  outline: 2px solid var(--azul);
+  outline-offset: 2px;
+}
+
+/* Reducir movimiento para usuarios que lo prefieren */
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
+}
+
+/* La ventana nunca muestra barra de scroll: si algún día faltara espacio,
+   se scrollea solo el formulario por dentro y el logo arriba queda intacto */
+html, body {
+  height: 100%;
+  overflow: hidden;
+}
+#form-container {
+  max-height: 100%;
+  overflow-y: auto;
+}

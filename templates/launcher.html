@@ -1,0 +1,109 @@
+<!doctype html>
+<html lang="es" class="dark">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>YT-Remote · Conectar</title>
+<link rel="stylesheet" href="/static/css/tailwind.css">
+<link rel="stylesheet" href="/static/css/tema.css">
+<style>
+  /* Critical CSS: primera pintura ya centrada v+h y con fondo del tema */
+  html, body { height: 100%; margin: 0; }
+  body {
+    background: #1a1a2e;
+    color: #e8e8e8;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    padding: 1rem;
+    box-sizing: border-box;
+    font-family: 'Segoe UI', system-ui, sans-serif;
+  }
+</style>
+</head>
+<body class="bg-fondo text-texto min-h-screen antialiased flex flex-col items-center justify-center px-4">
+
+  <div class="mb-2">
+    <img src="/static/img/logo-ytremote.png" alt="YT-Remote"
+         class="w-20 h-20 mx-auto object-contain">
+  </div>
+
+  <h1 class="text-2xl font-bold text-texto text-center mb-1">YT-Remote</h1>
+  <p class="text-zinc-400 text-sm mb-4 text-center">Control remoto de YouTube para Telegram</p>
+
+  <div id="form-container" class="w-full max-w-sm space-y-4">
+    <div id="connect-form" class="bg-panel rounded-2xl p-5 border border-borde">
+      <div class="mb-3">
+        <label class="block text-sm font-medium text-texto-dim mb-2">Token del bot</label>
+        <div class="relative">
+          <input type="password" id="bot_token" autocomplete="new-password"
+                 class="w-full bg-input border border-borde rounded-xl px-4 py-3 text-texto placeholder-texto-dim
+                        focus:outline-none focus:ring-2 focus:ring-azul focus:border-transparent"
+                 placeholder="123456:ABC-DEF1234ghIkl-zyx57W2v1u123ew11">
+          <button type="button" id="toggle-token" aria-label="Mostrar/ocultar token"
+                  class="absolute right-3 top-1/2 -translate-y-1/2 text-texto-dim hover:text-azul transition">
+            <svg class="w-5 h-5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg>
+          </button>
+        </div>
+      </div>
+
+      <div class="mb-3">
+        <label class="block text-sm font-medium text-texto-dim mb-2">Tu ID de Telegram (admin)</label>
+        <div class="relative">
+          <input type="password" id="admin_id" autocomplete="new-password"
+                 class="w-full bg-input border border-borde rounded-xl px-4 py-3 text-texto placeholder-texto-dim
+                        focus:outline-none focus:ring-2 focus:ring-azul focus:border-transparent"
+                 placeholder="123456789">
+          <button type="button" id="toggle-admin" aria-label="Mostrar/ocultar ID"
+                  class="absolute right-3 top-1/2 -translate-y-1/2 text-texto-dim hover:text-azul transition">
+            <svg class="w-5 h-5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg>
+          </button>
+        </div>
+      </div>
+
+      <div class="mb-4">
+        <label class="block text-sm font-medium text-texto-dim mb-2">Expulsar usuarios tras horas (0 = off)</label>
+        <input type="number" id="kick_hours" min="0" max="168" value="0"
+               class="w-full bg-input border border-borde rounded-xl px-4 py-3 text-texto placeholder-texto-dim
+                      focus:outline-none focus:ring-2 focus:ring-azul focus:border-transparent">
+      </div>
+
+      <div id="error-msg" class="hidden text-red-400 text-sm text-center mb-3 min-h-[1.25rem]"></div>
+
+      <div class="flex gap-3">
+        <button type="button" id="btn-connect"
+                class="btn-primario flex-1 py-3 rounded-xl font-semibold transition
+                       disabled:opacity-50 disabled:cursor-not-allowed">
+          <span id="btn-text">Conectar</span>
+          <span id="btn-loading" class="hidden inline-flex items-center gap-2">
+            <svg class="animate-spin h-5 w-5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor"/><path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"/></svg>
+            Conectando...
+          </span>
+        </button>
+
+        <button type="button" id="btn-exit"
+                class="btn-secundario flex-1 py-3 rounded-xl font-semibold transition">
+          Salir
+        </button>
+      </div>
+    </div>
+
+    <div id="connected-view" class="hidden bg-panel rounded-2xl p-5 border border-borde text-center">
+      <div class="w-16 h-16 mx-auto mb-4 bg-verde/20 rounded-full flex items-center justify-center">
+        <svg class="w-8 h-8 text-verde" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M22 11.08V12a10 10 0 11-5.93-9.14"/><polyline points="22 4 12 14.01 9 11.01"/></svg>
+      </div>
+      <h2 class="text-xl font-bold text-texto mb-1">Conectado</h2>
+      <p class="text-texto-dim mb-4">El bot está corriendo en segundo plano.</p>
+      <div class="flex gap-3">
+        <button type="button" id="btn-stop" class="btn-secundario flex-1 py-3 rounded-xl font-semibold transition">Detener bot</button>
+        <button type="button" id="btn-logout" class="btn-peligro flex-1 py-3 rounded-xl font-semibold transition">Cerrar sesión</button>
+      </div>
+    </div>
+  </div>
+
+  <p class="text-xs text-zinc-500 mt-5 text-center">Servidor local en puerto 8081</p>
+
+  <script src="/static/js/launcher.js"></script>
+</body>
+</html>

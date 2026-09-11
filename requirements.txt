@@ -1,0 +1,10 @@
+python-telegram-bot==20.8
+yt-dlp>=2024.1.1
+python-mpv-jsonipc>=0.2.0
+python-dotenv>=1.0.0
+cryptography>=42.0.0
+qrcode[pil]>=7.4.2
+pillow>=10.0.0
+keyring>=24.0.0
+pywin32>=306; sys_platform == "win32"
+pyinstaller>=6.0.0

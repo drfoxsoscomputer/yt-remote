@@ -1,0 +1,83 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* Tema YT-Remote: paleta oscura con acentos de colores Telegram */
+:root {
+  --fondo: #1a1a2e;
+  --panel: #1f1f3a;
+  --input: #16162a;
+  --borde: #2d2d4a;
+  --texto: #e8e8e8;
+  --texto-dim: #8a8aa3;
+  --azul: #229ed9;
+  --azul-hover: #1c88ce;
+  --verde: #31c471;
+  --verde-hover: #25a85f;
+  --rojo: #e53935;
+  --rojo-hover: #c62828;
+}
+
+@layer base {
+  body { @apply bg-fondo text-texto; }
+}
+
+@layer components {
+  .btn-primario {
+    @apply bg-azul text-white font-semibold py-3 px-6 rounded-xl
+           hover:bg-azul-hover focus:outline-none focus:ring-2 focus:ring-azul focus:ring-offset-2 focus:ring-offset-fondo
+           transition-colors duration-200;
+  }
+  .btn-secundario {
+    @apply bg-transparent text-texto border border-borde font-semibold py-3 px-6 rounded-xl
+           hover:bg-borde/50 focus:outline-none focus:ring-2 focus:ring-azul focus:ring-offset-2 focus:ring-offset-fondo
+           transition-colors duration-200;
+  }
+  .btn-peligro {
+    @apply bg-rojo text-white font-semibold py-3 px-6 rounded-xl
+           hover:bg-rojo-hover focus:outline-none focus:ring-2 focus:ring-rojo focus:ring-offset-2 focus:ring-offset-fondo
+           transition-colors duration-200;
+  }
+  .btn-fantasma {
+    @apply bg-transparent text-texto-dim hover:text-texto hover:bg-borde/50
+           px-4 py-2 rounded-lg transition-colors duration-200;
+  }
+
+  .input-field {
+    @apply w-full bg-input border border-borde rounded-xl px-4 py-3 text-texto placeholder-texto-dim
+           focus:outline-none focus:ring-2 focus:ring-oro focus:border-transparent transition;
+  }
+
+  .card {
+    @apply bg-panel border border-borde rounded-2xl p-6;
+  }
+}
+
+@layer utilities {
+  .text-fondo { color: var(--fondo); }
+  .text-panel { color: var(--panel); }
+  .text-input { color: var(--input); }
+  .text-borde { color: var(--borde); }
+  .text-texto { color: var(--texto); }
+  .text-texto-dim { color: var(--texto-dim); }
+  .text-azul { color: var(--azul); }
+  .text-verde { color: var(--verde); }
+  .text-rojo { color: var(--rojo); }
+
+  .bg-fondo { background-color: var(--fondo); }
+  .bg-panel { background-color: var(--panel); }
+  .bg-input { background-color: var(--input); }
+  .bg-borde { background-color: var(--borde); }
+  .bg-azul { background-color: var(--azul); }
+  .bg-verde { background-color: var(--verde); }
+  .bg-rojo { background-color: var(--rojo); }
+
+  .border-borde { border-color: var(--borde); }
+  .focus\:ring-azul:focus { --tw-ring-color: var(--azul); }
+  .focus\:ring-verde:focus { --tw-ring-color: var(--verde); }
+  .focus\:ring-rojo:focus { --tw-ring-color: var(--rojo); }
+
+  .hover\:bg-azul-hover:hover { background-color: var(--azul-hover); }
+  .hover\:bg-verde-hover:hover { background-color: var(--verde-hover); }
+  .hover\:bg-rojo-hover:hover { background-color: var(--rojo-hover); }
+}

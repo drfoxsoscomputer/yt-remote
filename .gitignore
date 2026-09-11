@@ -18,9 +18,10 @@ __pycache__/
 .env.example.tmp
 *.swp
 
-# Binarios y estaticos no usados (mini app revertida)
+# Binarios no usados (mini app revertida)
 bin/
-static/
+
+# El launcher sirve static/ (css, js, img, logo) via Flask: se versiona
 
 # Distribucion portable (se sube a GitHub release como asset)
 yt-remote-*.zip
@@ -55,3 +56,22 @@ runtime/python/Lib/site-packages/pluggy/
 runtime/python/Lib/site-packages/pluggy-*.dist-info/
 runtime/python/Lib/site-packages/pytest-*.dist-info/
 runtime/python/Lib/site-packages/_pip-*.dist-info/
+
+# Artefactos y dependencias de build (no se suben)
+node_modules/
+dist/
+build/
+
+# Dependencias sin uso en el portable (GUI antigua revertida)
+runtime/python/Lib/site-packages/customtkinter/
+runtime/python/Lib/site-packages/customtkinter-*.dist-info/
+runtime/python/Lib/site-packages/darkdetect/
+runtime/python/Lib/site-packages/darkdetect-*.dist-info/
+
+# Sesion local del launcher y volcados de prueba
+session.enc
+/test_*.txt
+test_webview.py
+test_exe_functionality.py
+src/test_emoji_font.py
+src/test_launcher_smoke.py
