@@ -1,6 +1,7 @@
-# Data generados en tiempo de ejecucion
+# Data generados en tiempo de ejecucion (la base de roles trae IDs reales de Telegram)
 data/roles.json
 data/*.json
+data/*.db
 
 # Cache Python
 __pycache__/

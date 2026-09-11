@@ -6,21 +6,24 @@ build.py — Empaquetado portable de YT-Remote (PyInstaller onedir)
 Genera dist/ytremote/ytremote.exe con:
   - templates/ y static/ junto al exe (para Flask + pywebview)
   - ytremote.ico embebido + tray
-  - splash.png nativo (si arranque > 1.5s)
   - ytremote.manifest con dpiAware (evita salto de re-escala)
-  - runtime python portable en _internal/
 
 Uso:
     python build.py          # solo compila el .exe
     python build.py --zip    # compila y arma ZIP portable (tras probar exe)
+
+El ZIP lo arma release_zip.py (lógica compartida con build_exe.py): el exe
+más _internal a la raíz, y junto a ellos runtime/ (allowlist de site-packages),
+src/ del bot, config.json y los docs, siempre según release_rules.json.
 """
 
 import os
 import shutil
 import subprocess
 import sys
-import zipfile
 from pathlib import Path
+
+from release_zip import load_rules, make_release_zip
 
 PROJECT_ROOT = Path(__file__).resolve().parent
 SRC_DIR = PROJECT_ROOT / "src"
@@ -117,24 +120,13 @@ def run_pyinstaller():
 
 
 def make_zip(exe: Path):
-    """Arma ZIP portable con la carpeta completa dist/ytremote/."""
-    version = "1.0.0"
-    zip_name = f"yt-remote-{version}-portable.zip"
-    zip_path = PROJECT_ROOT / zip_name
+    """Arma ZIP portable con el bundle onedir (exe + _internal) + runtime,
+    src/, config.json y docs, según las reglas de release_rules.json.
 
-    print(f"\nCreando {zip_name}...")
-    with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as zf:
-        # Recorrer toda la carpeta dist/ytremote/
-        for root, _, files in os.walk(DIST_DIR):
-            for file in files:
-                file_path = Path(root) / file
-                rel = file_path.relative_to(PROJECT_ROOT / "dist")
-                zf.write(file_path, rel.as_posix())
-
-    print(f"[OK] Release creado: {zip_path}")
-    print(f"   Tamaño: {zip_path.stat().st_size / 1024 / 1024:.1f} MB")
-    print("   Pruebalo antes de distribuir.")
-    return zip_path
+    El nombre del ZIP lleva la versión de release_rules.json (fuente única).
+    """
+    rules = load_rules(PROJECT_ROOT)
+    return make_release_zip(PROJECT_ROOT, rules, dist_dir=DIST_DIR)
 
 
 def main():

@@ -23,7 +23,9 @@ dist\ytremote\ytremote.exe
 - `static/js/launcher.js` — Form submit, toggle eye, `pywebview.api` calls, refleja `/api/status`, error handling
 - `static/img/logo-ytremote.png` — Copia del logo (servida por Flask; entra al bundle vía `static`)
 - `src/bot_process.py` — BotProcess class (start/stop/is_running), reutilizable
-- `build.py` — PyInstaller onedir build; `--add-data` runtimes WebView2 desde `assets/webview2/runtimes` (vendeados, sin rutas de la máquina); `--manifest` dpiAware; `--icon` ytremote.ico; `--splash` QUITADO
+- `build.py` — PyInstaller onedir build; `--add-data` runtimes WebView2 desde `assets/webview2/runtimes` (vendeados, sin rutas de la máquina); `--manifest` dpiAware; `--icon` ytremote.ico; `--splash` QUITADO. El ZIP (`--zip`) lo delega en `release_zip.py`
+- `release_zip.py` — Módulo compartido que arma el ZIP portable para ambos builders; consume las reglas de `release_rules.json` (única fuente: versión, allowlist de site-packages, `include_top_files`, `folders`); modo onedir (exe + `_internal`) o onefile (`exe_file`)
+- `release_rules.json` — Versión 1.0.0; allowlist de runtime recortada a lo que el bot importa de verdad (telegram+httpx+apscheduler, etc.); sin basura de desarrollo
 - `dist/ytremote/ytremote.exe` — Ejecutable (18.0 MB, onedir, sin splash)
 - `ytremote.manifest` — `dpiAware=true` + Microsoft Windows Common Controls 6.0 (evita re-escala ~2.5s)
 - `assets/logo-ytremote.png` — Logo oficial (fuente para `static/img/logo-ytremote.png` y branding)
@@ -36,11 +38,14 @@ UI aprobada y aplicada: paleta Telegram (azul #229ed9 primario, fantasma secunda
 
 Ventana subida a 420x640 y centrada en el **área de trabajo** (SPI_GETWORKAREA: pantalla menos barra de inicio) horizontal y verticalmente, con corrección DPI. Formulario compactado y CSS anti-scroll (`overflow:hidden` en html/body + `#form-container` con scroll interno): el logo nunca se corta ni aparece barra de scroll.
 
+Commiteado y pusheado a `origin/main` como v1.0.0 (`6b67efc`): `README.md` y `GUIA.txt` actualizados al flujo del exe (ventana del launcher, `session.enc`, tray, WebView2). `.gitignore` ajustado (se versiona `static/`; se ignoran `dist`/`build`/`node_modules`/`session.enc` y volcados de prueba).
+
+Pipeline de release v1.0.0 en marcha: `release_zip.py` extrae la lógica del ZIP a un módulo compartido (`build.py --zip` y `build_exe.py` usan la misma fuente). `build.py --zip` ahora arma un ZIP LEAN: `ytremote.exe` + `_internal` a la raíz, y junto a ellos `runtime/` (site-packages solo con la allowlist), `src/` del bot (10 módulos), `config.json`, `README.md` y `GUIA.txt`. Allowlist validada contra imports reales (se recortaron `colorama`, `iniconfig`, `packaging`; se conservaron `apscheduler`/`tzdata`/`tzlocal` porque `bot.py` usa `job_queue.run_repeating`). `data/roles.db` dejó de versionarse (trae IDs reales de Telegram).
+
 ## Pendientes / ToDo
+- [ ] Generar y verificar el ZIP (`python build.py --zip` → `yt-remote-1.0.0-portable.zip`) y publicar GitHub Release v1.0.0 con ese asset
 - [ ] Emparejar con token real: verificar Conectar → bot corre + tray, cerrar X → diálogo nativo (Sí=tray/No=salir)
-- [ ] Definir layout del dist onedir: el bot en modo frozen necesita `runtime\python`, `src\main.py` y `config.json` al lado del exe para auto-conectar (hoy no están en `dist\ytremote`)
-- [ ] Revisar release_rules.json / zips existentes (0.4.0 y 0.5.0) vs estructura onedir nueva
-- [ ] Empaquetado release ZIP portable (`python build.py --zip`)
+- [ ] Próxima vez que se edite el README: colocar `static/img/logo-ytremote.png` centrado al inicio (pendiente explícito del usuario; NO hacerlo en esta tanda)
 
 ## Decisiones recientes
 - 11/sep/2026: Crash "Main window failed to start" = `show()` prematuro. Fix: mover auto-conexión a `webview.start(func)` y quitar `show()` del flujo sin sesión en `src/main_launcher.py`. Sin sesión la ventana nace visible (`hidden=False`); con sesión el bot arranca post-GUI y la ventana se oculta al tray.
@@ -49,6 +54,7 @@ Ventana subida a 420x640 y centrada en el **área de trabajo** (SPI_GETWORKAREA:
 - 11/sep/2026: Paleta Telegram en el launcher. Se eliminó el acento dorado (--oro) que molestaba al usuario; Conectar pasó de rojo YouTube a azul Telegram #229ed9 y Salir/Detener a botón fantasma (para no quedar iguales en fila). Logo `assets/logo-ytremote.png` copiado a `static/img/` (Flask sirve `static/` al lado del exe; la ruta `assets` no se sirve). `build_exe.py` ahora asigna `ytremote.ico` al exe onefile (antes `icon=''`).
 - 11/sep/2026: Logo se cortaba por overflow: ventana 420x520 no alcanzaba (~636px de contenido). Fix: ventana → 420x640, centrado contra el área de trabajo con `SystemParametersInfoW(SPI_GETWORKAREA)` (antes `GetSystemMetrics` de pantalla completa, que incluía la barra de inicio), y CSS anti-scroll (`html,body{overflow:hidden}` + `#form-container` scrollea interno). Medido en 100% DPI: T=96, B=736, barra en 834.
 - 11/sep/2026: UI aprobada por el usuario y primer release del launcher (v1.0.0). Documentación actualizada al flujo real del exe: `README.md` y `GUIA.txt` descartan el wizard `ytremote.bat`/`.env` y explican la ventana del launcher (token + ID admin + horas kick, botones Conectar/Salir/Detener/Cerrar sesión, `session.enc`, tray, WebView2). Convención: artefactos escritos en español neutro (tono Venezuela).
+- 11/sep/2026: Pipeline de ZIP portable unificado en `release_zip.py` (release_rules.json = única fuente para `build.py --zip` y `build_exe.py`). `build.py --zip` arma ZIP lean (exe + `_internal` + runtime allowlist + `src` del bot + `config.json` + docs). Allowlist recortada (fuera `colorama`/`iniconfig`/`packaging`; dentro `apscheduler`/`tzdata`/`tzlocal` por `job_queue`). `data/roles.db` (IDs reales de Telegram) sale del versionado.
 
 ## Tests / verificación
 - ✅ Rebuild `python build.py` (PyInstaller 6.22, Python 3.13) → `dist\ytremote\ytremote.exe` con `assets/webview2/runtimes` en el bundle (win-x64/x86/arm64)
