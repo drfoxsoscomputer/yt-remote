@@ -40,12 +40,13 @@ Ventana subida a 420x640 y centrada en el **área de trabajo** (SPI_GETWORKAREA:
 
 Commiteado y pusheado a `origin/main` como v1.0.0 (`6b67efc`): `README.md` y `GUIA.txt` actualizados al flujo del exe (ventana del launcher, `session.enc`, tray, WebView2). `.gitignore` ajustado (se versiona `static/`; se ignoran `dist`/`build`/`node_modules`/`session.enc` y volcados de prueba).
 
-Pipeline de release v1.0.0 en marcha: `release_zip.py` extrae la lógica del ZIP a un módulo compartido (`build.py --zip` y `build_exe.py` usan la misma fuente). `build.py --zip` ahora arma un ZIP LEAN: `ytremote.exe` + `_internal` a la raíz, y junto a ellos `runtime/` (site-packages solo con la allowlist), `src/` del bot (10 módulos), `config.json`, `README.md` y `GUIA.txt`. Allowlist validada contra imports reales (se recortaron `colorama`, `iniconfig`, `packaging`; se conservaron `apscheduler`/`tzdata`/`tzlocal` porque `bot.py` usa `job_queue.run_repeating`). `data/roles.db` dejó de versionarse (trae IDs reales de Telegram).
+Pipeline de release v1.0.0 EN MARCHA: `release_zip.py` extrae la lógica del ZIP a un módulo compartido (`build.py --zip` y `build_exe.py` usan la misma fuente). `build.py --zip` ahora arma un ZIP LEAN: `ytremote.exe` + `_internal` a la raíz, y junto a ellos `runtime/` (site-packages solo con la allowlist), `src/` del bot (10 módulos), `config.json`, `README.md` y `GUIA.txt`. Allowlist validada contra imports reales (se recortaron `colorama`, `iniconfig`, `packaging`; se conservaron `apscheduler`/`tzdata`/`tzlocal` porque `bot.py` usa `job_queue.run_repeating`). `data/roles.db` dejó de versionarse (trae IDs reales de Telegram).
+
+**✅ RELEASE v1.0.0 PUBLICADO** (11/sep/2026): `yt-remote-1.0.0-portable.zip` = 92.0 MB (3.461 entradas; los viejos 0.5.0 pesaban hasta 132 MB con pip/pytest adentro). Build `python build.py --zip` (commit `9182276`, push `6b67efc..9182276`). Release: https://github.com/drfoxsoscomputer/yt-remote/releases/tag/v1.0.0
 
 ## Pendientes / ToDo
-- [ ] Generar y verificar el ZIP (`python build.py --zip` → `yt-remote-1.0.0-portable.zip`) y publicar GitHub Release v1.0.0 con ese asset
+- [ ] Probar el ZIP descargado del release en una máquina/entorno limpio (emparejar con token real)
 - [ ] Emparejar con token real: verificar Conectar → bot corre + tray, cerrar X → diálogo nativo (Sí=tray/No=salir)
-- [ ] Próxima vez que se edite el README: colocar `static/img/logo-ytremote.png` centrado al inicio (pendiente explícito del usuario; NO hacerlo en esta tanda)
 
 ## Decisiones recientes
 - 11/sep/2026: Crash "Main window failed to start" = `show()` prematuro. Fix: mover auto-conexión a `webview.start(func)` y quitar `show()` del flujo sin sesión en `src/main_launcher.py`. Sin sesión la ventana nace visible (`hidden=False`); con sesión el bot arranca post-GUI y la ventana se oculta al tray.
@@ -55,6 +56,7 @@ Pipeline de release v1.0.0 en marcha: `release_zip.py` extrae la lógica del ZIP
 - 11/sep/2026: Logo se cortaba por overflow: ventana 420x520 no alcanzaba (~636px de contenido). Fix: ventana → 420x640, centrado contra el área de trabajo con `SystemParametersInfoW(SPI_GETWORKAREA)` (antes `GetSystemMetrics` de pantalla completa, que incluía la barra de inicio), y CSS anti-scroll (`html,body{overflow:hidden}` + `#form-container` scrollea interno). Medido en 100% DPI: T=96, B=736, barra en 834.
 - 11/sep/2026: UI aprobada por el usuario y primer release del launcher (v1.0.0). Documentación actualizada al flujo real del exe: `README.md` y `GUIA.txt` descartan el wizard `ytremote.bat`/`.env` y explican la ventana del launcher (token + ID admin + horas kick, botones Conectar/Salir/Detener/Cerrar sesión, `session.enc`, tray, WebView2). Convención: artefactos escritos en español neutro (tono Venezuela).
 - 11/sep/2026: Pipeline de ZIP portable unificado en `release_zip.py` (release_rules.json = única fuente para `build.py --zip` y `build_exe.py`). `build.py --zip` arma ZIP lean (exe + `_internal` + runtime allowlist + `src` del bot + `config.json` + docs). Allowlist recortada (fuera `colorama`/`iniconfig`/`packaging`; dentro `apscheduler`/`tzdata`/`tzlocal` por `job_queue`). `data/roles.db` (IDs reales de Telegram) sale del versionado.
+- 11/sep/2026: Logo `static/img/logo-ytremote.png` agregado centrado al inicio del README (el pedido del usuario quedó pendiente en la tanda anterior por mi error al archivarlo como "pendiente" en vez de ejecutarlo; se corrigió en esta edición).
 
 ## Tests / verificación
 - ✅ Rebuild `python build.py` (PyInstaller 6.22, Python 3.13) → `dist\ytremote\ytremote.exe` con `assets/webview2/runtimes` en el bundle (win-x64/x86/arm64)
