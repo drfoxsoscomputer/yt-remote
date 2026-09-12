@@ -32,7 +32,9 @@ dist\ytremote\ytremote.exe
 - `assets/webview2/runtimes/` — WebView2Loader.dll vendeados (win-x64/x86/arm64) para el bundle
 
 ## Estado actual
-Crash "Main window failed to start" resuelto de raíz: el launcher ya NO llama a `show()`/`hide()` antes de que la GUI arranque. La auto-conexión con sesión se movió a `webview.start(func)` (se ejecuta con la GUI viva) y `start()` quedó en `try/except` con MessageBox del error real. `launcher.js` dejó de re-conectar (solo consulta `/api/status`), eliminando el doble start. Los runtimes de WebView2 se vendieron en `assets/webview2/runtimes` y `build.py` ya no depende de rutas de Laragon (build portable).
+Pack 12/sep/2026 (commit `b605228`, sin pushear): launcher carga al segundo con skeleton, `/buscar` corta timeouts (30s), intenta `visionos` primero y reporta el motivo real; `ALLOWED_CHAT_ID` migró de `.env` texto plano a `settings.enc` DPAPI; servidor Flask arreglado para dev y bundle. ZIP `yt-remote-1.0.0-portable.zip` reconstruido y verificado (exe real: skeleton 200 y launcher 200 en 8081).
+
+El crash "Main window failed to start" sigue resuelto (la ventana ya no llama `show()`/`hide()` prematuramente; auto-conexión en `webview.start(func)`).
 
 UI aprobada y aplicada: paleta Telegram (azul #229ed9 primario, fantasma secundario, rojo #e53935 destructivo, verde #31c471 conectado; nada de dorado), botones en línea (Conectar+Salir y Detener+Cerrar sesión en fila), logo `logo-ytremote.png` en el encabezado del formulario e icono del exe desde `ytremote.ico` en ambas builds (`build.py` y `build_exe.py`).
 
@@ -45,8 +47,16 @@ Pipeline de release v1.0.0 EN MARCHA: `release_zip.py` extrae la lógica del ZIP
 **✅ RELEASE v1.0.0 PUBLICADO** (11/sep/2026): `yt-remote-1.0.0-portable.zip` = 92.0 MB (3.461 entradas; los viejos 0.5.0 pesaban hasta 132 MB con pip/pytest adentro). Build `python build.py --zip` (commit `9182276`, push `6b67efc..9182276`). Release: https://github.com/drfoxsoscomputer/yt-remote/releases/tag/v1.0.0
 
 ## Pendientes / ToDo
-- [ ] Probar el ZIP descargado del release en una máquina/entorno limpio (emparejar con token real)
+- [ ] Pull/verificar el commit `b605228` en una máquina/entorno limpio: skeleton visible al instante, transición a launcher, `/buscar` con diagnóstico real en vez de "No encontre resultados.", y arranque sin `.env` (chat permitido en `data/settings.enc` DPAPI)
 - [ ] Emparejar con token real: verificar Conectar → bot corre + tray, cerrar X → diálogo nativo (Sí=tray/No=salir)
+- [ ] Push a origin/main sigue pendiente de confirmación del usuario
+- [ ] Sin commitear (trabajo previo, fuera del plan): `src/test_members.py` (fix de indentación), `src/launcher.py` + `src/ctk_theme.json` (prototipo CustomTkinter) — decidir si van o se descartan
+
+## Decisiones recientes
+- 12/sep/2026: Launcher con skeleton instantáneo (commit `b605228`): la ventana nace de inmediato con `static/skeleton.html` (file://, CSS inline + shimmer, paleta #1a1a2e) en vez de esperar que Flask arranque. `main_launcher.py` reescrito: `_skeleton_url()`, `_cargar_interfaz_real()` (espera Flask hasta 10s en hilo daemon → `load_url('/launcher')` → auto-conexión si hay sesión → minimiza a tray). Flask arranca con `webview.start(_post_start)`.
+- 12/sep/2026: `/buscar` con diagnóstico real (raíz: yt-dlp con client web era bloqueado INTERMITENTE por "Sign in to confirm you're not a bot"; el error se tragaba en `search()`). Fix: `search.py` prueba primero `player_client visionos` (el mismo que esquiva el bloqueo en `resolve_stream_url`) con fallback al default, y expone la causa en `last_search_error()`; `bot.py` añade `_SEARCH_TIMEOUT = 30.0` (asyncio.wait_for) y responde el motivo real por Telegram en vez del genérico "No encontre resultados."
+- 12/sep/2026: Fin del `.env` para ALLOWED_CHAT_ID (lo pedía el usuario; era texto plano). Ahora `data/settings.enc` con DPAPI (mismo mecanismo que session.enc): `security.py` gana `load/save_bot_data`, `get/set_allowed_chat_id`, `migrate_dotenv_allowed_chat()` (mueve el valor viejo al arranque y borra el `.env` si queda vacío; conserva TELEGRAM_TOKEN/OWNER_ID si el flujo manual legacy los usa). `config.py` resuelve env → settings.enc → `.env` legacy; `bot.py` `/start` escribe encriptado; `setup_cli.py` delega al store. `.env` ya no se crea en el flujo del launcher.
+- 12/sep/2026: `launcher_web.py` servía `/launcher` y `/static/` solo empaquetado (Flask resolvía carpetas relativas a `src/` en dev → 404/500). Fix: `RES_DIR` absoluto (módulo `_internal` si frozen, raíz del repo en dev) para `template_folder`/`static_folder`; dev y bundle sirven idéntico.
 
 ## Decisiones recientes
 - 11/sep/2026: Crash "Main window failed to start" = `show()` prematuro. Fix: mover auto-conexión a `webview.start(func)` y quitar `show()` del flujo sin sesión en `src/main_launcher.py`. Sin sesión la ventana nace visible (`hidden=False`); con sesión el bot arranca post-GUI y la ventana se oculta al tray.
