@@ -55,6 +55,8 @@
     vistaForm.classList.toggle('hidden', vista !== 'form');
   }
 
+  let estadoUI = 'otro';
+
   function setEstado(titulo, detalle, color, acciones) {
     estadoTitulo.textContent = titulo;
     estadoDetalle.textContent = detalle || '';
@@ -65,6 +67,13 @@
     btnSettings.classList.toggle('hidden', !acciones.includes('configurar'));
     btnLogout.classList.toggle('hidden', !acciones.includes('logout'));
     mostrarVista('estado');
+    estadoUI = acciones.includes('detener')
+      ? 'conectado'
+      : acciones.includes('conectar')
+      ? 'detenido'
+      : acciones.includes('iniciar')
+      ? 'sin-sesion'
+      : 'otro';
   }
 
   async function cargarEstado(primerPaso) {
@@ -368,6 +377,23 @@
     // Primer cargado: si hay sesión, el bot puede estar arrancando solo
     // (auto-conexión desde Python) → el estado pinta "Conectando...".
     cargarEstado(true);
+    // Estado veraz en vivo: si el bot muere (o reactiva), la UI cambia sola.
+    // Solo cuando la vista Estado está visible, para no patear al usuario
+    // que está en el formulario.
+    setInterval(async () => {
+      if (!vistaEstado.classList.contains('hidden')) {
+        try {
+          const st = await fetch('/api/status').then((r2) => r2.json());
+          if (estadoUI === 'detenido' && st.bot_running) {
+            await cargarEstado(false);
+          } else if (estadoUI === 'conectado' && !st.bot_running) {
+            await cargarEstado(false);
+          }
+        } catch (e) {
+          /* servidor ocupado o cerrando: se ignora y se reintenta */
+        }
+      }
+    }, 4000);
   });
 
   // Sondeo de splash_listo (backup si el evento pywebviewready falla)
