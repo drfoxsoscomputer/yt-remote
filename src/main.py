@@ -41,6 +41,11 @@ def main() -> None:
 
     from bot import YTRemoteBot
     from config import load_config
+    from security import migrate_dotenv_allowed_chat
+
+    # El chat permitido ya no vive en .env en texto plano: se mueve a
+    # settings.enc (DPAPI) y se deja de crear ese archivo.
+    migrate_dotenv_allowed_chat()
 
     config = load_config()
     bot = YTRemoteBot(config)

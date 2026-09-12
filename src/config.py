@@ -10,6 +10,8 @@ import os
 import sys
 from pathlib import Path
 
+from security import get_allowed_chat_id as _secure_allowed_chat_id
+
 if getattr(sys, "frozen", False):
     # Dentro del .exe: la data vive al lado del ejecutable (portable).
     PROJECT_ROOT = Path(os.path.dirname(os.path.abspath(sys.executable)))
@@ -95,7 +97,12 @@ def load_config() -> Config:
     owner_id = _to_int_env("OWNER_ID")
     if owner_id is None:
         owner_id = _to_int(env.get("OWNER_ID"))
+    # Chat permitido: (1) variable de entorno (el launcher), (2) settings.enc
+    # cifrado con DPAPI (canonico desde la migracion), (3) .env legacy como
+    # respaldo solo mientras no se haya borrado en el arranque.
     allowed_chat_id = _to_int_env("ALLOWED_CHAT_ID")
+    if allowed_chat_id is None:
+        allowed_chat_id = _secure_allowed_chat_id()
     if allowed_chat_id is None:
         allowed_chat_id = _to_int(env.get("ALLOWED_CHAT_ID"))
 

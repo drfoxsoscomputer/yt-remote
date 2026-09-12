@@ -38,6 +38,25 @@ MUTEX_NAME = "Local\\ytremote_launcher"
 WINDOW_WIDTH = 420
 WINDOW_HEIGHT = 640
 
+
+def _skeleton_url() -> str:
+    """URL file:// del skeleton de carga (primera pantalla, sin esperar a Flask).
+
+    Es un HTML standalone (sin fetch ni red) para que el usuario vea la
+    interfaz al instante mientras el servidor local arranca. En el bundle
+    frozen static/ vive en _internal/static (Flask la resuelve en
+    flask_app.static_folder); en desarrollo está en la raíz del repo.
+    """
+    bases = []
+    if flask_app.static_folder:
+        bases.append(Path(flask_app.static_folder))
+    bases.append(SRC_DIR.parent / "static")
+    for base in bases:
+        candidate = base / "skeleton.html"
+        if candidate.is_file():
+            return candidate.as_uri()
+    return f"http://127.0.0.1:{PORT}/static/skeleton.html"
+
 # Estado global
 _window = None
 _tray = None
@@ -314,6 +333,38 @@ def _on_closing():
         return True  # permite el cierre (aunque os._exit mata el proceso)
 
 
+def _cargar_interfaz_real():
+    """Espera a Flask y cambia del skeleton al formulario real; auto-conecta.
+
+    Corre en un hilo daemon una vez la GUI está inicializada: el skeleton que
+    se mostró al instante queda en pantalla mientras el servidor local arranca;
+    al responder, load_url(/launcher) lo reemplaza (misma paleta, sin
+    parpadeo). Si hay sesión guardada y válida, arranca el bot y minimiza al
+    tray, como hacía el arranque anterior.
+    """
+    for _ in range(100):  # 10s max
+        try:
+            import urllib.request
+            urllib.request.urlopen(f"http://127.0.0.1:{PORT}/launcher", timeout=0.5)
+            break
+        except Exception:
+            time.sleep(0.1)
+    else:
+        print("No se pudo iniciar el servidor Flask a tiempo.", file=sys.stderr)
+        return
+
+    if _window:
+        _window.load_url(f"http://127.0.0.1:{PORT}/launcher")
+
+    session = _load_session()
+    if not (session and session.get("bot_token") and session.get("admin_id")):
+        return
+    if bot_process.start(session):
+        if _window:
+            _window.hide()
+        _minimizar_a_tray()
+
+
 # ─── Main ────────────────────────────────────────────────────────
 def main():
     # 0) Instancia única
@@ -350,24 +401,14 @@ def main():
     )
     _flask_thread.start()
 
-    # Esperar a que Flask esté listo
-    for _ in range(50):  # 5s max
-        try:
-            import urllib.request
-            urllib.request.urlopen(f"http://127.0.0.1:{PORT}/launcher", timeout=0.5)
-            break
-        except Exception:
-            time.sleep(0.1)
-    else:
-        print("No se pudo iniciar el servidor Flask a tiempo.", file=sys.stderr)
-        sys.exit(1)
-
-    # 1) Crear ventana webview (se muestra cuando la GUI arranca)
+    # 1) Crear ventana AL INSTANTE con el skeleton: el usuario ve la
+    #    interfaz desde el segundo uno; el formulario real reemplaza la
+    #    vista cuando Flask responda (cargar_interfaz_real).
     global _window
     xy = _centrado_xy(WINDOW_WIDTH, WINDOW_HEIGHT)
     _window = webview.create_window(
         APP_NAME,
-        f"http://127.0.0.1:{PORT}/launcher",
+        _skeleton_url(),
         width=WINDOW_WIDTH,
         height=WINDOW_HEIGHT,
         x=xy[0] if xy else None,
@@ -378,32 +419,22 @@ def main():
         background_color="#1a1a2e",
         js_api=LauncherApi(),
     )
-    _window.events.closing += _on_closing
+    _window.events.closing += _on_closing  # type: ignore[attr-defined]
 
-    # 2) Auto-conectar si hay sesión guardada. Se ejecuta dentro de
-    #    webview.start(func): ahí la GUI ya está inicializada y las llamadas
-    #    a la ventana (hide/show) son seguras. Antes de start() están prohibidas.
-    session = _load_session()
-
-    def _post_start_connect():
-        """Corre cuando la GUI ya inicializó; arranca el bot si hay sesión."""
-        if not (session and session.get("bot_token") and session.get("admin_id")):
-            return
-        if bot_process.start(session):
-            # Ocultar launcher y minimizar a tray
-            if _window:
-                _window.hide()
-            _minimizar_a_tray()
-
-    # 3) Crear tray icon (perezoso, tras mostrar ventana)
+    # 2) Tray icon (perezoso, tras mostrar ventana)
     def _start_tray_lazy():
         time.sleep(0.8)
         _crear_tray_icon()
     threading.Thread(target=_start_tray_lazy, daemon=True).start()
 
+    # 3) Tras inicializar la GUI: esperar a Flask en hilo aparte y, cuando
+    #    responda, cargar el formulario real y auto-conectar si hay sesión.
+    def _post_start():
+        threading.Thread(target=_cargar_interfaz_real, daemon=True).start()
+
     # 4) Event loop bloqueante. El callback se dispara al iniciar la GUI.
     try:
-        webview.start(_post_start_connect)
+        webview.start(_post_start)
     except Exception as e:
         print(f"Error al iniciar la ventana: {e}")
         try:
