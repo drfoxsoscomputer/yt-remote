@@ -32,7 +32,10 @@ dist\ytremote\ytremote.exe
 - `assets/webview2/runtimes/` — WebView2Loader.dll vendeados (win-x64/x86/arm64) para el bundle
 
 ## Estado actual
-Pack 12/sep/2026 tarde (sin commitear): plan de 7 fixes tras reportes del usuario ("No se pudo iniciar el bot. Revisa token e ID.", skeleton no visible, solo Ctrl+V pega).
+**Launcher de dos pantallas aprobado y commiteado (`637da6b`, 12/sep/2026 noche)**: PUEDES conectarte/ver estado en la ventana principal y editar datos en el formulario. Vista Estado: Sin sesión (botón "Iniciar sesión") / Conectando (#229ed9) / Conectado (#31c471, con Detener) / Detenido (#a1a1aa, con Conectar) / Error (#e53935 con motivo). Vista Formulario: Guardar SOLO guarda (no arranca, valida token no vacío + ID numérico); Conectar arranca con la sesión guardada y minimiza al tray; Detener se queda en la vista de estado, NO navega ni borra; Cerrar sesión es lo único que borra (con confirmación); Configurar precarga los datos. API: `GET /api/session` devuelve datos completos, `POST /api/save` (nuevo), `POST /api/start` (nuevo, getMe antes de arrancar → "Token inválido: ..." honesto). `LauncherApi.minimizar_tray()` y Detener desde tray vía `evaluate_js(__refresh_estado)` sin recargar. Rebuild 92 MB + E2E verificado (arranque sin sesión → Guardar → Conectar inválido 400 sin "conectado" falso → Detener conserva sesión). Pendiente: push + prueba con token real + diagnóstico del "/buscar se queda en Buscando...".
+
+## Estado actual (previo)
+Pack 12/sep/2026 tarde (commiteado en `637da6b`): plan de 7 fixes tras reportes del usuario ("No se pudo iniciar el bot. Revisa token e ID.", skeleton no visible, solo Ctrl+V pega).
 
 Diagnóstico: `dist\ytremote\ytremote.exe` directo NO arrancaba el bot porque faltaban `runtime\`, `src\` y `config.json` junto al exe; y en el ZIP, **causa raíz del "conectado" falso**: `release_rules.json` no incluía `security.py` en la allowlist de `src/` → `config.py` moría con `ModuleNotFoundError`; y el ZIP iba sin `data/` → `sqlite3.OperationalError: unable to open database file` al crear `roles.db`. Ambas mataban el bot a los ~2s, después del chequeo de 0.6s.
 
@@ -55,12 +58,14 @@ Pipeline de release v1.0.0 EN MARCHA: `release_zip.py` extrae la lógica del ZIP
 **✅ RELEASE v1.0.0 PUBLICADO** (11/sep/2026): `yt-remote-1.0.0-portable.zip` = 92.0 MB (3.461 entradas; los viejos 0.5.0 pesaban hasta 132 MB con pip/pytest adentro). Build `python build.py --zip` (commit `9182276`, push `6b67efc..9182276`). Release: https://github.com/drfoxsoscomputer/yt-remote/releases/tag/v1.0.0
 
 ## Pendientes / ToDo
-- [ ] Emparejar con token REAL desde el exe/dist nuevo: Conectar → getMe aprueba → bot spawn desde runtime portable → `data/bot.log` sin errores → responder en Telegram + tray
-- [ ] Pull/verificar en máquina limpia: skeleton visible, launcher, `/buscar` diagnóstico, arranque sin `.env`
 - [ ] Push de packs (12/sep mañana + tarde) a origin/main — pendiente confirmación explícita
-- [ ] Sin commitear (trabajo previo, fuera del plan): `src/test_members.py` (fix de indentación), `src/launcher.py` + `src/ctk_theme.json` (prototipo CustomTkinter) — decidir si van o se descartan
+- [ ] Emparejar con token REAL desde el exe/dist nuevo: Conectar → getMe aprueba → bot spawn desde runtime portable → `data/bot.log` sin errores → responder en Telegram + tray
+- [ ] "Se queda en Buscando...": bug del bot `/buscar` (no del launcher). Diagnóstico: `search()` standalone responde bien (3 resultados, 7.5s dev / 4.4s runtime). Sospecha en `bot.py _run_search` (~1796-1906): flujo de edición del mensaje "🔎 Buscando..." (fallback send_message si edit falla). Revisar con `data/bot.log` + token real
+- [ ] Inicio con Windows (auto-arranque al encender la PC) — anotado por el usuario para EL FINAL, cuando todo funcione
+- [ ] Pull/verificar en máquina limpia: skeleton visible, launcher, `/buscar` diagnóstico, arranque sin `.env`
 
 ## Decisiones recientes
+- 12/sep/2026 (noche): Launcher de DOS PANTALLAS (flujo definido por el usuario): con datos al arrancar → auto-conecta → tray; sin datos → "Debes iniciar sesión" → Iniciar sesión (formulario) → Guardar (solo guarda, NO arranca) → vuelve a principal → Conectar → conecta → tray. Detener no navega ni borra; Cerrar sesión es lo único que borra (con confirmación); Configurar precarga. `POST /api/save` (guardar sin validar getMe) y `POST /api/start` (usa sesión guardada, getMe antes de arrancar). Encriptación DPAPI se MANTIENE (nunca fue la causa; quitarla deja token en texto plano; no mover a roles.db). commit `637da6b`
 - 12/sep/2026 (tarde): "Conectado" honesto => `bot_process.validate_token()` hace getMe contra Telegram ANTES de guardar `session.enc`/arrancar el bot, y launcher responde el motivo real de `last_error()`. El "conectado" falso del usuario era doble caída: (a) ZIP sin `security.py` (allowlist `release_rules.json`) → `ModuleNotFoundError` en `config.py`; (b) ZIP sin carpeta `data/` → `sqlite3.OperationalError` al crear `roles.db` en `RoleManager._load`. Fixes: allowlist suma `security.py`; `release_zip.py` embebe SIEMPRE `data/`; `roles.py` y `security.save_bot_data` crean `data/` con mkdir.
 - 12/sep/2026 (tarde): `build.py --zip` ahora materializa el dist: `materialize_portable_dist()` extrae el zip EN `dist\ytremote`; así `dist\ytremote` nunca más queda sin `runtime\python\python.exe` (causa del "No se pudo iniciar el bot" original al correr el exe a secas). Además `bot_process.start()` valida existencia de python + main.py con errores concretos y vuelca la salida del subproceso a `data/bot.log` (hilo vigía con timeout 30s) — con `--windowed` eso antes era invisible.
 - 12/sep/2026 (tarde): Skeleton vía `data:` URL (base64) en vez de `file://` — WebView2 no renderizaba fiable el `file://` y rompía las rutas relativas; `_data_uri_skeleton()` embebe el HTML + logo (`img/logo-ytremote.png` → base64) con fallback al `http://127.0.0.1:8081/static/skeleton.html`.
@@ -81,6 +86,9 @@ Pipeline de release v1.0.0 EN MARCHA: `release_zip.py` extrae la lógica del ZIP
 - 11/sep/2026: Logo `static/img/logo-ytremote.png` agregado centrado al inicio del README (el pedido del usuario quedó pendiente en la tanda anterior por mi error al archivarlo como "pendiente" en vez de ejecutarlo; se corrigió en esta edición).
 
 ## Tests / verificación
+- ✅ 12/sep noche (E2E exe `dist\ytremote`): arranque sin sesión → `/api/session` `{"has_session":false}`, `/launcher`/`/static/js/launcher.js`/`/static/css/tailwind.css` 200; POST `/api/save` (token formato válido falso + admin) → 200 y `/api/session` devuelve datos completos (precarga formulario); POST `/api/start` → 400 `Token inválido: Unauthorized` con `bot_running:false` (sin "conectado" falso); POST `/api/stop_bot` → 200 y sesión CONSERVADA (Detener no borra)
+- ✅ 12/sep noche: endpoints nuevos en dev (Flask): save guarda sin validar, start rechaza token inválido; `session.enc` dev borrado tras prueba
+- ✅ 12/sep noche: `py_compile` launcher_web + main_launcher OK sin warnings; `node --check static/js/launcher.js` OK
 - ✅ 12/sep tarde: POST `/api/connect` con token inválido → 400 `Token inválido: Unauthorized`, NO guarda sesión (antes decía "conectado")
 - ✅ 12/sep tarde: bot arrancado directo del bundle (`dist\runtime\python\python.exe src\main.py`): con `security.py` y `data/` corregidos → proceso vivo a los 10s + `data/roles.db` creado
 - ✅ 12/sep tarde: exe real sirve `/launcher` (200, 6544B), `/static/skeleton.html` (200, 2740B), `/api/session` (200); `dist\ytremote` portable completo (runtime/src/config.json presentes)
