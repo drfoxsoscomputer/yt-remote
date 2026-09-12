@@ -139,21 +139,21 @@ async def test_members_commit_applies_and_notifies():
     await b._on_members_callback(MemUpdate("mem:user:50"), SimpleNamespace())
     await b._on_members_callback(MemUpdate("mem:user:51"), SimpleNamespace())
 
-app.bot.sent.clear()
-        # Primero pulsa ✔ (commit) -> muestra alerta de confirmación
-        upd = MemUpdate("mem:commit")
-        await b._on_members_callback(upd, SimpleNamespace())
-        # Verifica que se mostró la alerta de confirmación
-        assert "¿Aplicar 2 cambios?" in app.bot.edited[-1][2]
-        kb = app.bot.edited[-1][3]["reply_markup"]
-        labels = [btn.text for row in kb.inline_keyboard for btn in row]
-        assert "✔ Sí, aplicar" in labels
-        assert "⚠️ No" in labels
-        # Luego pulsa Sí -> aplica y cierra
-        app.bot.sent.clear()
-        app.bot.edited = []
-        upd2 = MemUpdate("mem:commit-yes")
-        await b._on_members_callback(upd2, SimpleNamespace())
+    app.bot.sent.clear()
+    # Primero pulsa ✔ (commit) -> muestra alerta de confirmación
+    upd = MemUpdate("mem:commit")
+    await b._on_members_callback(upd, SimpleNamespace())
+    # Verifica que se mostró la alerta de confirmación
+    assert "¿Aplicar 2 cambios?" in app.bot.edited[-1][2]
+    kb = app.bot.edited[-1][3]["reply_markup"]
+    labels = [btn.text for row in kb.inline_keyboard for btn in row]
+    assert "✔ Sí, aplicar" in labels
+    assert "⚠️ No" in labels
+    # Luego pulsa Sí -> aplica y cierra
+    app.bot.sent.clear()
+    app.bot.edited = []
+    upd2 = MemUpdate("mem:commit-yes")
+    await b._on_members_callback(upd2, SimpleNamespace())
     # Ambos roles efectivamente aplicados.
     assert b.roles.get_role(50) == "dj"
     assert b.roles.get_role(51) == "user"
@@ -185,24 +185,32 @@ async def test_members_cancel_without_changes():
 
 
 async def test_members_cancel_discards_staged():
-    """❌ con cambios staged: descarta cambios, no notifica, borra la lista."""
+    """❌ con cambios staged: pide confirmación y al 'Sí' descarta, no
+    notifica a nadie y borra la lista."""
     b = make_bot()
     seed_roles(b)
     app = b._app
-    app.bot.sent.clear()
     await b._open_members_list(FakeUpdate("ctl:usuarios", user_id=1), 1)
+    app.bot.sent.clear()
 
     await b._on_members_callback(MemUpdate("mem:user:50"), SimpleNamespace())
     assert b._members_staged == {50: "dj"}
 
     upd = MemUpdate("mem:cancel")
     await b._on_members_callback(upd, SimpleNamespace())
+    # Primero pide confirmación y NO descarta todavía
+    assert "¿Descartar 1 cambio?" in app.bot.edited[-1][2]
+    assert b._members_staged == {50: "dj"}
+
+    upd2 = MemUpdate("mem:cancel-yes")
+    await b._on_members_callback(upd2, SimpleNamespace())
 
     assert b.roles.get_role(50) == "user", "no debe persistirse"
     assert b.roles.get_role(51) == "dj"
     assert b._members_staged == {}, b._members_staged
     assert app.bot.deleted, app.bot.deleted
     assert app.bot.sent == [], app.bot.sent
+    assert upd2.answered and "Cambios descartados." in upd2.answered[0], upd2.answered
 
 
 async def test_members_cancel_no_discard_on_no():
@@ -223,7 +231,7 @@ async def test_members_cancel_no_discard_on_no():
     upd = MemUpdate("mem:cancel-no")
     await b._on_members_callback(upd, SimpleNamespace())
     assert b._members_staged == {50: "dj"}
-    assert app.bot.edited[-1][2].startswith("Usuarios (")
+    assert "Usuarios (" in app.bot.edited[-1][2]
 
 
 async def test_members_commit_no_discard_on_no():
@@ -245,7 +253,7 @@ async def test_members_commit_no_discard_on_no():
     await b._on_members_callback(upd, SimpleNamespace())
     assert b._members_staged == {50: "dj"}
     assert b.roles.get_role(50) == "user"
-    assert app.bot.edited[-1][2].startswith("Usuarios (")
+    assert "Usuarios (" in app.bot.edited[-1][2]
 
 
 async def test_members_admin_role_is_protected():

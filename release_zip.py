@@ -162,6 +162,11 @@ def make_release_zip(project_root: Path, rules: dict, dist_dir: Path | None = No
 
         add_directory_rules(zf, project_root, rules.get("folders", {}))
 
+        # data/ siempre debe existir en el ZIP: el bot escribe ahi roles.db y
+        # bot.log apenas arranca, y una extraccion fresca no la crearia sola.
+        if not any(name.split("/", 1)[0] == "data" for name in zf.namelist()):
+            zf.writestr(zipfile.ZipInfo("data/"), "")
+
     print(f"[OK] Release creado: {zip_path}")
     print(f"   Tamaño: {zip_path.stat().st_size / 1024 / 1024:.1f} MB")
     print("   Probalo antes de distribuir.")

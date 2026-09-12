@@ -21,7 +21,7 @@ from flask import Flask, request, jsonify, render_template, send_from_directory
 SRC_DIR = Path(__file__).resolve().parent
 sys.path.insert(0, str(SRC_DIR))
 
-from bot_process import bot_process
+from bot_process import bot_process, validate_token
 from security import SessionManager
 
 # Rutas de archivos (portable: junto al exe si frozen)
@@ -87,21 +87,28 @@ def launcher_page():
 
 @app.route("/api/session", methods=["GET"])
 def api_session():
-    """Verifica si existe sesión válida."""
+    """Verifica si existe sesión válida y devuelve sus datos (para precargar
+    el formulario; el servidor es localhost, la sesión ya está en claro al
+    descifrarla en esta máquina)."""
     data = _load_session()
     if data:
         return jsonify({
             "has_session": True,
-            "bot_token": data.get("bot_token", "")[:10] + "..." if data.get("bot_token") else "",
+            "bot_token": data.get("bot_token", ""),
             "admin_id": data.get("admin_id"),
             "kick_after_hours": data.get("kick_after_hours", 0),
         })
     return jsonify({"has_session": False})
 
 
-@app.route("/api/connect", methods=["POST"])
-def api_connect():
-    """Valida credenciales, guarda session.enc y arranca el bot."""
+@app.route("/api/save", methods=["POST"])
+def api_save():
+    """Guarda las credenciales y NO arranca el bot.
+
+    Flujo: Guardar -> vuelve a la pantalla principal -> el usuario pulsa
+    Conectar. Si el bot corría con la config anterior, se detiene para que
+    la nueva quede lista sin ejecutar nada.
+    """
     payload = request.get_json(silent=True) or {}
     token = (payload.get("bot_token") or "").strip()
     admin_id_str = (payload.get("admin_id") or "").strip()
@@ -127,14 +134,74 @@ def api_connect():
     if not _save_session(config_data):
         return jsonify({"ok": False, "error": "No se pudo guardar la sesión"}), 500
 
+    if bot_process.is_running():
+        bot_process.stop()
+
+    return jsonify({"ok": True, "message": "Configuración guardada"})
+
+
+@app.route("/api/start", methods=["POST"])
+def api_start():
+    """Conecta usando la sesión guardada (botón Conectar de la pantalla
+    principal, sin pedir los datos otra vez)."""
+    session = _load_session()
+    if not (session and session.get("bot_token") and session.get("admin_id")):
+        return jsonify({"ok": False, "error": "No hay sesión guardada. Iniciá sesión primero."}), 400
+
+    ok, info = validate_token(session["bot_token"])
+    if not ok:
+        return jsonify({"ok": False, "error": f"Token inválido: {info}"}), 400
+
+    if bot_process.start(session):
+        return jsonify({"ok": True, "message": f"Bot conectado ({info})"})
+    motivo = bot_process.last_error() or "Revisa token e ID."
+    return jsonify({"ok": False, "error": f"No se pudo iniciar el bot: {motivo}"}), 500
+
+
+@app.route("/api/connect", methods=["POST"])
+def api_connect():
+    """Valida credenciales, guarda session.enc y arranca el bot."""
+    payload = request.get_json(silent=True) or {}
+    token = (payload.get("bot_token") or "").strip()
+    admin_id_str = (payload.get("admin_id") or "").strip()
+    kick_hours = payload.get("kick_after_hours", 0)
+
+    if not token:
+        return jsonify({"ok": False, "error": "Token del bot requerido"}), 400
+    if not admin_id_str.isdigit() or int(admin_id_str) <= 0:
+        return jsonify({"ok": False, "error": "ID de admin inválido (debe ser número positivo)"}), 400
+
+    try:
+        kick = int(kick_hours) if str(kick_hours).isdigit() else 0
+    except (ValueError, TypeError):
+        kick = 0
+
+    # Validar el token ANTES de guardar y arrancar: un token invalido ya no
+    # da el falso "Bot conectado" (el subproceso nacia, moria a los ~2s por
+    # getMe fallido y la UI habia mentido).
+    ok, info = validate_token(token)
+    if not ok:
+        return jsonify({"ok": False, "error": f"Token inválido: {info}"}), 400
+
+    config_data = {
+        "bot_token": token,
+        "admin_id": int(admin_id_str),
+        "kick_after_hours": max(0, kick),
+        "mpv_path": "runtime\\mpv\\mpv.exe",
+    }
+
+    if not _save_session(config_data):
+        return jsonify({"ok": False, "error": "No se pudo guardar la sesión"}), 500
+
     # Si el bot ya corría, reiniciar con nueva config
     if bot_process.is_running():
         bot_process.stop()
 
     if bot_process.start(config_data):
-        return jsonify({"ok": True, "message": "Bot conectado"})
+        return jsonify({"ok": True, "message": f"Bot conectado ({info})"})
     else:
-        return jsonify({"ok": False, "error": "No se pudo iniciar el bot. Revisa token e ID."}), 500
+        motivo = bot_process.last_error() or "Revisa token e ID."
+        return jsonify({"ok": False, "error": f"No se pudo iniciar el bot: {motivo}"}), 500
 
 
 @app.route("/api/status", methods=["GET"])

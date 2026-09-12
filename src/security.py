@@ -225,6 +225,7 @@ def save_bot_data(data: Dict[str, Any]) -> bool:
     if not _DPAPI_OK:
         return False
     try:
+        BOT_DATA_FILE.parent.mkdir(parents=True, exist_ok=True)
         payload = json.dumps(data, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
         with open(BOT_DATA_FILE, "wb") as f:
             f.write(_dpapi_protect(payload))

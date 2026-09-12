@@ -39,13 +39,35 @@ WINDOW_WIDTH = 420
 WINDOW_HEIGHT = 640
 
 
+def _data_uri_skeleton(html: Path, static_base: Path) -> str:
+    """Convierte el skeleton a un data: URL con el logo embebido.
+
+    Un data: URL renderiza SIEMPRE en WebView2 (un file:// a secas a veces
+    pinta en negro sin navegar). El logo va inline porque dentro de un
+    data: URL las rutas relativas (img/...) ya no resuelven.
+    """
+    import base64
+
+    raw = html.read_text(encoding="utf-8")
+    logo = static_base / "img" / "logo-ytremote.png"
+    if logo.is_file():
+        b64 = base64.b64encode(logo.read_bytes()).decode("ascii")
+        raw = raw.replace(
+            'src="img/logo-ytremote.png"',
+            f'src="data:image/png;base64,{b64}"',
+        )
+    encoded = base64.b64encode(raw.encode("utf-8")).decode("ascii")
+    return f"data:text/html;charset=utf-8;base64,{encoded}"
+
+
 def _skeleton_url() -> str:
-    """URL file:// del skeleton de carga (primera pantalla, sin esperar a Flask).
+    """URL del skeleton de carga (primera pantalla, sin esperar a Flask).
 
     Es un HTML standalone (sin fetch ni red) para que el usuario vea la
-    interfaz al instante mientras el servidor local arranca. En el bundle
-    frozen static/ vive en _internal/static (Flask la resuelve en
-    flask_app.static_folder); en desarrollo está en la raíz del repo.
+    interfaz al instante mientras el servidor local arranca. Vuelve como
+    data: URL (con el logo embebido) para que el render de WebView2 no
+    dependa de navegar a un archivo local. En el bundle frozen static/ vive
+    en _internal/static (flask_app.static_folder); en desarrollo en la raíz.
     """
     bases = []
     if flask_app.static_folder:
@@ -54,7 +76,7 @@ def _skeleton_url() -> str:
     for base in bases:
         candidate = base / "skeleton.html"
         if candidate.is_file():
-            return candidate.as_uri()
+            return _data_uri_skeleton(candidate, base)
     return f"http://127.0.0.1:{PORT}/static/skeleton.html"
 
 # Estado global
@@ -167,6 +189,12 @@ class LauncherApi:
         if not admin_id_str.isdigit() or int(admin_id_str) <= 0:
             return {"ok": False, "error": "ID de admin inválido (debe ser número positivo)"}
 
+        # Validar el token en Telegram antes de prometer conexion (getMe).
+        from bot_process import validate_token
+        ok, info = validate_token(token)
+        if not ok:
+            return {"ok": False, "error": f"Token inválido: {info}"}
+
         config_data = {
             "bot_token": token,
             "admin_id": int(admin_id_str),
@@ -187,9 +215,10 @@ class LauncherApi:
             if _window:
                 _window.hide()
             _minimizar_a_tray()
-            return {"ok": True, "message": "Bot conectado"}
+            return {"ok": True, "message": f"Bot conectado ({info})"}
         else:
-            return {"ok": False, "error": "No se pudo iniciar el bot. Revisa token e ID."}
+            motivo = bot_process.last_error() or "Revisa token e ID."
+            return {"ok": False, "error": f"No se pudo iniciar el bot: {motivo}"}
 
     def get_status(self) -> dict:
         """Estado actual del bot."""
@@ -200,6 +229,44 @@ class LauncherApi:
         if bot_process.stop():
             return {"ok": True, "message": "Bot detenido"}
         return {"ok": False, "error": "No se pudo detener"}
+
+    def minimizar_tray(self):
+        """Minimiza la ventana al tray (Conectar exitoso)."""
+        global _window
+        if _window:
+            _window.hide()
+        _minimizar_a_tray()
+
+    def pegar(self) -> str:
+        """Lee el portapapeles de Windows (nativo) para el menú contextual.
+
+        WebView2 no muestra menú contextual propio; sin esto el usuario solo
+        podía pegar con Ctrl+V. Este puente permite 'Pegar' con clic derecho.
+        """
+        CF_UNICODETEXT = 13
+        try:
+            u = ctypes.windll.user32
+            k = ctypes.windll.kernel32
+            if not u.OpenClipboard(0):
+                return ""
+            try:
+                handle = u.GetClipboardData(CF_UNICODETEXT)
+                if not handle:
+                    return ""
+                ptr = k.GlobalLock(handle)
+                if not ptr:
+                    return ""
+                try:
+                    size = k.GlobalSize(handle)
+                    buf = ctypes.create_unicode_buffer("", size // 2 + 1)
+                    ctypes.memmove(buf, ptr, int(size))
+                    return buf.value or ""
+                finally:
+                    k.GlobalUnlock(handle)
+            finally:
+                u.CloseClipboard()
+        except Exception:  # noqa: BLE001 - que el menú jamás rompa el launcher
+            return ""
 
     def quit_app(self):
         """Cierra la app completamente (para bot + os._exit)."""
@@ -260,13 +327,16 @@ def _mostrar_ventana():
 
 
 def _detener_bot_desde_tray():
-    """Detiene el bot desde el tray."""
+    """Detiene el bot desde el tray sin recargar la página (la ventana queda
+    como está, mostrando el estado 'Detenido'; no navega ni borra datos)."""
     if bot_process.is_running():
         bot_process.stop()
-        # Recargar UI para mostrar formulario
-        global _window
-        if _window:
-            _window.load_url(f"http://127.0.0.1:{PORT}/launcher")
+    global _window
+    if _window:
+        try:
+            _window.evaluate_js("window.__refresh_estado && window.__refresh_estado()")
+        except Exception:
+            pass
 
 
 def _salir_desde_tray():

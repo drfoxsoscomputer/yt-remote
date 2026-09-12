@@ -45,6 +45,7 @@
         "queue_manager.py",
         "roles.py",
         "search.py",
+        "security.py",
         "setup_cli.py"
       ]
     },
