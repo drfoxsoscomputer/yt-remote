@@ -20,6 +20,31 @@
     box-sizing: border-box;
     font-family: 'Segoe UI', system-ui, sans-serif;
   }
+  /* Menú contextual propio (WebView2 no tiene uno nativo) */
+  #ctx-menu {
+    position: fixed;
+    z-index: 999;
+    display: none;
+    min-width: 160px;
+    background: #262640;
+    border: 1px solid #3f3f5a;
+    border-radius: 0.6rem;
+    box-shadow: 0 8px 24px rgba(0, 0, 0, 0.45);
+    padding: 0.25rem;
+  }
+  #ctx-menu button {
+    display: block;
+    width: 100%;
+    text-align: left;
+    padding: 0.5rem 0.75rem;
+    border: none;
+    border-radius: 0.4rem;
+    background: transparent;
+    color: #e8e8e8;
+    font-size: 0.875rem;
+    cursor: pointer;
+  }
+  #ctx-menu button:hover { background: #3f3f5a; }
 </style>
 </head>
 <body class="bg-fondo text-texto min-h-screen antialiased flex flex-col items-center justify-center px-4">
@@ -33,7 +58,35 @@
   <p class="text-zinc-400 text-sm mb-4 text-center">Control remoto de YouTube para Telegram</p>
 
   <div id="form-container" class="w-full max-w-sm space-y-4">
-    <div id="connect-form" class="bg-panel rounded-2xl p-5 border border-borde">
+
+    <!-- Vista principal: estado del bot -->
+    <div id="vista-estado" class="bg-panel rounded-2xl p-5 border border-borde text-center">
+      <div class="flex items-center justify-center gap-2 mb-3">
+        <span id="estado-dot" style="display:inline-block;width:0.7rem;height:0.7rem;border-radius:50%;background:#e8e8e8;"></span>
+        <h2 id="estado-titulo" class="text-xl font-bold text-texto">Cargando...</h2>
+      </div>
+      <p id="estado-detalle" class="text-texto-dim mb-5 min-h-[1.25rem] text-sm"></p>
+
+      <div class="flex flex-col gap-3">
+        <button type="button" id="btn-start-session"
+                class="btn-primario w-full py-3 rounded-xl font-semibold transition">Iniciar sesión</button>
+        <button type="button" id="btn-connect"
+                class="btn-primario w-full py-3 rounded-xl font-semibold transition hidden">Conectar</button>
+        <button type="button" id="btn-stop"
+                class="btn-secundario w-full py-3 rounded-xl font-semibold transition hidden">Detener</button>
+        <div class="flex gap-3">
+          <button type="button" id="btn-settings"
+                  class="btn-secundario flex-1 py-3 rounded-xl font-semibold transition hidden">Configurar</button>
+          <button type="button" id="btn-exit"
+                  class="btn-secundario flex-1 py-3 rounded-xl font-semibold transition">Salir</button>
+        </div>
+        <button type="button" id="btn-logout"
+                class="btn-peligro w-full py-3 rounded-xl font-semibold transition hidden">Cerrar sesión</button>
+      </div>
+    </div>
+
+    <!-- Vista formulario: iniciar sesión / configurar datos -->
+    <div id="vista-form" class="hidden bg-panel rounded-2xl p-5 border border-borde">
       <div class="mb-3">
         <label class="block text-sm font-medium text-texto-dim mb-2">Token del bot</label>
         <div class="relative">
@@ -71,38 +124,26 @@
 
       <div id="error-msg" class="hidden text-red-400 text-sm text-center mb-3 min-h-[1.25rem]"></div>
 
-      <div class="flex gap-3">
-        <button type="button" id="btn-connect"
-                class="btn-primario flex-1 py-3 rounded-xl font-semibold transition
-                       disabled:opacity-50 disabled:cursor-not-allowed">
-          <span id="btn-text">Conectar</span>
-          <span id="btn-loading" class="hidden inline-flex items-center gap-2">
-            <svg class="animate-spin h-5 w-5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor"/><path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"/></svg>
-            Conectando...
-          </span>
-        </button>
-
-        <button type="button" id="btn-exit"
-                class="btn-secundario flex-1 py-3 rounded-xl font-semibold transition">
-          Salir
-        </button>
+      <div class="flex flex-col gap-3">
+        <button type="button" id="btn-save"
+                class="btn-primario w-full py-3 rounded-xl font-semibold transition">Guardar</button>
+        <div class="flex gap-3">
+          <button type="button" id="btn-cancel"
+                  class="btn-secundario flex-1 py-3 rounded-xl font-semibold transition">Cancelar</button>
+          <button type="button" id="btn-form-exit"
+                  class="btn-secundario flex-1 py-3 rounded-xl font-semibold transition">Salir</button>
+        </div>
       </div>
     </div>
 
-    <div id="connected-view" class="hidden bg-panel rounded-2xl p-5 border border-borde text-center">
-      <div class="w-16 h-16 mx-auto mb-4 bg-verde/20 rounded-full flex items-center justify-center">
-        <svg class="w-8 h-8 text-verde" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M22 11.08V12a10 10 0 11-5.93-9.14"/><polyline points="22 4 12 14.01 9 11.01"/></svg>
-      </div>
-      <h2 class="text-xl font-bold text-texto mb-1">Conectado</h2>
-      <p class="text-texto-dim mb-4">El bot está corriendo en segundo plano.</p>
-      <div class="flex gap-3">
-        <button type="button" id="btn-stop" class="btn-secundario flex-1 py-3 rounded-xl font-semibold transition">Detener bot</button>
-        <button type="button" id="btn-logout" class="btn-peligro flex-1 py-3 rounded-xl font-semibold transition">Cerrar sesión</button>
-      </div>
-    </div>
   </div>
 
   <p class="text-xs text-zinc-500 mt-5 text-center">Servidor local en puerto 8081</p>
+
+  <div id="ctx-menu" role="menu">
+    <button type="button" id="ctx-paste" role="menuitem">Pegar</button>
+    <button type="button" id="ctx-copy" role="menuitem">Copiar</button>
+  </div>
 
   <script src="/static/js/launcher.js"></script>
 </body>

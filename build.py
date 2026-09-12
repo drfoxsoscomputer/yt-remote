@@ -129,11 +129,40 @@ def make_zip(exe: Path):
     return make_release_zip(PROJECT_ROOT, rules, dist_dir=DIST_DIR)
 
 
+def materialize_portable_dist(exe: Path, zip_path: Path):
+    """Extrae el ZIP portable EN dist/ytremote: la carpeta queda completa
+    (runtime/ + src/ + config.json + docs junto al exe), igual de utilizable
+    que la extracción del ZIP. Sin esto, correr dist/ytremote/ytremote.exe a
+    secas no podía arrancar el bot (faltaba runtime/python/python.exe).
+
+    La data/ local del dist (session.enc de pruebas) se conserva: el zip la
+    excluye por diseño, así que la extracción no la pisa.
+    """
+    import zipfile
+
+    print(f"Materializando dist\\ytremote portable a partir de {zip_path.name}...")
+    with zipfile.ZipFile(zip_path) as zf:
+        for member in zf.infolist():
+            if member.is_dir():
+                continue
+            target = DIST_DIR / member.filename
+            target.parent.mkdir(parents=True, exist_ok=True)
+            with zf.open(member) as src, open(target, "wb") as dst:
+                shutil.copyfileobj(src, dst)
+    ok = (DIST_DIR / "runtime" / "python" / "python.exe").exists()
+    print(
+        f"[OK] dist\\ytremote portable completo "
+        + ("(runtime/python/python.exe presente)" if ok else "(runtime AUSENTE)")
+    )
+
+
 def main():
     exe = run_pyinstaller()
 
     if "--zip" in sys.argv:
-        make_zip(exe)
+        zip_path = make_zip(exe)
+        # dist\ytremote debe quedar utilizable por sí solo (bot con runtime).
+        materialize_portable_dist(exe, zip_path)
     else:
         print("")
         print("Zip NO generado (por defecto). Cuando el .exe esté probado:")

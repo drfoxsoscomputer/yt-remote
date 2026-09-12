@@ -32,6 +32,7 @@ class RoleManager:
 
     def _load(self) -> None:
         """Carga los roles y usuarios desde la base de datos SQLite."""
+        DB_PATH.parent.mkdir(parents=True, exist_ok=True)
         conn = sqlite3.connect(str(DB_PATH))
         conn.execute("PRAGMA journal_mode=WAL")
         try:
