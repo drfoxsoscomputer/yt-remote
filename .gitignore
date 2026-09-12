@@ -2,6 +2,7 @@
 data/roles.json
 data/*.json
 data/*.db
+data/settings.enc
 
 # Cache Python
 __pycache__/
