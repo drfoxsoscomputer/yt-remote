@@ -26,6 +26,7 @@ else:
 
 DATA_DIR = _BASE_DIR / "data"
 SESSION_FILE = DATA_DIR / "session.enc"
+BOT_DATA_FILE = DATA_DIR / "settings.enc"
 
 
 class _DATA_BLOB(ctypes.Structure):
@@ -199,3 +200,91 @@ def clear_session() -> bool:
 
 def is_valid_session(session: Dict[str, Any]) -> bool:
     return get_session_manager().is_valid_session(session)
+
+
+# ─── Datos del bot cifrados (data/settings.enc) ───────────────────
+# Mismo DPAPI que session.enc, pero para el estado que gestiona el propio
+# bot (hoy: ALLOWED_CHAT_ID). Antes ese campo se escribía en el .env en
+# texto plano; aquí queda cifrado ligado al usuario/máquina de Windows.
+def load_bot_data() -> Dict[str, Any]:
+    """Carga el dict de datos del bot desde settings.enc ({} si falla/no existe)."""
+    if not _DPAPI_OK:
+        return {}
+    if not BOT_DATA_FILE.exists():
+        return {}
+    try:
+        with open(BOT_DATA_FILE, "rb") as f:
+            encrypted = f.read()
+        return json.loads(_dpapi_unprotect(encrypted).decode("utf-8"))
+    except Exception:
+        return {}
+
+
+def save_bot_data(data: Dict[str, Any]) -> bool:
+    """Persiste el dict de datos del bot cifrado con DPAPI."""
+    if not _DPAPI_OK:
+        return False
+    try:
+        payload = json.dumps(data, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
+        with open(BOT_DATA_FILE, "wb") as f:
+            f.write(_dpapi_protect(payload))
+        return True
+    except Exception as e:
+        print(f"Error guardando datos del bot: {e}")
+        return False
+
+
+def get_allowed_chat_id() -> Optional[int]:
+    """Devuelve el chat permitido guardado encriptado, o None si no hay."""
+    value = load_bot_data().get("allowed_chat_id")
+    try:
+        return int(value) if value is not None else None
+    except (TypeError, ValueError):
+        return None
+
+
+def set_allowed_chat_id(chat_id: "int | str | None") -> bool:
+    """Guarda encriptado el chat permitido (reemplaza al .env en texto plano)."""
+    if chat_id is None:
+        return False
+    data = load_bot_data()
+    data["allowed_chat_id"] = str(chat_id).strip()
+    return save_bot_data(data)
+
+
+def migrate_dotenv_allowed_chat() -> None:
+    """Migra ALLOWED_CHAT_ID del .env legacy a settings.enc y limpia el .env.
+
+    El bot antes escribía el ID del grupo permitido en texto plano (.env).
+    Ahora vive cifrado con DPAPI; en el arranque se mueve el valor viejo y se
+    deja de crear ese archivo. Si el .env queda sin claves restantes se
+    elimina; si conserva TELEGRAM_TOKEN/OWNER_ID (flujo manual legacy) se
+    mantiene solo ese contenido.
+    """
+    env_path = _BASE_DIR / ".env"
+    if not env_path.exists():
+        return
+    try:
+        lines = env_path.read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return
+    rest: list[str] = []
+    for line in lines:
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#") or "=" not in stripped:
+            continue
+        key, _, value = stripped.partition("=")
+        if key.strip() == "ALLOWED_CHAT_ID" and value.strip():
+            set_allowed_chat_id(value.strip())
+            continue
+        rest.append(line)
+    if rest:
+        try:
+            env_path.write_text("\n".join(rest) + "\n", encoding="utf-8")
+        except OSError:
+            pass
+    else:
+        try:
+            env_path.unlink()
+        except OSError:
+            pass

@@ -81,10 +81,19 @@ def is_youtube_link(text: str) -> bool:
 
 
 def search(query: str, max_results: int = 5) -> list[SearchResult]:
-    """Busca videos en YouTube y devuelve los resultados."""
+    """Busca videos en YouTube y devuelve los resultados.
+
+    Usa el mismo player client 'visionos' que resolve_stream_url (con
+    fallback al client por defecto): al client visionos no le aplican el
+    bloqueo intermitente "Sign in to confirm you're not a bot" del client
+    web. Si ambos fallan, el motivo queda en _SEARCH_LAST_ERROR (que el bot
+    expone por Telegram) en lugar de perderse en silencio.
+    """
+    global _SEARCH_LAST_ERROR  # noqa: PLW0603
+    _SEARCH_LAST_ERROR = ""
     import yt_dlp
 
-    ydl_opts: "dict[str, Any]" = {
+    base_opts: "dict[str, Any]" = {
         "quiet": True,
         "no_warnings": True,
         "skip_download": True,
@@ -92,34 +101,58 @@ def search(query: str, max_results: int = 5) -> list[SearchResult]:
         "noplaylist": True,
     }
 
-    results: list[SearchResult] = []
-    with yt_dlp.YoutubeDL(ydl_opts) as ydl:  # type: ignore[arg-type]
-        try:
-            info = ydl.extract_info(f"ytsearch{max_results}:{query}", download=False)
-        except Exception:
-            return results
+    # (nombre, opts extra). Primer intento: visionos. Fallback: client default.
+    strategies: "list[tuple[str, dict]]" = [
+        ("visionos", {"extractor_args": {"youtube": {"player_client": ["visionos"]}}}),
+        ("default", {}),
+    ]
 
-        entries = info.get("entries") or []
-        for entry in entries:
-            if not entry:
-                continue
-            url = entry.get("url") or entry.get("webpage_url") or ""
-            if not url:
-                continue
-            video_id = entry.get("id") or ""
-            duration = entry.get("duration") or 0
-            results.append(
-                SearchResult(
-                    url=url,
-                    title=entry.get("title") or "(sin titulo)",
-                    duration=_fmt_duration(duration),
-                    thumbnail=_build_thumbnail(video_id),
-                    video_id=video_id,
-                    duration_seconds=int(duration),
-                    channel=entry.get("channel") or entry.get("uploader") or "",
-                )
+    info: "dict[str, Any] | None" = None
+    for _client_name, extra in strategies:
+        try:
+            opts = dict(base_opts)
+            opts.update(extra)
+            with yt_dlp.YoutubeDL(opts) as ydl:  # type: ignore[arg-type]
+                info = ydl.extract_info(f"ytsearch{max_results}:{query}", download=False)
+            break
+        except Exception as exc:  # noqa: BLE001 - el motivo se reporta por Telegram
+            _SEARCH_LAST_ERROR = str(exc)
+            info = None
+
+    results: list[SearchResult] = []
+    if info is None:
+        return results
+
+    entries = info.get("entries") or []
+    for entry in entries:
+        if not entry:
+            continue
+        url = entry.get("url") or entry.get("webpage_url") or ""
+        if not url:
+            continue
+        video_id = entry.get("id") or ""
+        duration = entry.get("duration") or 0
+        results.append(
+            SearchResult(
+                url=url,
+                title=entry.get("title") or "(sin titulo)",
+                duration=_fmt_duration(duration),
+                thumbnail=_build_thumbnail(video_id),
+                video_id=video_id,
+                duration_seconds=int(duration),
+                channel=entry.get("channel") or entry.get("uploader") or "",
             )
+        )
     return results
+
+
+# Ultimo error observado al buscar (diagnostico remoto por Telegram).
+_SEARCH_LAST_ERROR: str = ""
+
+
+def last_search_error() -> str:
+    """Devuelve el motivo del ultimo fallo de busqueda, o vacio si no hubo."""
+    return _SEARCH_LAST_ERROR
 
 
 def _fmt_duration(seconds: "int | float | None") -> str:

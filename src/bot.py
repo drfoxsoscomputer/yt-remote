@@ -36,8 +36,8 @@ from player import Player
 from persistence import StateStore
 from queue_manager import QueueItem, QueueManager
 from roles import RoleManager
-from search import SearchResult, is_playlist_url, expand_playlist, quick_playlist, is_youtube_link, search, resolve_stream_url, thumbnail_from_url, last_resolve_error, set_max_height
-import setup_cli as setup
+from search import SearchResult, is_playlist_url, expand_playlist, quick_playlist, is_youtube_link, search, resolve_stream_url, thumbnail_from_url, last_resolve_error, last_search_error, set_max_height
+from security import set_allowed_chat_id
 
 logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s", level=logging.INFO
@@ -49,6 +49,10 @@ logger = logging.getLogger(__name__)
 # congelaria el polling entero (los handlers de python-telegram-bot corren
 # en secuencia) y el bot dejaria de responder botones y comandos.
 _RESOLVE_TIMEOUT = 20.0
+
+# Timeout para cada busqueda (yt-dlp en thread): si tarda mas, se corta y se
+# avisa; sin esto, un yt-dlp colgado dejaria el "Buscando..." eterno.
+_SEARCH_TIMEOUT = 30.0
 
 # Arranque al toque de playlists: los primeros tracks se cargan al instante
 # (una sola llamada rapida de yt-dlp con playlistend) y el RESTO se expande
@@ -1495,7 +1499,7 @@ class YTRemoteBot:
         if is_owner and self.config.allowed_chat_id is None:
             allowed = chat.id if chat else None
             if allowed is not None:
-                setup.set_allowed_chat_id(allowed)
+                set_allowed_chat_id(allowed)
                 self.config.allowed_chat_id = allowed
                 logger.info("Grupo permitido configurado: %s", allowed)
                 await self._reply(update, "Configurado: este chat quedo habilitado para el bot.\n\n" + "Comandos disponibles para su rol (admin):\n" + self.help_for_role("admin"))
@@ -1798,9 +1802,26 @@ class YTRemoteBot:
             pending_id = None
 
         # yt-dlp es lento y bloqueante: ejecutarlo en un thread para no
-        # congelar el bot mientras busca.
+        # congelar el bot mientras busca, con tope de tiempo para que el
+        # "Buscando..." nunca quede eterno.
         try:
-            results = await asyncio.to_thread(search, query, self.config.max_results)
+            results = await asyncio.wait_for(
+                asyncio.to_thread(search, query, self.config.max_results),
+                timeout=_SEARCH_TIMEOUT,
+            )
+        except asyncio.TimeoutError:
+            msg = f"La busqueda se agoto (mas de {_SEARCH_TIMEOUT:.0f}s). Intenta de nuevo."
+            logger.warning("Busqueda agotada (%ss): %s", _SEARCH_TIMEOUT, query)
+            if pending_id is not None:
+                try:
+                    await context.bot.edit_message_text(
+                        msg, chat_id=chat_id, message_id=pending_id
+                    )
+                except Exception:
+                    pass
+            else:
+                await self._reply(update, msg)
+            return
         except Exception as exc:
             if pending_id is not None:
                 try:
@@ -1816,17 +1837,24 @@ class YTRemoteBot:
             return
 
         if not results:
+            causa = last_search_error()
+            if causa:
+                msg = (
+                    "❌ Fallo al buscar (YouTube bloqueo o respondio mal):\n"
+                    f"{causa}"
+                )
+                logger.warning("Busqueda sin resultados por fallo (%s): %s", causa, query)
+            else:
+                msg = "No encontre resultados."
             if pending_id is not None:
                 try:
                     await context.bot.edit_message_text(
-                        "No encontre resultados.",
-                        chat_id=chat_id,
-                        message_id=pending_id,
+                        msg, chat_id=chat_id, message_id=pending_id
                     )
                 except Exception:
                     pass
             else:
-                await self._reply(update, "No encontre resultados.")
+                await self._reply(update, msg)
             return
 
         # Nueva busqueda reemplaza el cache de streams: queda solo con las

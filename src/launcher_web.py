@@ -30,9 +30,18 @@ if getattr(sys, "frozen", False):
 else:
     BASE_DIR = SRC_DIR.parent
 
+# Carpeta de recursos: en el bundle frozen vive en _internal (donde está
+# este módulo); en desarrollo, en la raíz del repo. Con rutas absolutas el
+# servidor local funciona igual empaquetado y en dev.
+RES_DIR = Path(__file__).resolve().parent if getattr(sys, "frozen", False) else SRC_DIR.parent
+
 SESSION_FILE = BASE_DIR / "session.enc"
 
-app = Flask(__name__, template_folder="templates", static_folder="static")
+app = Flask(
+    __name__,
+    template_folder=str(RES_DIR / "templates"),
+    static_folder=str(RES_DIR / "static"),
+)
 app.config["JSON_AS_ASCII"] = False
 
 

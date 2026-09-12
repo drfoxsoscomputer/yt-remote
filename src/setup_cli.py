@@ -59,15 +59,18 @@ def write_env(token: str, owner_id: str) -> None:
 
 
 def get_allowed_chat_id() -> str:
-    return _read().get("ALLOWED_CHAT_ID", "")
+    from security import get_allowed_chat_id as _secure_get
+
+    value = _secure_get()
+    return str(value) if value is not None else ""
 
 
 def set_allowed_chat_id(chat_id: int | str | None) -> None:
     if chat_id is None:
         return
-    env = _read()
-    env["ALLOWED_CHAT_ID"] = str(chat_id).strip()
-    _write(env)
+    from security import set_allowed_chat_id as _secure_set
+
+    _secure_set(chat_id)
 
 
 def launch_wizard() -> int:

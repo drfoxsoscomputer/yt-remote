@@ -1,0 +1,92 @@
+<!doctype html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>YT-Remote</title>
+<style>
+  * { box-sizing: border-box; }
+  html, body { height: 100%; margin: 0; }
+  body {
+    background: #1a1a2e;
+    color: #e8e8e8;
+    font-family: 'Segoe UI', system-ui, -apple-system, sans-serif;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    padding: 1rem;
+    min-height: 100%;
+  }
+  .logo {
+    width: 80px;
+    height: 80px;
+    object-fit: contain;
+    margin-bottom: 0.5rem;
+  }
+  h1 { font-size: 1.5rem; font-weight: 700; margin: 0 0 0.25rem; text-align: center; }
+  .subtitle { color: #a1a1aa; font-size: 0.875rem; margin: 0 0 1rem; text-align: center; }
+  .card {
+    width: 100%;
+    max-width: 24rem;
+    background: #262640;
+    border: 1px solid #3f3f5a;
+    border-radius: 1rem;
+    padding: 1.25rem;
+    display: flex;
+    flex-direction: column;
+    gap: 1.1rem;
+  }
+  .field { display: flex; flex-direction: column; gap: 0.5rem; }
+  .row { display: flex; gap: 0.75rem; margin-top: 0.35rem; }
+  .skeleton {
+    background: linear-gradient(90deg, #3a3a58 25%, #4b4b6f 50%, #3a3a58 75%);
+    background-size: 200% 100%;
+    animation: shimmer 1.4s ease-in-out infinite;
+    border-radius: 0.5rem;
+  }
+  .label { width: 6.5rem; height: 0.875rem; }
+  .input { width: 100%; height: 2.75rem; border-radius: 0.75rem; }
+  .btn { height: 2.75rem; border-radius: 0.75rem; }
+  .btn-connect { flex: 1.3; }
+  .btn-exit { flex: 1; }
+  .footer { color: #71717a; font-size: 0.75rem; margin-top: 1.25rem; }
+  .sr-only {
+    position: absolute;
+    width: 1px; height: 1px; padding: 0; margin: -1px;
+    overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; border: 0;
+  }
+  @keyframes shimmer {
+    0% { background-position: 200% 0; }
+    100% { background-position: -200% 0; }
+  }
+</style>
+</head>
+<body>
+  <p class="sr-only" role="status">Cargando YT-Remote...</p>
+  <img class="logo" src="img/logo-ytremote.png" alt="">
+  <h1>YT-Remote</h1>
+  <p class="subtitle">Control remoto de YouTube para Telegram</p>
+
+  <div class="card" aria-hidden="true">
+    <div class="field">
+      <div class="skeleton label"></div>
+      <div class="skeleton input"></div>
+    </div>
+    <div class="field">
+      <div class="skeleton label"></div>
+      <div class="skeleton input"></div>
+    </div>
+    <div class="field">
+      <div class="skeleton label"></div>
+      <div class="skeleton input"></div>
+    </div>
+    <div class="row">
+      <div class="skeleton btn btn-connect"></div>
+      <div class="skeleton btn btn-exit"></div>
+    </div>
+  </div>
+
+  <p class="footer">Servidor local en puerto 8081</p>
+</body>
+</html>
