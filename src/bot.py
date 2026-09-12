@@ -365,6 +365,14 @@ class YTRemoteBot:
                 "BOT ARRANCADO (pid=%s)",
                 os.getpid(),
             )
+            # La tarjeta persistida de una sesion anterior se borra al
+            # arrancar: era la causa de las tarjetas huerfanas apiladas (cada
+            # reinicio dejaba una foto vieja muerta; el bot nuevo la editaba
+            # sin saber si era foto o texto). La proxima _show_card/_send_card
+            # crea una fresca al final del chat.
+            if self._card_message_id is not None:
+                await self._remove_card()
+                self._persist_dirty()
             # Si se restauro estado previo con una cancion y hay tarjeta
             # persistida, se re-edita la tarjeta con el texto "retoma"
             # (la tarjeta queda "viva" al volver al chat).
@@ -1007,12 +1015,30 @@ class YTRemoteBot:
                         reply_markup=self._control_keyboard(),
                     )
             else:
-                await bot.edit_message_text(
-                    text,
-                    chat_id=chat_id,
-                    message_id=self._card_message_id,
-                    reply_markup=self._control_keyboard(),
-                )
+                try:
+                    await bot.edit_message_text(
+                        text,
+                        chat_id=chat_id,
+                        message_id=self._card_message_id,
+                        reply_markup=self._control_keyboard(),
+                    )
+                except Exception as exc_text:  # noqa: BLE001
+                    if "no text in the message" not in str(exc_text).lower():
+                        raise
+                    # El mensaje real es una FOTO (la identidad de la tarjeta
+                    # se desincrono entre sesiones: el tipo persistido dice
+                    # texto pero el mensaje es foto). El edit de texto falla
+                    # con "There is no text in the message to edit"; se
+                    # reintenta como caption y se corrige el tipo para que
+                    # los proximos re-renders usen la ruta correcta.
+                    await bot.edit_message_caption(
+                        caption=text,
+                        chat_id=chat_id,
+                        message_id=self._card_message_id,
+                        reply_markup=self._control_keyboard(),
+                    )
+                    self._card_is_photo = True
+                    self._persist_dirty()
         except Exception as exc:  # noqa: BLE001 - no debe romper el control
             if "message is not modified" in str(exc):
                 # Re-render con el mismo texto/teclado: es un no-op valido.
@@ -1075,6 +1101,9 @@ class YTRemoteBot:
                 self._card_is_photo = False
             self._card_chat_id = chat_id
             self._card_message_id = msg.message_id
+            # Persistir identidad y tipo YA: si el bot se reinicia, sabe que
+            # tarjeta borrar al arrancar y con que tipo re-renderizar.
+            self._persist_dirty()
         except Exception as exc:  # noqa: BLE001 - no debe romper el control
             logger.warning("No se pudo crear la tarjeta: %s", exc)
 

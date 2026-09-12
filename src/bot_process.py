@@ -137,7 +137,7 @@ class BotProcess:
                     f"{python_exe} {bot_script}"
                 )
                 self.process = subprocess.Popen(
-                    [str(python_exe), str(bot_script)],
+                    [str(python_exe), "-u", str(bot_script)],
                     env=env,
                     cwd=str(python_exe.parent),
                     stdout=subprocess.PIPE,
@@ -173,33 +173,38 @@ class BotProcess:
                 return False
 
     def _monitor_dead(self) -> None:
-        """Hilo vigia: cuando el bot muera, vuelca su salida final a bot.log.
+        """Hilo vigia: vuelca bot.log EN TIEMPO REAL y registra la salida.
 
-        Asi un proceso que 'conecto' de mentira (vivo 0.6s) deja rastro: si
-        muere a los 2 segundos porque el token es invalido, el por que queda
-        registrado aunque la UI ya hubiera mostrado el estado previo.
+        IMPORTANTE: el hilo NO mata al bot. Antes se usaba
+        `communicate(timeout=30)` con `proc.kill()` en el TimeoutExpired, y
+        como el bot es un poller que debe vivir para siempre, el propio
+        vigia lo asesinaba a los 30 segundos de vida (silenciosamente y con
+        la UI aun mostrando 'Conectado'). Ahora se lee la salida por LÍNEAS
+        (`-u` desactiva el buffer de Python), de modo que cada log del bot
+        aparece en bot.log al instante — sin esperar a que muera. Al salir
+        (normal o por Detener) se registra SIEMPRE el exit code: nada de
+        muertes fantasma.
         """
 
         def _watch() -> None:
             proc = self.process
-            if proc is None:
+            if proc is None or proc.stdout is None:
                 return
             try:
-                salida, _ = proc.communicate(timeout=30)
-            except subprocess.TimeoutExpired:
-                try:
-                    proc.kill()
-                    salida, _ = proc.communicate(timeout=5)
-                except Exception:
-                    salida = b""
+                while True:
+                    linea = proc.stdout.readline()
+                    if not linea:
+                        break
+                    texto = linea.decode("utf-8", "replace").rstrip()
+                    if texto:
+                        self._append_log(texto)
             except Exception:
-                salida = b""
+                pass
+            exit_code = proc.returncode
             with self._lock:
                 if self.process is proc:
                     self.process = None
-            texto = salida.decode("utf-8", "replace").strip()
-            if texto:
-                self._append_log(texto)
+            self._append_log(f"BOT SALIO (exit_code={exit_code})")
 
         threading.Thread(target=_watch, daemon=True).start()
 
