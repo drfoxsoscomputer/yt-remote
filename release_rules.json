@@ -1,6 +1,6 @@
 {
   "_comment": "Fuente unica de reglas para armar el ZIP portable. La consume release_zip.py (modulo compartido por build_exe.py y build.py). No duplicar estas reglas en otro archivo.",
-  "version": "1.1.0",
+  "version": "1.1.1",
   "zip_name_template": "yt-remote-{version}-portable.zip",
   "exe_name": "ytremote.exe",
   "include_top_files": [

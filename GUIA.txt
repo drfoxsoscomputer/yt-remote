@@ -29,13 +29,17 @@ PASO 2 - CONSEGUIR SU ID
 PASO 3 - ARRANCAR
 -----------------
 1. Doble clic en  ytremote.exe
-2. Se abre la ventana del launcher. La primera vez le pide:
+2. Se abre la ventana del launcher en la pantalla de Estado. Si todavía no
+   hay una sesión guardada, abra el menú de la esquina superior y elija
+   "Configuración". Le pedirá:
      - el TOKEN del bot (del Paso 1)
      - su ID de admin (del Paso 2)
-   Péguelos y presione el boton:  Conectar
+   Péguelos y presione:  Guardar
+   (La primera vez el botón se llama "Conectar"; el resultado es el
+   mismo: guarda la configuración y arranca el bot.)
 3. El bot arranca en segundo plano y la ventana se oculta al lado del
-   reloj. Para volver a verla, doble clic en el icono de YT-Remote en
-   la bandeja.
+   reloj. Para volver a verla, haga doble clic en el ícono de YT-Remote
+   en la bandeja (o clic derecho y "Abrir app").
 4. Cree un grupo en Telegram, agregue el bot y escriba:   /start
    El bot se configura solo para funcionar ahí. Es el chat donde
    responderá; los mensajes de otros chats (privado u otros grupos)
@@ -44,24 +48,33 @@ PASO 3 - ARRANCAR
 
 LA VENTANA DEL LAUNCHER
 -----------------------
-La ventana tiene tres campos:
-  - Token del bot  -> el codigo que le dio @BotFather al crear el bot
-  - ID de admin    -> su ID numerico de Telegram (primer admin)
+La ventana tiene dos pantallas: Estado y Configuración.
+
+Pantalla Estado:
+  - botón de encendido grande en el centro: conecta o detiene el bot
+  - debajo, el estado con su color:
+      Conectando / En línea  -> verde
+      Desconectado / Error   -> rojo
+      Sin sesión             -> gris
+  - el avatar de la esquina superior lleva un punto del mismo color
+  - menú en la esquina superior: Configuración y Cerrar sesión
+
+Pantalla Configuración:
+  - Token del bot  -> el código que le dio @BotFather al crear el bot
+  - ID de admin    -> su ID numérico de Telegram (primer admin)
   - Expulsar tras horas -> horas de tolerancia para invitados
                           (0 = desactivado; igual que kick_after_hours)
+  - botón Guardar (la primera vez dice "Conectar"): guarda la
+    configuración en session.enc y arranca el bot
 
-Y cuatro botones:
-  - Conectar       -> guarda la configuracion (session.enc) y arranca el bot
-  - Salir          -> cierra la ventana sin iniciar el bot
-  - Detener        -> detiene el bot sin borrar la configuracion guardada
-  - Cerrar sesion  -> borra la configuracion guardada y vuelve al formulario
-
-Si cierra la ventana con la X, le pregunta: minimizar al lado del reloj
- (el bot sigue) o salir (detiene el bot y cierra). Con una sesion guardada,
- al abrir el programa el bot se conecta solo y pasa al lado del reloj.
- Solo puede haber una instancia: si abre la ventana dos veces, la segunda
- muestra un aviso. La ventana necesita el runtime WebView2 (Windows 10/11
- suelen traerlo; si falta, el programa indica como instalarlo).
+Si cierra la ventana con la X, el programa se minimiza al lado del reloj
+ sin preguntar (el bot sigue corriendo). Para salir de verdad, haga clic
+ derecho en el ícono de la bandeja y elija "Salir". La opción "Cerrar
+ sesión" borra la configuración guardada, detiene el bot y vuelve a la
+ pantalla de Configuración. Solo puede haber una instancia: si abre la
+ ventana dos veces, la segunda muestra un aviso. La ventana necesita el
+ runtime WebView2 (Windows 10/11 suelen traerlo; si falta, el programa
+ indica cómo instalarlo).
 
 
 CÓMO BUSCAR Y REPRODUCIR
@@ -81,7 +94,7 @@ buscar nada.
 
 Si el link es de una PLAYLIST o mix de YouTube, el bot arranca YA con los
 primeros temas y sigue cargando el resto en segundo plano (avisa cuando
-quedó completa). El boton 📋 muestra la lista completa mientras crece y la
+quedó completa). El botón 📋 muestra la lista completa mientras crece y la
 posición se guarda: al reiniciar el programa, retoma la misma canción y la
 misma página de la lista.
 
@@ -130,7 +143,7 @@ videos arrancan más livianos.
 
 
 COMPORTAMIENTO DE LA RADIO
--------------------------
+--------------------------
 Cuando termina una canción, el bot reproduce automáticamente otra del
 mismo artista que eligió al buscar. Cada vez que pulse ⏭ salta
 a la siguiente canción del mismo artista.
@@ -153,14 +166,14 @@ Solo dj y admin:
 
 Solo admin:
   /reglas                            re-envía y fija (pin) el mensaje de reglas
-  (los roles se gestionan con el boton 👥 Usuarios de la tarjeta: la lista
+  (los roles se gestionan con el botón 👥 Usuarios de la tarjeta: la lista
    llega al chat privado del admin, se toca al usuario para alternar dj/user
    y ❌ aplica los cambios. En el grupo no aparece nada)
 
 Todos (user, dj, admin):
-  (la lista se ve con el boton 📋 de la tarjeta: un mensaje aparte,
-   paginado de 10 en 10, que cualquiera cierra con el boton ❌; solo dj o
-   admin pueden elegir un tema tocandolo)
+  (la lista se ve con el botón 📋 de la tarjeta: un mensaje aparte,
+   paginado de 10 en 10, que cualquiera cierra con el botón ❌; solo dj o
+   admin pueden elegir un tema tocándolo)
 
 Un user que quiera ser dj puede escribir /solicitar para pedirle al
 admin que le dé acceso; al admin le llega el aviso por privado.
@@ -169,22 +182,22 @@ admin que le dé acceso; al admin le llega el aviso por privado.
 ROLES Y PERMISOS
 ----------------
   admin  — puede hacer todo + gestionar usuarios (👥) + cambiar la calidad (⚙️)
-  dj     — buscar, controlar musica (tarjeta y comandos)
-  user   — solo puede ver la lista con el boton 📋 (sin elegir temas) y pedir
+  dj     — buscar, controlar música (tarjeta y comandos)
+  user   — solo puede ver la lista con el botón 📋 (sin elegir temas) y pedir
            el acceso con /solicitar
 
 Por defecto solo el dueño es admin. Para darle acceso a otros, abra la
-lista con el boton 👥 Usuarios de la tarjeta y toque al usuario en su
+lista con el botón 👥 Usuarios de la tarjeta y toque al usuario en su
 chat privado.
 
-EXPULSION AUTOMATICA DE INVITADOS
+EXPULSIÓN AUTOMÁTICA DE INVITADOS
 ---------------------------------
 En config.json, la clave kick_after_hours define las horas de tolerancia del
 rol user (0 = desactivado). Con un valor mayor a 0:
   - al iniciar, el bot fija (pin) el mensaje de reglas del grupo;
   - quien se une recibe la bienvenida con el plazo indicado;
   - pasada la hora, si el invitado sigue sin rol dj/admin, el bot lo retira
-    del grupo (kick: ban + unban; puede volver con el enlace de invitacion).
+    del grupo (kick: ban + unban; puede volver con el enlace de invitación).
 Requiere que el bot sea admin del grupo.
 
 
@@ -194,16 +207,17 @@ PROBLEMAS COMUNES
   runtime WebView2: si la ventana avisa que falta, instale el "Evergreen
   Standalone Installer" de Microsoft Edge WebView2 y vuelva a abrir el
   programa.
-- Si abrio el programa dos veces, la segunda ventana avisa que ya esta en
-  ejecucion: busque la ventana abierta o el icono al lado del reloj.
+- Si abrió el programa dos veces, la segunda ventana avisa que ya está en
+  ejecución: busque la ventana abierta o el ícono al lado del reloj.
 - Si el bot no responde en el grupo, verifique que haya agregado el bot
   y le haya enviado /start en ESE grupo. El bot ignora los mensajes de
   otros chats (privado u otros grupos); en la consola aparece
   "Rechazado mensaje de chat no permitido".
 - Si el bot ignora un grupo nuevo, cambie el grupo permitido: detenga el
-  bot con el boton Detener o Cerrar sesion de la ventana, consiga el ID
-  del grupo reenviando un mensaje a @getidsbot (le responde un número
-  negativo), y ejecute en la carpeta:
+  bot con el Power de la pantalla Estado, con "Cerrar sesión" o desde el
+  menú del ícono en la bandeja (clic derecho -> "Detener bot"), consiga
+  el ID del grupo reenviando un mensaje a @getidsbot (le responde un
+  número negativo), y ejecute en la carpeta:
   runtime\python\python.exe src\setup_cli.py set-chat <id>
   Luego vuelva a abrir ytremote.exe, conecte y envíe /start en el grupo.
 - Si Telegram dice que "el bot no puede unirse a grupos", revise los
