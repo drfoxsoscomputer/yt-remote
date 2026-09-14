@@ -432,7 +432,7 @@ class LauncherApp:
         if conectar:
             hint = ttk.Label(
                 config_frame,
-                text="Ingresá el token del bot y tu ID de administrador de Telegram\npara conectar el bot. No hay sesión guardada todavía.",
+                text="Ingrese el token del bot y su ID de administrador de Telegram\npara conectar el bot. No hay sesión guardada todavía.",
                 style="Subtitle.TLabel",
                 justify=tk.CENTER,
             )
@@ -457,7 +457,7 @@ class LauncherApp:
             command=lambda: self._toggle_secret(self.token_entry, self._token_visible),
         ).pack(side=tk.RIGHT, padx=(6, 0))
 
-        ttk.Label(form_frame, text="Tu ID de Telegram (admin):", style="Subtitle.TLabel").pack(anchor=tk.W, pady=(10, 2))
+        ttk.Label(form_frame, text="Su ID de Telegram (admin):", style="Subtitle.TLabel").pack(anchor=tk.W, pady=(10, 2))
         admin_row = ttk.Frame(form_frame)
         admin_row.pack(fill=tk.X, pady=(0, 10))
         self.admin_id_var = tk.StringVar(value=str(self.session_ui.session_data.get("admin_id", "")) if self.session_ui.session_data else "")
@@ -578,7 +578,7 @@ class LauncherApp:
             token = self.token_var.get().strip()
             admin_id_str = self.admin_id_var.get().strip()
             if not token or not admin_id_str.isdigit() or int(admin_id_str) <= 0:
-                messagebox.showerror("Error", "Ingresá el token del bot y tu ID de Telegram (admin).")
+                messagebox.showerror("Error", "Ingrese el token del bot y su ID de Telegram (admin).")
                 return
             config_data = {
                 "bot_token": token,
@@ -600,7 +600,7 @@ class LauncherApp:
                 self.minimize_to_tray()
             else:
                 self.is_connected = False
-                messagebox.showerror("Error", "No se pudo iniciar el bot. Revisá token e ID, luego reintentá.")
+                messagebox.showerror("Error", "No se pudo iniciar el bot. Revise el token y el ID e intente de nuevo.")
                 self.back_to_main()
         except Exception as e:
             messagebox.showerror("Error", f"Error guardando: {e}")
@@ -703,8 +703,8 @@ def main():
             messagebox.showwarning(
                 "YT-Remote ya está abierto",
                 "La ventana del launcher ya está abierta.\n"
-                "Mirá el ícono del programa en la zona del reloj "
-                "(abajo a la derecha) y hacé clic en 'Mostrar'.",
+                "Mire el ícono del programa en la zona del reloj "
+                "(abajo a la derecha) y haga clic en 'Mostrar'.",
             )
         except Exception:
             pass

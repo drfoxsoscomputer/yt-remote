@@ -44,6 +44,19 @@ app = Flask(
 )
 app.config["JSON_AS_ASCII"] = False
 
+# Tope de la auto-expulsión de invitados: 7 días en horas. Coincide con el
+# max="168" del input en templates/launcher.html.
+KICK_MAX_HOURS = 168
+
+
+def _clamp_kick_hours(kick_hours) -> int:
+    """Normaliza kick_after_hours: entero no negativo con tope KICK_MAX_HOURS."""
+    try:
+        valor = int(kick_hours) if str(kick_hours).isdigit() else 0
+    except (ValueError, TypeError):
+        valor = 0
+    return min(max(0, valor), KICK_MAX_HOURS)
+
 
 # ─── Helpers ──────────────────────────────────────────────────────
 def _load_session() -> Optional[Dict[str, Any]]:
@@ -78,7 +91,33 @@ def _clear_session() -> bool:
         return False
 
 
+def _persist_username(handle: str) -> None:
+    """Guarda el @handle del bot (getMe) en la sesión para el link t.me."""
+    try:
+        sm = SessionManager()
+        data = sm.load_session() or {}
+        data["bot_username"] = handle.lstrip("@")
+        sm.save_session(data)
+    except Exception as e:
+        print(f"Error guardando bot_username: {e}")
+
+
 # ─── Rutas API ────────────────────────────────────────────────────
+# Anti-CSRF local: el launcher es un servidor localhost y un POST cross-site
+# (fetch/form desde una página externa) podría tumbar la app. Los navegadores
+# SIEMPRE envían el header Origin en los POST cross-site; aquí solo se acepta
+# el origen propio (http://<Host>). Un cliente no-navegador (curl, el runtime)
+# no manda Origin y no puede ser objetivo de CSRF del navegador.
+@app.before_request
+def _guard_csrf():
+    if request.method in ("POST", "PUT", "PATCH", "DELETE"):
+        origin = request.headers.get("Origin", "")
+        if origin:
+            host = request.headers.get("Host", "")
+            if origin.rstrip("/") != f"http://{host}":
+                return jsonify({"ok": False, "error": "Origen no permitido"}), 403
+
+
 @app.route("/launcher")
 def launcher_page():
     """Sirve el HTML del formulario de conexión."""
@@ -92,21 +131,26 @@ def api_session():
     descifrarla en esta máquina)."""
     data = _load_session()
     if data:
-        return jsonify({
+        resp = jsonify({
             "has_session": True,
             "bot_token": data.get("bot_token", ""),
             "admin_id": data.get("admin_id"),
             "kick_after_hours": data.get("kick_after_hours", 0),
+            "bot_username": data.get("bot_username", ""),
         })
-    return jsonify({"has_session": False})
+    else:
+        resp = jsonify({"has_session": False})
+    # La respuesta lleva datos sensibles en claro: prohibido cachear.
+    resp.headers["Cache-Control"] = "no-store"
+    return resp
 
 
 @app.route("/api/save", methods=["POST"])
 def api_save():
     """Guarda las credenciales y NO arranca el bot.
 
-    Flujo: Guardar -> vuelve a la pantalla principal -> el usuario pulsa
-    Conectar. Si el bot corría con la config anterior, se detiene para que
+    Flujo: Guardar -> vuelve a la pantalla principal -> el usuario hace clic
+    en Conectar. Si el bot corría con la config anterior, se detiene para que
     la nueva quede lista sin ejecutar nada.
     """
     payload = request.get_json(silent=True) or {}
@@ -120,7 +164,7 @@ def api_save():
         return jsonify({"ok": False, "error": "ID de admin inválido (debe ser número positivo)"}), 400
 
     try:
-        kick = int(kick_hours) if str(kick_hours).isdigit() else 0
+        kick = _clamp_kick_hours(kick_hours)
     except (ValueError, TypeError):
         kick = 0
 
@@ -146,15 +190,17 @@ def api_start():
     principal, sin pedir los datos otra vez)."""
     session = _load_session()
     if not (session and session.get("bot_token") and session.get("admin_id")):
-        return jsonify({"ok": False, "error": "No hay sesión guardada. Iniciá sesión primero."}), 400
+        return jsonify({"ok": False, "error": "No hay sesión guardada. Inicie sesión primero."}), 400
 
     ok, info = validate_token(session["bot_token"])
     if not ok:
         return jsonify({"ok": False, "error": f"Token inválido: {info}"}), 400
 
+    _persist_username(info)
+
     if bot_process.start(session):
-        return jsonify({"ok": True, "message": f"Bot conectado ({info})"})
-    motivo = bot_process.last_error() or "Revisa token e ID."
+        return jsonify({"ok": True, "message": f"Bot conectado ({info})", "bot_username": info.lstrip("@")})
+    motivo = bot_process.last_error() or "Revise el token y el ID."
     return jsonify({"ok": False, "error": f"No se pudo iniciar el bot: {motivo}"}), 500
 
 
@@ -172,7 +218,7 @@ def api_connect():
         return jsonify({"ok": False, "error": "ID de admin inválido (debe ser número positivo)"}), 400
 
     try:
-        kick = int(kick_hours) if str(kick_hours).isdigit() else 0
+        kick = _clamp_kick_hours(kick_hours)
     except (ValueError, TypeError):
         kick = 0
 
@@ -188,6 +234,7 @@ def api_connect():
         "admin_id": int(admin_id_str),
         "kick_after_hours": max(0, kick),
         "mpv_path": "runtime\\mpv\\mpv.exe",
+        "bot_username": info.lstrip("@"),
     }
 
     if not _save_session(config_data):
@@ -200,7 +247,7 @@ def api_connect():
     if bot_process.start(config_data):
         return jsonify({"ok": True, "message": f"Bot conectado ({info})"})
     else:
-        motivo = bot_process.last_error() or "Revisa token e ID."
+        motivo = bot_process.last_error() or "Revise el token y el ID."
         return jsonify({"ok": False, "error": f"No se pudo iniciar el bot: {motivo}"}), 500
 
 
@@ -209,6 +256,16 @@ def api_status():
     """Estado actual del bot."""
     running = bot_process.is_running()
     return jsonify({"bot_running": running})
+
+
+@app.route("/api/log", methods=["POST"])
+def api_log():
+    """Telemetría de la UI: el JS vuelca pasos y errores a data/bot.log."""
+    payload = request.get_json(silent=True) or {}
+    texto = (payload.get("msg") or "").strip()
+    if texto:
+        bot_process._append_log(f"[UI] {texto}")
+    return jsonify({"ok": True})
 
 
 @app.route("/api/stop_bot", methods=["POST"])
@@ -232,10 +289,13 @@ def shutdown():
     return jsonify({"ok": True, "message": "Cerrando..."})
 
 
-# ─── Static files (para desarrollo sin build) ─────────────────────
+# ─── Static files ─────────────────────────────────────────────────
+# OJO: usar app.static_folder (absoluto = RES_DIR/static). Un path relativo
+# ("static") se resuelve contra el CWD y da 404 cuando el exe se abre desde
+# su propia carpeta (CWD = dist\ytremote, sin static/ al lado).
 @app.route("/static/<path:filename>")
 def static_files(filename):
-    return send_from_directory("static", filename)
+    return send_from_directory(app.static_folder or RES_DIR / "static", filename)
 
 
 # ─── Main ─────────────────────────────────────────────────────────

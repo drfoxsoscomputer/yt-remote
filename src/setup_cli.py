@@ -98,7 +98,7 @@ def launch_wizard() -> int:
         print("Vuelve a descargar la versión completa desde el repositorio")
         print("y descomprímela de nuevo. La guía está en GUIA.txt")
         print()
-        input("Pulsa Enter para cerrar...")
+        input("Presione Enter para cerrar...")
         return 1
 
     if not is_configured():

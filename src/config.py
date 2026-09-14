@@ -119,7 +119,7 @@ def load_config() -> Config:
     # con rol 'user'. 0 o ausente = desactivada. Un valor invalido cae a 0.
     try:
         kick_raw = os.environ.get("KICK_AFTER_HOURS", data.get("kick_after_hours", 0))
-        config.kick_after_hours = max(0.0, float(kick_raw or 0))
+        config.kick_after_hours = min(168.0, max(0.0, float(kick_raw or 0)))
     except (TypeError, ValueError):
         config.kick_after_hours = 0.0
 
