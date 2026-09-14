@@ -231,7 +231,7 @@
     badgeText.textContent = c.badgeText;
     setClases(estadoBadge, [BADGE_BASE, c.badge], CLS_CHIP);
     setClases(badgeDot, ['w-2 h-2 rounded-full transition-colors', c.dot], CLS_DOT);
-    setClases(avatarDot, ['absolute -bottom-1 -right-1 z-10 w-3 h-3 rounded-full border-2 border-fondo transition-colors', c.avatar], CLS_DOT);
+    setClases(avatarDot, ['absolute -bottom-0.5 -right-0.5 z-10 w-3 h-3 rounded-full border-2 border-fondo transition-colors', c.avatar], CLS_DOT);
 
     setClases(powerBtn, [c.power], ['power-neutral', 'power-idle', 'power-on', 'power-error', 'power-connecting']);
 
