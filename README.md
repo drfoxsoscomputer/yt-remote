@@ -15,8 +15,10 @@ invitados).
 ## Descarga e instalación
 
 Descargue el ZIP desde GitHub, descomprímalo en cualquier carpeta y listo.
-No necesita instalar Python, mpv ni nada externo: todo viene incluido
-dentro de la carpeta (es portable de verdad).
+No necesita instalar nada del propio programa: Python, mpv y el bot viajan
+dentro de la carpeta. La ventana usa el componente WebView2 del sistema (ya
+viene con Windows 11 y en Windows 10 actualizados); si falta, el programa
+indica cómo instalarlo.
 
 1. Descargue el ZIP desde la página de releases de GitHub
 2. Descomprímalo donde quiera
@@ -67,8 +69,9 @@ La configuración queda en `session.enc`, dentro de la carpeta `data/` que
 está junto al ejecutable, y **no se sube a GitHub**.
 
 Solo puede ejecutarse una instancia a la vez: si intenta abrir otra, aparece
-un aviso. La ventana requiere el runtime *Microsoft Edge WebView2* (Windows
-10/11 suelen traerlo; si falta, el programa indica cómo instalarlo).
+un aviso. La ventana usa el runtime *Microsoft Edge WebView2* que ya viene
+con Windows 11 y con Windows 10 actualizados; si falta, el programa indica
+cómo instalarlo.
 
 ## Cómo buscar
 
