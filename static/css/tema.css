@@ -22,8 +22,53 @@
   from { opacity: 0; transform: translateY(10px); }
   to { opacity: 1; transform: translateY(0); }
 }
-#connect-form, #connected-view {
+#vista-estado, #vista-form {
   animation: fadeInUp 0.3s ease-out;
+}
+
+/* Botón de poder (estados): glow según estado, insinuación en hover */
+.power-on {
+  border-color: rgba(34, 197, 94, 0.8);
+  box-shadow: 0 0 35px rgba(34, 197, 94, 0.35);
+}
+.power-on:hover {
+  box-shadow: 0 0 50px rgba(34, 197, 94, 0.5);
+  transform: scale(1.05);
+}
+.power-neutral {
+  border-color: var(--borde);
+  box-shadow: none;
+}
+.power-neutral:hover {
+  border-color: var(--texto-dim);
+  transform: scale(1.05);
+}
+.power-idle {
+  border-color: rgba(239, 68, 68, 0.8);
+  box-shadow: 0 0 35px rgba(239, 68, 68, 0.35);
+}
+.power-idle:hover {
+  box-shadow: 0 0 50px rgba(239, 68, 68, 0.5);
+  transform: scale(1.05);
+}
+.power-error {
+  border-color: rgba(239, 68, 68, 0.85);
+  animation: pulsoRojo 1.3s ease-in-out infinite;
+}
+.power-error:hover {
+  transform: scale(1.05);
+}
+.power-connecting {
+  border-color: rgba(34, 197, 94, 0.85);
+  animation: poderNeon 1.1s ease-in-out infinite;
+}
+@keyframes pulsoRojo {
+  0%, 100% { box-shadow: 0 0 20px rgba(239, 68, 68, 0.3); }
+  50% { box-shadow: 0 0 50px rgba(239, 68, 68, 0.55); }
+}
+@keyframes poderNeon {
+  0%, 100% { box-shadow: 0 0 16px rgba(34, 197, 94, 0.35); }
+  50% { box-shadow: 0 0 48px rgba(34, 197, 94, 0.75); }
 }
 
 /* Focus visible accesible */
@@ -41,13 +86,8 @@
   }
 }
 
-/* La ventana nunca muestra barra de scroll: si algún día faltara espacio,
-   se scrollea solo el formulario por dentro y el logo arriba queda intacto */
+/* La ventana nunca muestra barra de scroll */
 html, body {
   height: 100%;
   overflow: hidden;
-}
-#form-container {
-  max-height: 100%;
-  overflow-y: auto;
 }

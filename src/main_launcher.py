@@ -9,7 +9,7 @@ Arquitectura (estilo AlbionHelper):
   - Hilo Flask daemon en puerto 8081
   - webview.create_window (420x640, centrada en area de trabajo DPI-aware, hidden=False)
   - js_api=LauncherApi() expone: connect, get_status, stop_bot, quit_app, logout, splash_listo
-  - events.closing -> diálogo nativo (Sí=minimizar tray / No=salir)
+  - events.closing -> minimiza al tray sin diálogo (para salir: tray > Salir)
   - webview.start() bloqueante
   - finally -> _apagar_todo() (stop bot + os._exit(0))
   - Tray icon (pystray): "Abrir app" / "Detener bot" / "Salir"
@@ -132,7 +132,7 @@ def _centrado_xy(ancho: int, alto: int):
     """Coordenadas lógicas para centrar la ventana en el área de trabajo
     (pantalla menos la barra de inicio), horizontal y verticalmente.
 
-    Usa SPI_GETWORKAREA para excluir la barra de inicio y convierte los
+    Emplea SPI_GETWORKAREA para excluir la barra de inicio y convertir los
     píxeles físicos a lógicos (pywebview/WinForms re-escala x/y por DPI).
     """
     try:
@@ -180,7 +180,7 @@ class LauncherApi:
         token = (bot_token or "").strip()
         admin_id_str = (admin_id or "").strip()
         try:
-            kick = int(kick_after_hours) if str(kick_after_hours).isdigit() else 0
+            kick = min(168, max(0, int(kick_after_hours))) if str(kick_after_hours).isdigit() else 0
         except (ValueError, TypeError):
             kick = 0
 
@@ -217,7 +217,7 @@ class LauncherApi:
             _minimizar_a_tray()
             return {"ok": True, "message": f"Bot conectado ({info})"}
         else:
-            motivo = bot_process.last_error() or "Revisa token e ID."
+            motivo = bot_process.last_error() or "Revise el token y el ID."
             return {"ok": False, "error": f"No se pudo iniciar el bot: {motivo}"}
 
     def get_status(self) -> dict:
@@ -375,32 +375,17 @@ def _apagar_todo():
 
 # ─── Evento de cierre de ventana ─────────────────────────────────
 def _on_closing():
-    """Al cerrar la ventana con la X: diálogo nativo (Sí=tray / No=salir)."""
-    global _cerrar_programatico, _window
+    """Al cerrar la ventana con la X: minimiza al tray sin diálogo.
+
+    El bot sigue corriendo. Para salir del todo está el menú del tray
+    ("Salir") o Cerrar sesión (cierre programático).
+    """
+    global _cerrar_programatico
     if _cerrar_programatico:
         return  # cierre programático: permitir
 
-    # Diálogo nativo MessageBoxW (pywebview no tiene confirm dialog propio)
-    MB_YESNO = 0x00000004
-    MB_ICONQUESTION = 0x00000020
-    MB_SYSTEMMODAL = 0x00001000
-    IDYES = 6
-    IDNO = 7
-
-    resultado = ctypes.windll.user32.MessageBoxW(
-        0,
-        "¿Minimizar al lado del reloj? (El bot seguirá corriendo)\n\nNo = Detener bot y salir",
-        APP_NAME,
-        MB_YESNO | MB_ICONQUESTION | MB_SYSTEMMODAL,
-    )
-
-    if resultado == IDYES:
-        _minimizar_a_tray()
-        return False  # cancela el cierre: la ventana queda viva, oculta
-    else:
-        _cerrar_programatico = True
-        _apagar_todo()
-        return True  # permite el cierre (aunque os._exit mata el proceso)
+    _minimizar_a_tray()
+    return False  # cancela el cierre: la ventana queda viva, oculta
 
 
 def _cargar_interfaz_real():
@@ -410,7 +395,9 @@ def _cargar_interfaz_real():
     se mostró al instante queda en pantalla mientras el servidor local arranca;
     al responder, load_url(/launcher) lo reemplaza (misma paleta, sin
     parpadeo). Si hay sesión guardada y válida, arranca el bot y minimiza al
-    tray, como hacía el arranque anterior.
+    tray, como hacía el arranque anterior. Ahora la ventana NO se minimiza
+    sola: se queda visible mostrando "Conectando..." y la página decide ir al
+    tray cuando el bot queda en verde.
     """
     for _ in range(100):  # 10s max
         try:
@@ -429,10 +416,9 @@ def _cargar_interfaz_real():
     session = _load_session()
     if not (session and session.get("bot_token") and session.get("admin_id")):
         return
-    if bot_process.start(session):
-        if _window:
-            _window.hide()
-        _minimizar_a_tray()
+    # Arranca el bot pero NO esconde la ventana: la UI muestra la animación
+    # de conexión y minimiza al tray recién cuando queda en verde.
+    bot_process.start(session)
 
 
 # ─── Main ────────────────────────────────────────────────────────
@@ -442,7 +428,7 @@ def main():
         ctypes.windll.user32.MessageBoxW(
             0,
             "YT-Remote ya está en ejecución.\n"
-            "Buscá la ventana abierta o el ícono junto al reloj.",
+            "Busque la ventana abierta o el ícono junto al reloj.",
             APP_NAME,
             0x00000040,  # MB_ICONINFORMATION
         )
@@ -453,7 +439,7 @@ def main():
         ctypes.windll.user32.MessageBoxW(
             0,
             "YT-Remote necesita el runtime 'Microsoft Edge WebView2'.\n\n"
-            "Windows 10/11 suelen traerlo instalado. Instalalo desde\n"
+            "Windows 10/11 suelen traerlo instalado. Instálelo desde\n"
             "Windows Update o descargando 'Evergreen Standalone Installer'\n"
             "del sitio oficial de Microsoft Edge WebView2.",
             APP_NAME,

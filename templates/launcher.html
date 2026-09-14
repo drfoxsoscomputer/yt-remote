@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>YT-Remote · Conectar</title>
+<title>YT-Remote</title>
 <link rel="stylesheet" href="/static/css/tailwind.css">
 <link rel="stylesheet" href="/static/css/tema.css">
 <style>
@@ -12,12 +12,6 @@
   body {
     background: #1a1a2e;
     color: #e8e8e8;
-    display: flex;
-    flex-direction: column;
-    align-items: center;
-    justify-content: center;
-    padding: 1rem;
-    box-sizing: border-box;
     font-family: 'Segoe UI', system-ui, sans-serif;
   }
   /* Menú contextual propio (WebView2 no tiene uno nativo) */
@@ -47,98 +41,122 @@
   #ctx-menu button:hover { background: #3f3f5a; }
 </style>
 </head>
-<body class="bg-fondo text-texto min-h-screen antialiased flex flex-col items-center justify-center px-4">
+<body class="bg-fondo text-texto min-h-screen antialiased flex flex-col justify-between px-4 py-3 select-none">
 
-  <div class="mb-2">
-    <img src="/static/img/logo-ytremote.png" alt="YT-Remote"
-         class="w-20 h-20 mx-auto object-contain">
-  </div>
-
-  <h1 class="text-2xl font-bold text-texto text-center mb-1">YT-Remote</h1>
-  <p class="text-zinc-400 text-sm mb-4 text-center">Control remoto de YouTube para Telegram</p>
-
-  <div id="form-container" class="w-full max-w-sm space-y-4">
-
-    <!-- Vista principal: estado del bot -->
-    <div id="vista-estado" class="bg-panel rounded-2xl p-5 border border-borde text-center">
-      <div class="flex items-center justify-center gap-2 mb-3">
-        <span id="estado-dot" style="display:inline-block;width:0.7rem;height:0.7rem;border-radius:50%;background:#e8e8e8;"></span>
-        <h2 id="estado-titulo" class="text-xl font-bold text-texto">Cargando...</h2>
+  <!-- Cabecera limpia -->
+  <header class="flex items-center justify-between w-full max-w-sm mx-auto pt-1">
+    <div class="flex items-center gap-2.5">
+      <div class="relative">
+        <img src="/static/img/logo-ytremote.png" alt="YT-Remote"
+             class="w-8 h-8 rounded-full object-cover border border-borde">
+        <span id="avatar-dot" class="absolute -bottom-1 -right-1 z-10 w-3 h-3 rounded-full border-2 border-fondo bg-texto-dim transition-colors"></span>
       </div>
-      <p id="estado-detalle" class="text-texto-dim mb-5 min-h-[1.25rem] text-sm"></p>
-
-      <div class="flex flex-col gap-3">
-        <button type="button" id="btn-start-session"
-                class="btn-primario w-full py-3 rounded-xl font-semibold transition">Iniciar sesión</button>
-        <button type="button" id="btn-connect"
-                class="btn-primario w-full py-3 rounded-xl font-semibold transition hidden">Conectar</button>
-        <button type="button" id="btn-stop"
-                class="btn-secundario w-full py-3 rounded-xl font-semibold transition hidden">Detener</button>
-        <div class="flex gap-3">
-          <button type="button" id="btn-settings"
-                  class="btn-secundario flex-1 py-3 rounded-xl font-semibold transition hidden">Configurar</button>
-          <button type="button" id="btn-exit"
-                  class="btn-secundario flex-1 py-3 rounded-xl font-semibold transition">Salir</button>
-        </div>
-        <button type="button" id="btn-logout"
-                class="btn-peligro w-full py-3 rounded-xl font-semibold transition hidden">Cerrar sesión</button>
-      </div>
+      <span class="text-sm font-semibold tracking-wide text-texto">YT-Remote</span>
     </div>
 
-    <!-- Vista formulario: iniciar sesión / configurar datos -->
-    <div id="vista-form" class="hidden bg-panel rounded-2xl p-5 border border-borde">
-      <div class="mb-3">
-        <label class="block text-sm font-medium text-texto-dim mb-2">Token del bot</label>
-        <div class="relative">
-          <input type="password" id="bot_token" autocomplete="new-password"
-                 class="w-full bg-input border border-borde rounded-xl px-4 py-3 text-texto placeholder-texto-dim
-                        focus:outline-none focus:ring-2 focus:ring-azul focus:border-transparent"
-                 placeholder="123456:ABC-DEF1234ghIkl-zyx57W2v1u123ew11">
-          <button type="button" id="toggle-token" aria-label="Mostrar/ocultar token"
-                  class="absolute right-3 top-1/2 -translate-y-1/2 text-texto-dim hover:text-azul transition">
-            <svg class="w-5 h-5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg>
-          </button>
-        </div>
-      </div>
-
-      <div class="mb-3">
-        <label class="block text-sm font-medium text-texto-dim mb-2">Tu ID de Telegram (admin)</label>
-        <div class="relative">
-          <input type="password" id="admin_id" autocomplete="new-password"
-                 class="w-full bg-input border border-borde rounded-xl px-4 py-3 text-texto placeholder-texto-dim
-                        focus:outline-none focus:ring-2 focus:ring-azul focus:border-transparent"
-                 placeholder="123456789">
-          <button type="button" id="toggle-admin" aria-label="Mostrar/ocultar ID"
-                  class="absolute right-3 top-1/2 -translate-y-1/2 text-texto-dim hover:text-azul transition">
-            <svg class="w-5 h-5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg>
-          </button>
-        </div>
-      </div>
-
-      <div class="mb-4">
-        <label class="block text-sm font-medium text-texto-dim mb-2">Expulsar usuarios tras horas (0 = off)</label>
-        <input type="number" id="kick_hours" min="0" max="168" value="0"
-               class="w-full bg-input border border-borde rounded-xl px-4 py-3 text-texto placeholder-texto-dim
-                      focus:outline-none focus:ring-2 focus:ring-azul focus:border-transparent">
-      </div>
-
-      <div id="error-msg" class="hidden text-red-400 text-sm text-center mb-3 min-h-[1.25rem]"></div>
-
-      <div class="flex flex-col gap-3">
-        <button type="button" id="btn-save"
-                class="btn-primario w-full py-3 rounded-xl font-semibold transition">Guardar</button>
-        <div class="flex gap-3">
-          <button type="button" id="btn-cancel"
-                  class="btn-secundario flex-1 py-3 rounded-xl font-semibold transition">Cancelar</button>
-          <button type="button" id="btn-form-exit"
-                  class="btn-secundario flex-1 py-3 rounded-xl font-semibold transition">Salir</button>
+    <div class="flex items-center gap-1">
+      <!-- Menú engranaje -->
+      <div class="relative">
+        <button id="menu-btn" type="button" aria-label="Menú de configuración"
+                class="p-2 rounded-lg text-texto-dim hover:text-texto hover:bg-borde/50 transition-colors">
+          <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.065 2.572c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.572 1.065c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.065-2.572c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065z"/>
+            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z"/>
+          </svg>
+        </button>
+        <div id="dropdown-menu" class="hidden absolute right-0 mt-2 w-52 bg-panel border border-borde rounded-xl shadow-2xl py-1 z-50">
+          <button type="button" id="menu-config"
+                  class="block w-full text-left px-4 py-2 text-xs text-texto hover:bg-borde/50 transition-colors">Configuración</button>
+          <hr class="border-borde my-1">
+          <button type="button" id="menu-logout"
+                  class="block w-full text-left px-4 py-2 text-xs text-rojo hover:bg-rojo/10 transition-colors">Cerrar sesión</button>
         </div>
       </div>
     </div>
+  </header>
 
-  </div>
+  <!-- Vista principal: estado del bot (State-Driven) -->
+  <main id="vista-estado" class="w-full max-w-sm mx-auto bg-panel/60 border border-borde/80 rounded-3xl p-6 flex flex-col items-center shadow-2xl">
+    <div id="estado-badge" class="inline-flex items-center gap-2 px-3 py-1 rounded-full bg-verde/10 border border-verde/25 text-verde text-xs font-semibold tracking-wide uppercase mb-2 transition-colors">
+      <span id="badge-dot" class="w-2 h-2 rounded-full bg-verde animate-pulse transition-colors"></span>
+      <span id="badge-text">Conectando</span>
+    </div>
+    <span id="estado-botname" class="text-xs text-texto-dim font-medium mb-8 hidden"></span>
 
-  <p class="text-xs text-zinc-500 mt-5 text-center">Servidor local en puerto 8081</p>
+    <button id="power-btn" type="button"
+            class="group relative flex items-center justify-center w-36 h-36 rounded-full bg-fondo border-4 border-borde power-neutral transition-all duration-300 active:scale-95">
+      <svg id="power-icon" class="w-20 h-20 text-verde transition-colors" viewBox="0 0 800 800" fill="currentColor">
+        <!-- Anillo exterior: stroke currentColor -->
+        <path stroke="currentColor" stroke-width="25" fill="none" d="M400.23,764c-201.13,0-364.23-163.03-364.23-364.16S199.11,35.61,400.23,35.61s364.16,163.03,364.16,364.16-163.03,364.23-364.16,364.23h0Z"/>
+        <!-- Símbolo power: fill currentColor (hereda del svg) -->
+        <path d="M573.17,193.73c14.6-15.18,50.43,15.18,50.43,15.18,39.14,50.43,62.53,114.44,62.53,183.93,0,163.05-128.47,295.17-287.07,295.17S111.99,555.87,111.99,392.82c0-70.63,24.08-135.43,64.24-186.21,0,0,31.38-27.84,47.35-13.01,15.97,14.83,11.87,40.96,2.62,52.6-32.52,41.08-50.54,92.3-50.54,146.61,0,128.13,100.41,231.39,223.29,231.39s223.29-103.14,223.29-231.39c0-53.51-17.57-104.06-49.17-144.9-9.01-11.64-14.6-39.02.11-54.19h0Z"/>
+        <path d="M367.11,145.8c0-17.57,14.15-31.83,31.94-31.83s31.94,14.26,31.94,31.83v223.4c0,17.57-14.15,31.83-31.94,31.83s-31.94-14.26-31.94-31.83v-223.4Z"/>
+      </svg>
+    </button>
+
+    <p id="estado-detalle" class="text-xs text-center text-texto-dim mt-8 mb-4 leading-relaxed max-w-[220px] min-h-[2.5rem]">
+      Conectando...
+    </p>
+
+    <button type="button" id="estado-accion" class="hidden mb-5 px-5 py-2 rounded-xl bg-verde text-white text-xs font-semibold hover:bg-verde-hover transition-colors"></button>
+  </main>
+
+  <!-- Vista formulario: iniciar sesión / configurar -->
+  <main id="vista-form" class="hidden w-full max-w-sm mx-auto bg-panel/60 border border-borde/80 rounded-3xl p-6 shadow-2xl">
+    <h2 class="text-base font-semibold text-texto text-center mb-4">Configuración</h2>
+
+    <div id="form-alert" class="hidden items-center gap-2 px-3 py-2 rounded-xl bg-borde/40 border border-borde text-texto text-xs mb-4">
+      <span>⚠️</span><span>Inicie sesión ingresando las credenciales.</span>
+    </div>
+
+    <div class="mb-3">
+      <label class="block text-sm font-medium text-texto-dim mb-2" for="bot_token">Token del bot</label>
+      <div class="relative">
+        <input type="password" id="bot_token" autocomplete="new-password" class="input-field pr-12"
+               placeholder="123456:ABC-DEF1234ghIkl-zyx57W2v1u123ew11">
+        <button type="button" id="toggle-token" aria-label="Mostrar/ocultar token"
+                class="absolute right-3 top-1/2 -translate-y-1/2 text-texto-dim hover:text-verde transition">
+          <svg class="w-5 h-5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg>
+        </button>
+      </div>
+      <p class="text-xs text-texto-dim mt-1.5">Cree su bot con
+        <a href="https://t.me/BotFather" target="_blank" rel="noopener" class="text-verde hover:text-verde-hover hover:underline">@BotFather</a>.
+      </p>
+    </div>
+
+    <div class="mb-3">
+      <label class="block text-sm font-medium text-texto-dim mb-2" for="admin_id">Su ID de Telegram (admin)</label>
+      <input type="text" id="admin_id" autocomplete="off" inputmode="numeric" class="input-field"
+             placeholder="123456789">
+      <p class="text-xs text-texto-dim mt-1.5">Averigüe su ID numérico con
+        <a href="https://t.me/userinfobot" target="_blank" rel="noopener" class="text-verde hover:text-verde-hover hover:underline">@userinfobot</a>.
+      </p>
+    </div>
+
+    <div class="mb-4">
+      <label class="block text-sm font-medium text-texto-dim mb-2" for="kick_hours">Expulsar usuarios</label>
+      <div class="relative">
+        <input type="number" id="kick_hours" min="0" max="168" value="0" class="input-field pr-16">
+        <span class="absolute right-4 top-1/2 -translate-y-1/2 text-xs text-texto-dim pointer-events-none">horas</span>
+      </div>
+      <p class="text-xs text-texto-dim mt-1.5">Tiempo tras el cual se expulsa a un usuario (0 = desactivado).</p>
+    </div>
+
+    <div id="error-msg" class="hidden text-rojo text-sm text-center mb-3 min-h-[1.25rem]"></div>
+
+    <div class="flex gap-3">
+      <button type="button" id="btn-save" class="btn-primario flex-1 py-3 rounded-xl transition inline-flex items-center justify-center gap-2">
+        <svg class="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2z"/><polyline points="17 21 17 13 7 13 7 21"/><polyline points="7 3 7 8 15 8"/></svg>
+        <span class="btn-save-label">Guardar</span>
+      </button>
+      <button type="button" id="btn-back" class="btn-secundario flex-1 py-3 rounded-xl transition">Atrás</button>
+    </div>
+  </main>
+
+  <!-- Footer: estado real -->
+  <footer class="text-center pb-1">
+    <p id="footer-estado" class="text-[11px] text-texto-dim font-mono">ⓘ Estableciendo conexión</p>
+  </footer>
 
   <div id="ctx-menu" role="menu">
     <button type="button" id="ctx-paste" role="menuitem">Pegar</button>

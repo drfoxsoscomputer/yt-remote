@@ -12,10 +12,10 @@
   --texto-dim: #8a8aa3;
   --azul: #229ed9;
   --azul-hover: #1c88ce;
-  --verde: #31c471;
-  --verde-hover: #25a85f;
-  --rojo: #e53935;
-  --rojo-hover: #c62828;
+  --verde: #22c55e;
+  --verde-hover: #16a34a;
+  --rojo: #ef4444;
+  --rojo-hover: #dc2626;
 }
 
 @layer base {
@@ -24,13 +24,13 @@
 
 @layer components {
   .btn-primario {
-    @apply bg-azul text-white font-semibold py-3 px-6 rounded-xl
-           hover:bg-azul-hover focus:outline-none focus:ring-2 focus:ring-azul focus:ring-offset-2 focus:ring-offset-fondo
+    @apply bg-verde text-white font-semibold py-3 px-6 rounded-xl
+           hover:bg-verde-hover focus:outline-none focus:ring-2 focus:ring-verde focus:ring-offset-2 focus:ring-offset-fondo
            transition-colors duration-200;
   }
   .btn-secundario {
     @apply bg-transparent text-texto border border-borde font-semibold py-3 px-6 rounded-xl
-           hover:bg-borde/50 focus:outline-none focus:ring-2 focus:ring-azul focus:ring-offset-2 focus:ring-offset-fondo
+           hover:bg-borde/50 focus:outline-none focus:ring-2 focus:ring-verde focus:ring-offset-2 focus:ring-offset-fondo
            transition-colors duration-200;
   }
   .btn-peligro {
@@ -38,14 +38,10 @@
            hover:bg-rojo-hover focus:outline-none focus:ring-2 focus:ring-rojo focus:ring-offset-2 focus:ring-offset-fondo
            transition-colors duration-200;
   }
-  .btn-fantasma {
-    @apply bg-transparent text-texto-dim hover:text-texto hover:bg-borde/50
-           px-4 py-2 rounded-lg transition-colors duration-200;
-  }
 
   .input-field {
     @apply w-full bg-input border border-borde rounded-xl px-4 py-3 text-texto placeholder-texto-dim
-           focus:outline-none focus:ring-2 focus:ring-oro focus:border-transparent transition;
+           focus:outline-none focus:ring-2 focus:ring-verde focus:border-transparent transition;
   }
 
   .card {
@@ -80,4 +76,6 @@
   .hover\:bg-azul-hover:hover { background-color: var(--azul-hover); }
   .hover\:bg-verde-hover:hover { background-color: var(--verde-hover); }
   .hover\:bg-rojo-hover:hover { background-color: var(--rojo-hover); }
+  .group:hover .group-hover\:text-verde-hover { color: var(--verde-hover); }
+  .group:hover .group-hover\:text-rojo-hover { color: var(--rojo-hover); }
 }

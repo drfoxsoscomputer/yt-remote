@@ -569,7 +569,7 @@ class YTRemoteBot:
             if user is None:
                 return
             if not self.roles.has_role(user.id, role):
-                await self._reply(update, f"Acceso denegado: necesitas rol '{role}' para este comando.")
+                await self._reply(update, f"Acceso denegado: necesita el rol '{role}' para este comando.")
                 return
             await handler(update, context)
 
@@ -1497,7 +1497,7 @@ class YTRemoteBot:
             lines.append("• /buscar — buscar y reproducir un artista o link")
 
         if level >= 2:  # admin
-            lines.append("• 👥 Usuarios — gestionar roles (la lista llega a tu chat privado)")
+            lines.append("• 👥 Usuarios — gestionar roles (la lista llega a su chat privado)")
             lines.append("• /reglas — re-fijar el mensaje de reglas del grupo")
 
         return "\n".join(lines)
@@ -3060,7 +3060,7 @@ class YTRemoteBot:
         self._members_page = 0
         self._members_staged = {}
         try:
-            await query.answer("Envié la lista de usuarios a tu chat privado.")
+            await query.answer("Envié la lista de usuarios a su chat privado.")
         except Exception:  # noqa: BLE001 - toast prescindible
             pass
 
