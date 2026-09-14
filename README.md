@@ -7,9 +7,10 @@
 Bot de Telegram para controlar la reproducción de videos de YouTube en su PC.
 Búsqueda por chat, tarjeta de control con botones, radio automática por artista.
 
-**Versión actual:** v1.0.0 (launcher con ventana, tarjeta de control con
-botones, calidad elegible, playlist con persistencia, directos sincronizados
-y expulsión automática de invitados).
+**Versión actual:** v1.1.1 (launcher de dos pantallas con estado pintado por
+color y conexión portable, tarjeta de control con botones, calidad elegible,
+playlist con persistencia, directos sincronizados y expulsión automática de
+invitados).
 
 ## Descarga e instalación
 
@@ -29,7 +30,23 @@ dentro de la carpeta (es portable de verdad).
 
 ## Ventana del launcher
 
-La ventana de YT-Remote es la puerta de entrada del programa:
+La ventana de YT-Remote es la puerta de entrada del programa y tiene dos
+pantallas:
+
+**Estado** — es la pantalla principal. Un botón de encendido grande en el
+centro conecta o detiene el bot, y debajo se muestra el estado con un color:
+
+| Estado | Color |
+|--------|-------|
+| Conectando / En línea | Verde |
+| Desconectado / Error | Rojo |
+| Sin sesión | Gris |
+
+El avatar se muestra en la esquina superior con un punto del mismo color de
+estado. El menú de la esquina superior abre las opciones **Configuración** y
+**Cerrar sesión**.
+
+**Configuración** — el formulario con los datos iniciales:
 
 | Campo | Qué es |
 |-------|--------|
@@ -37,20 +54,17 @@ La ventana de YT-Remote es la puerta de entrada del programa:
 | ID de admin | Su ID numérico de Telegram (primer usuario con rol admin) |
 | Expulsar tras horas | Horas de tolerancia para invitados: `0` desactiva la expulsión |
 
-Botones:
+El botón **Guardar** (la primera vez dice **Conectar**) valida y guarda los
+datos y arranca el bot. Si ya hay una sesión guardada, al abrir el programa
+el bot se conecta solo y se minimiza al lado del reloj automáticamente.
 
-| Botón | Qué hace |
-|-------|---------|
-| **Conectar** | Guarda la configuración en `session.enc` y arranca el bot |
-| **Salir** | Cierra la ventana sin iniciar el bot |
-| **Detener** | Detiene el bot sin borrar la configuración guardada |
-| **Cerrar sesión** | Borra la configuración y vuelve al formulario vacío |
+Al cerrar la ventana con la **X**, el programa se minimiza al lado del reloj
+sin preguntar (el bot sigue corriendo). Para salir de verdad, clic derecho en
+el ícono de la bandeja y elija **Salir**. La opción **Cerrar sesión** borra la
+configuración, detiene el bot y vuelve a la pantalla de Configuración.
 
-Al cerrar la ventana con la **X**, el programa pregunta: *"¿Minimizar al lado
-del reloj?"* (el bot sigue corriendo) o salir (detiene el bot y cierra). Si
-ya hay una sesión guardada, al abrir el programa el bot se conecta solo y
-pasa al lado del reloj automáticamente. La configuración queda en
-`session.enc`, al lado del ejecutable, y **no se sube a GitHub**.
+La configuración queda en `session.enc`, dentro de la carpeta `data/` que
+está junto al ejecutable, y **no se sube a GitHub**.
 
 Solo puede ejecutarse una instancia a la vez: si intenta abrir otra, aparece
 un aviso. La ventana requiere el runtime *Microsoft Edge WebView2* (Windows
