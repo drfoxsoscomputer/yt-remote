@@ -72,9 +72,9 @@ Si cierra la ventana con la X, el programa se minimiza al lado del reloj
  derecho en el ícono de la bandeja y elija "Salir". La opción "Cerrar
  sesión" borra la configuración guardada, detiene el bot y vuelve a la
  pantalla de Configuración. Solo puede haber una instancia: si abre la
- ventana dos veces, la segunda muestra un aviso. La ventana necesita el
- runtime WebView2 (Windows 10/11 suelen traerlo; si falta, el programa
- indica cómo instalarlo).
+ ventana dos veces, la segunda muestra un aviso. La ventana usa el
+ runtime WebView2 que ya viene con Windows 11 y con Windows 10
+ actualizados; si falta, el programa indica cómo instalarlo.
 
 
 CÓMO BUSCAR Y REPRODUCIR
