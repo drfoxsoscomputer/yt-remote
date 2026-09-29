@@ -19,6 +19,8 @@ from types import SimpleNamespace
 SRC = Path(__file__).resolve().parent
 sys.path.insert(0, str(SRC))
 
+from testkit import run_sync_tests  # noqa: E402
+
 from test_card import FakeBot, FakePlayer, FakeApp, FakeMessageUpdate, FakeUpdate  # noqa: E402
 
 
@@ -365,19 +367,8 @@ async def test_buscar_rejected_before_search_for_user():
 
 def run():
     print("\n=== Tests de modelo de roles ===\n")
-    test_has_role_rank()
-    test_get_all_with_role_exact_match()
-    test_require_dj_blocks_user()
-    test_require_dj_allows_dj_and_admin()
-    test_require_admin_blocks_user_and_dj()
-    asyncio.run(test_on_control_blocks_user_toast_all_actions())
-    asyncio.run(test_on_control_allows_dj())
-    asyncio.run(test_on_control_lista_works_for_user())
-    asyncio.run(test_cmd_solicitar_blocks_non_user())
-    asyncio.run(test_cmd_solicitar_notifies_admins_for_user())
-    test_help_for_role_visibility_matrix()
-    asyncio.run(test_buscar_rejected_before_search_for_user())
-    print("\nROLES TESTS OK")
+    total = run_sync_tests(globals())
+    print(f"\nROLES TESTS OK ({total} pruebas)")
 
 
 if __name__ == "__main__":
