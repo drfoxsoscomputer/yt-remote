@@ -11,6 +11,8 @@ from pathlib import Path
 SRC = Path(__file__).resolve().parent
 sys.path.insert(0, str(SRC))
 
+from testkit import run_sync_tests  # noqa: E402
+
 from persistence import StateStore, CURRENT_VERSION, MAX_HISTORY  # noqa: E402
 
 
@@ -222,24 +224,8 @@ def test_round_trip_cursor_and_list_page():
 
 def run():
     print("\n=== Tests de persistence ===\n")
-    test_defaults_when_file_missing()
-    test_round_trip_basic()
-    test_round_trip_complex()
-    test_corrupt_json_returns_defaults()
-    test_truncated_json_returns_defaults()
-    test_unknown_version_returns_defaults()
-    test_save_creates_parent_dir()
-    test_atomic_no_leftover_tmp()
-    test_history_truncated_to_max()
-    test_save_overwrites_previous()
-    test_mark_dirty_and_flush_cycle()
-    test_mark_dirty_creates_flush_timer()
-    test_mark_dirty_no_timer_without_loop()
-    test_save_unicode_preserved()
-    test_save_partial_state_with_defaults()
-    test_defaults_for_cursor_and_list_page()
-    test_round_trip_cursor_and_list_page()
-    print("\nPERSISTENCE TESTS OK")
+    total = run_sync_tests(globals())
+    print(f"\nPERSISTENCE TESTS OK ({total} pruebas)")
 
 
 if __name__ == "__main__":

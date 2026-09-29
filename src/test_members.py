@@ -6,6 +6,8 @@ from types import SimpleNamespace
 SRC = Path(__file__).resolve().parent
 sys.path.insert(0, str(SRC))
 
+from testkit import run_async_tests  # noqa: E402
+
 from test_card import FakeBot, FakeUpdate
 from test_roles import InMemoryRoles, make_bot
 from bot import YTRemoteBot
@@ -387,29 +389,8 @@ async def test_auto_kick_job():
 
 
 async def run():
-    tests = [
-        test_usuarios_button_blocked_for_non_admin,
-        test_usuarios_button_opens_private_list_for_admin,
-        test_members_toggle_stages_and_reverts_live,
-        test_members_commit_applies_and_notifies,
-        test_members_cancel_without_changes,
-        test_members_cancel_discards_staged,
-        test_members_cancel_no_discard_on_no,
-        test_members_commit_no_discard_on_no,
-        test_members_admin_role_is_protected,
-        test_members_callback_guards,
-        test_welcome_registers_and_mentions,
-        test_rules_text_optional_kick_line,
-        test_dm_or_group_fallback,
-        test_auto_kick_job,
-    ]
     print("\n=== Tests del administrador de usuarios ===\n")
-    for t in tests:
-        if asyncio.iscoroutinefunction(t):
-            await t()
-        else:
-            t()
-        print(f"  OK  {t.__name__}")
+    total = await run_async_tests(globals())
 
     # Asegurar que todo el suite anterior sigue verde.
     import subprocess
@@ -439,7 +420,7 @@ async def run():
         rc |= run_file(name)
     if rc:
         raise SystemExit(f"Suite completa fallo (rc={rc})")
-    print("\nMEMBERS TESTS OK")
+    print(f"\nMEMBERS TESTS OK ({total} pruebas)")
 
 
 if __name__ == "__main__":
