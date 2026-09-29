@@ -1449,14 +1449,17 @@ class YTRemoteBot:
                 await self._reply(None, f"No se pudo continuar: {exc}")
                 await self._notify_admin(f"Fallo en autoplay: {exc}")
                 return
+            self._push_to_nav_back()
             # Si venia de la playlist, avanzar el cursor (bucle) para no repetir
             # el mismo track en el siguiente prefetch.
             if from_queue:
                 self.queue.next()
             else:
                 self.queue.set_current(candidate)
+            self._persist_dirty()
             self._schedule_prefetch(candidate)
-            await self._reply(None, f"▶️ Siguiente: {candidate.title}")
+            if self._card_chat_id is not None and self._card_message_id is not None:
+                await self._render_card(self._track_status_text(), self._card_chat_id)
             return
 
         # Sin prefetch listo: reusar el candidato ya decidido (Fase A) si sigue

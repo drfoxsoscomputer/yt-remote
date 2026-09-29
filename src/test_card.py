@@ -77,6 +77,7 @@ class FakeBot:
         self.edited.append((chat_id, message_id, text, kwargs))
 
     async def edit_message_media(self, media=None, chat_id=None, message_id=None, **kwargs):
+        kwargs["media"] = media
         self.edited.append((chat_id, message_id, "MEDIA", kwargs))
 
     async def edit_message_caption(self, caption=None, chat_id=None, message_id=None, **kwargs):
@@ -1014,6 +1015,35 @@ async def test_next_prefetch_starts_player():
         assert cast(QueueItem, b.queue.current).url == "siguiente"
     finally:
         bot_mod.resolve_stream_url = lambda url: None
+
+
+async def test_autoadvance_refreshes_card_state_and_nav():
+    """El fin natural del tema (auto-advance con prefetch resuelto) cambia la
+    miniatura y el titulo de la tarjeta, guarda el estado nuevo y apila el
+    tema que termino para que /prev pueda volver a el."""
+    from queue_manager import QueueItem
+
+    b = make_bot()
+    b.queue.set_current(
+        QueueItem(url="actual", title="Actual", thumbnail="https://img/1")
+    )
+    await b._send_card(44)
+    assert b._card_is_photo is True
+    b._app.bot.edited.clear()
+
+    candidate = QueueItem(url="siguiente", title="Siguiente", thumbnail="https://img/2")
+    b._prefetch_resolved = ((candidate, False), ("stream-siguiente", None))
+
+    await b._advance_after_end(None)
+    b._cancel_prefetch()
+
+    media = [e[3]["media"] for e in b._app.bot.edited if e[2] == "MEDIA"]
+    assert media, f"la tarjeta no se re-rendizo: {b._app.bot.edited}"
+    assert media[0].media == "https://img/2", media[0].media
+    assert "Siguiente" in str(media[0].caption), media[0].caption
+    assert cast(QueueItem, b.queue.current).url == "siguiente"
+    assert b._state._current["current"]["url"] == "siguiente"
+    assert [i.url for i in b._nav_back] == ["actual"], b._nav_back
 
 
 async def test_stop_conserves_state_and_rewinds():
