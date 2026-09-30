@@ -38,6 +38,72 @@ def _ultimo_mensaje_del_bot(bot) -> int:
     return len(bot.sent) + 99
 
 
+async def test_garantia_el_listado_se_lee_entero_en_el_celular():
+    """Lo que el usuario vio en su propia captura, escrito como garantia.
+
+    El listado se mandaba como FOTO y cada boton llevaba "1. Titulo - Canal X" mas
+    la duracion. En un boton de Telegram NADA salta de linea: lo que no cabe se
+    recorta. En la captura el titulo se cortaba a media palabra ("GP BAND - Ger...")
+    y el usuario perdia justo la parte que servia para saber de quien era la
+    cancion.
+
+    "Si la informacion no se ve, no existe": esta prueba falla si alguien vuelve
+    a meter el canal, los numeros o la foto.
+    """
+    import bot as bot_mod
+    from test_card import _patch_resolve
+
+    b = make_bot()
+    original_search = bot_mod.search
+    original_resolve = _patch_resolve(bot_mod, {})
+    try:
+        bot_mod.search = lambda q, n: [
+            SearchResult(
+                url=f"u{i}",
+                title=f"Tema {i}",
+                duration="3:0%d" % i,
+                channel=f"Canal{i}",
+                thumbnail=f"https://img/{i}",
+            )
+            for i in range(5)
+        ]
+        await b._run_search(
+            FakeMessageUpdate("/buscar"),
+            SimpleNamespace(args=[], bot=b._app.bot),
+            "artista cancion",
+        )
+    finally:
+        bot_mod.resolve_stream_url = original_resolve
+        bot_mod.search = original_search
+        if b._anticipate_task is not None:
+            b._anticipate_task.cancel()
+
+    fb = b._app.bot
+    fotos = [m for m in fb.sent if str(m[1]).startswith("PHOTO:")]
+    assert not fotos, f"el listado se sigue mandando como foto: {fotos}"
+    assert b._search_message_id is not None, "no quedo ningun mensaje de listado"
+
+    teclado = b._search_teclado()
+    canciones = teclado.inline_keyboard[:-1]
+    assert len(canciones) == 5, canciones
+    for fila in canciones:
+        texto = fila[0].text
+        assert not texto[0].isdigit(), f"el boton volvio a llevar numero: {texto!r}"
+        assert f"Canal" not in texto, f"el boton volvio a repetir el canal: {texto!r}"
+        assert " · " not in texto, f"el boton volvio a apilar datos: {texto!r}"
+
+    # Nombre y duracion, y solo eso.
+    assert canciones[0][0].text == "Tema 0 3:00", canciones[0][0].text
+    assert canciones[3][0].text == "Tema 3 3:03", canciones[3][0].text
+
+    # El encabezado del mensaje es corto y no repite la consulta.
+    encabezados = [
+        str(e[2]) for e in fb.edited if e[2] and "Página" in str(e[2])
+    ] or [str(m[1]) for m in fb.sent if "Página" in str(m[1])]
+    assert encabezados, "no se escribio el encabezado del listado"
+    assert encabezados[-1] == "Página 1", encabezados[-1]
+
+
 async def test_garantia_al_arrancar_vuelve_a_existir_la_tarjeta():
     """El hallazgo que hizo esta tarea, como prueba de ARRANQUE REAL.
 
