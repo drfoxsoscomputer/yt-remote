@@ -201,17 +201,18 @@ async def test_garantia_el_elegido_es_de_otro_artista_manda_ese():
 
 
 async def test_garantia_el_aviso_de_red_no_se_contradice_con_lo_que_paso():
-    """La carrera de la red, tal como la vio el usuario.
+    """La carrera de la red, tal como la vio el usuario, ahora en dos reglas.
 
     El aviso decia "tu comando se perdio, mandalo de nuevo" y un segundo despues
-    aparecia el listado de resultados de ESE MISMO comando. No era que el aviso
-    mintiera: dos partes leian la misma tanda. El polling de Telegram se
-    recupera solo y ejecutaba lo que habia llegado durante la caida; hasta 15
-    segundos despues el vigilante volvia a leer esa misma tanda, que seguia sin
-    confirmar, y la declaraba descartada.
+    aparecia el listado de resultados de ESE MISMO comando. Dos partes leian la
+    misma tanda: el polling se recupera solo y ejecutaba lo que habia llegado, y
+    hasta 15 s despues el vigilante volvia a leer esa misma tanda y la declaraba
+    descartada.
 
-    Aqui se comprueba lo que NO tiene que pasar: el polling tiene que estar
-    cerrado ANTES de que el vigilante lea, para que la tanda tenga un solo lector.
+    Ahora (1) una sola lectura: el vigilante espera a que el polling este cerrado
+    ANTES de leer; y (2) el post-mortem se elimino: al volver ya no sale ningun
+    mensaje en el chat. Lo que el usuario se entera es del estado de internet en
+    su PC, en el instante, no de una lista de comandos perdidos despues.
     """
     import asyncio
 
@@ -226,8 +227,7 @@ async def test_garantia_el_aviso_de_red_no_se_contradice_con_lo_que_paso():
     senal = asyncio.Event()
 
     class UpdaterLento:
-        """El cierre del polling no se completa hasta que vuelve la senal, que
-        es justo lo que tarda en pasar en la vida real."""
+        """El cierre del polling no se completa hasta que vuelve la senal."""
 
         async def stop(self):
             await senal.wait()
@@ -267,12 +267,28 @@ async def test_garantia_el_aviso_de_red_no_se_contradice_con_lo_que_paso():
     senal.set()
     await tarea
 
-    leidas = [l for l in lecturas if l.startswith("cerrado") and "timeout=0 offset=None" in l]
+    leidas = [l for l in lecturas if l.startswith("cerrado") and "offset=-1" in l]
     assert len(leidas) == 1, f"la tanda se leyo mas de una vez: {lecturas}"
     assert eventos == ["polling cerrado", "polling reanudado"], eventos
-    # Con un solo lector, el aviso que sale es cierto: lo que lista, lo
-    # descarto de verdad. No puede decir "se perdio" de algo que se ejecuto.
-    assert any("se perdio" in str(m[1]) for m in fb.sent), fb.sent
+    # (2) Y al volver NO sale ningun post-mortem en el chat.
+    assert fb.sent == [], f"se volvio a mandar el post-mortem: {fb.sent}"
+
+
+async def test_garantia_el_estado_de_red_se_escribe_al_instante():
+    """El usuario se entero de la caida en SU PC, no por un mensaje tarde.
+
+    Lo que el bot escribe en data/conexion.json es lo que la ventana del
+    launcher y el icono del reloj leen para poner "Sin conexion". Si el bot deja
+    de escribirlo, el usuario vuelve a quedarse a ciegas.
+    """
+    b = make_bot()
+    # Al caer la red se marca offline en el instante.
+    b._marcar_conexion(False, "NetworkError")
+    # Al arrancar se marca online.
+    b._marcar_conexion(True, "arranque")
+    # Al volver la red se marca online otra vez.
+    b._marcar_conexion(True, "volvio la red")
+    # Nada de esto debe tirar; si algo falla el bot se cae y no avisa de nada.
 
 
 async def test_garantia_el_listado_se_lee_entero_en_el_celular():
@@ -430,8 +446,14 @@ async def test_garantia_tarjeta_al_final_tras_bienvenida_de_nuevo_miembro():
     )
 
 
-async def test_garantia_tarjeta_al_final_tras_aviso_de_red():
-    """Se cae la conexion y vuelve: el bot avisa, y la tarjeta sigue abajo."""
+async def test_garantia_el_post_mortem_de_red_no_vuelve():
+    """La caida y la vuelta de red ya NO mandan ningun mensaje al chat.
+
+    El post-mortem se elimino (era tardio y no ayudaba), pero el descarte de la
+    tanda se mantiene: un /stop viejo no debe cortar la musica minutos despues.
+    Y al volver tampoco sale una lista de "estos comandos se perdieron", porque
+    el usuario ya se entero del estado de internet en su propia PC al instante.
+    """
     b = make_bot()
     b.config.allowed_chat_id = 44
     b._card_chat_id = 44
@@ -445,11 +467,9 @@ async def test_garantia_tarjeta_al_final_tras_aviso_de_red():
 
     await b._net_watch_job(ctx)
 
-    assert any("La conexion del bot se perdio" in str(m[1]) for m in fb.sent), fb.sent
-    assert b._card_message_id == _ultimo_mensaje_del_bot(fb), (
-        f"la tarjeta quedo arriba del aviso: card={b._card_message_id}, "
-        f"ultimo mensaje={_ultimo_mensaje_del_bot(fb)}"
-    )
+    # El descarte sigue ocurriendo (offset=-1), pero sin ningun mensaje al chat.
+    assert fb.sent == [], f"se mandaron mensajes de red al chat: {fb.sent}"
+
 
 
 async def test_garantia_tarjeta_al_final_tras_aviso_de_rol():

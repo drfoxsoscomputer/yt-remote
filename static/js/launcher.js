@@ -124,6 +124,7 @@
     CONECTANDO: 'conectando',
     ENCENDIDO: 'encendido',
     APAGADO: 'apagado',
+    SIN_CONEXION: 'sin-conexion',
     ERROR: 'error',
   };
 
@@ -202,6 +203,23 @@
         power: 'power-idle',
         detail: 'Haga clic para conectar.',
         footer: 'ⓘ Desconectado',
+      };
+    }
+    // SIN_CONEXION: el proceso del bot vive pero no llega a Telegram. Es
+    // distinto de "Desconectado" (el bot esta apagado): aqui el bot corre y se
+    // recupera solo en cuanto vuelve la red, sin que haya que tocar nada.
+    if (estadoUI === E.SIN_CONEXION) {
+      return {
+        badgeText: 'Sin conexión',
+        badge: 'bg-rojo/10 border-rojo/30 text-rojo',
+        dot: 'bg-rojo animate-pulse',
+        avatar: 'bg-rojo',
+        icon: 'power',
+        iconCls: 'text-rojo group-hover:text-rojo-hover',
+        power: 'power-error',
+        detail:
+          'Este equipo no tiene salida a internet, así que el bot no puede recibir comandos de Telegram. Se recupera solo al volver la red.',
+        footer: 'ⓘ Sin conexión — esperando que vuelva internet',
       };
     }
     // ERROR: el mensaje y la acción reales vienen de accionError.
@@ -596,8 +614,18 @@
       if (s.bot_username) botName = s.bot_username;
 
       const leer = () => req('/api/status', null, 10000);
+      // El bot escribe data/conexion.json en el instante en que se cae la red.
+      // "sin-conexion" NO es "apagado": el proceso vive y se recupera solo.
+      const estadoDe = (s) =>
+        !s || !s.bot_running
+          ? E.APAGADO
+          : s.conexion === 'offline'
+          ? E.SIN_CONEXION
+          : E.ENCENDIDO;
       let st = await leer();
-      uiLog('status bot_running=' + !!(st && st.bot_running));
+      uiLog(
+        'status bot_running=' + !!(st && st.bot_running) + ' conexion=' + (st && st.conexion)
+      );
 
       // Primer cargado con sesión: "Conectando..." hasta que el bot quede
       // "En línea"; ahí la ventana espera ~3 s y se va sola al tray.
@@ -611,7 +639,7 @@
           if (st && st.bot_running) break;
         }
         accionError = null;
-        estadoUI = st && st.bot_running ? E.ENCENDIDO : E.APAGADO;
+        estadoUI = estadoDe(st);
         pintarEstado();
         uiLog('estado final boot=' + estadoUI);
         if (st && st.bot_running) await esperarYMinimizar();
@@ -619,7 +647,7 @@
       }
 
       accionError = null;
-      estadoUI = st && st.bot_running ? E.ENCENDIDO : E.APAGADO;
+      estadoUI = estadoDe(st);
       pintarEstado();
       uiLog('estado pintado=' + estadoUI);
     } catch (e) {

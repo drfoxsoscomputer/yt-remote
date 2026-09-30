@@ -255,7 +255,12 @@ def api_connect():
 def api_status():
     """Estado actual del bot."""
     running = bot_process.is_running()
-    return jsonify({"bot_running": running})
+    # "conexion" lo escribe el bot en el instante en que se cae la red. Es lo
+    # que permite avisarle AL MOMENTO, en vez de un "tu comando se perdio" que
+    # llegaba tarde y ya no servia para nada.
+    return jsonify(
+        {"bot_running": running, "conexion": bot_process.read_conexion()}
+    )
 
 
 @app.route("/api/log", methods=["POST"])

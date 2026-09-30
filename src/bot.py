@@ -7,6 +7,7 @@ Los comandos se enrutan por roles (admin > dj > user).
 from collections import deque
 
 import asyncio
+import json
 import logging
 import os
 import secrets
@@ -344,9 +345,10 @@ class YTRemoteBot:
         # aviso de reanudacion aparece UNA sola vez y no se repite despues.
         if self._restored and chat_de_la_card is not None:
             await self._send_card(chat_de_la_card)
-        # Aviso de comandos perdidos: se lee el backlog ANTES de que el
-        # polling lo consuma (post_init corre antes del start).
-        await self._notify_pending_dropped(bot)
+        # Lo que llego mientras el bot estuvo apagado se descarta, sin aviso:
+        # el usuario ya se entero en su PC de que no habia red.
+        await self._descartar_backlog(bot)
+        self._marcar_conexion(True, "arranque")
         # Reglas del grupo fijadas al arranque (si el kick esta activado):
         # el mensaje de bienvenida apunta a ellas como referencia ↑.
         await self._ensure_pinned_rules(bot)
@@ -510,54 +512,22 @@ class YTRemoteBot:
         app.run_polling  # noqa: B018  (validar metodo disponible)
         return app
 
-    async def _notify_pending_dropped(self, bot) -> None:
-        """Informa al chat permitido que los comandos enviados mientras el
-        bot estuvo apagado se DESCARTARON (no quedaron en cola y no se ejecutan).
+    async def _descartar_backlog(self, bot) -> None:
+        """Descarta lo que llego mientras el bot estuvo apagado, sin avisar.
+
+        Los comandos NO se ejecutan (un /stop viejo no debe cortar la musica
+        minutos despues), pero ya no se manda el reporte de "se descartaron
+        estos comandos": es un post-mortem. Al usuario le sirve saber si puede
+        o no ANTES de enviar, no una lista de lo que se perdio despues. Ese
+        aviso lo tiene ya en su PC, en el momento en que se cae la red.
 
         Se llama en post_init, antes de que el polling consuma el backlog.
-        Lee sin confirmar (timeout=0), arma el reporte de los comandos viejos
-        y luego hace un offset=-1 para descartar TODO el backlog pendiente.
-        Si falla la lectura, el bot arranca igual (nadie queda bloqueado).
+        Si falla, el bot arranca igual (nadie queda bloqueado).
         """
-        if self.config.allowed_chat_id is None:
-            return
         try:
-            pending = await bot.get_updates(timeout=0)
-        except Exception as exc:  # noqa: BLE001 - no debe tumbar el arranque
-            logger.warning("No se pudo leer el backlog acumulado: %s", exc)
-            return
-        try:
-            # Sin confirmar el offset, Telegram REENVIARIA todo en el proximo
-            # poll; un offset=-1 descarta el backlog completo (lo pendiente NO
-            # se ejecuta; se avisa abajo que se perdio).
             await bot.get_updates(offset=-1, timeout=0)
-        except Exception as exc:  # noqa: BLE001
-            logger.warning("No se pudo descartar el backlog: %s", exc)
-
-        commands = []
-        for upd in pending:
-            msg = upd.message
-            if msg is None or msg.chat_id != self.config.allowed_chat_id:
-                continue
-            text = (msg.text or "").strip()
-            if text.startswith("/"):
-                commands.append(text)
-        if not commands:
-            return
-
-        shown = commands[:5]
-        extra = len(commands) - len(shown)
-        report = (
-            "🔌 El bot estuvo apagado y lo que enviaste NO quedo en cola ni "
-            "se ejecuto. Se descartaron estos comandos:\n"
-            + "\n".join(f"• {c}" for c in shown)
-            + (f"\n…y {extra} más." if extra else "")
-            + "\n\nEnvialos de nuevo si todavia los necesitas."
-        )
-        try:
-            await self._enviar_al_chat(self.config.allowed_chat_id, report)
         except Exception as exc:  # noqa: BLE001 - no debe tumbar el arranque
-            logger.warning("No se pudo notificar el backlog descartado: %s", exc)
+            logger.warning("No se pudo descartar el backlog: %s", exc)
 
     async def _on_bot_error(self, update: object, context) -> None:
         """Marca el bot como OFFLINE cuando el polling falla por red.
@@ -576,6 +546,7 @@ class YTRemoteBot:
         )
         if is_real_network:
             self._net_offline = True
+            self._marcar_conexion(False, type(error).__name__)
             self._detener_polling(context)
             logger.warning("Red del bot caida (%s). Se avisara al volver.", type(error).__name__)
         else:
@@ -647,15 +618,18 @@ class YTRemoteBot:
             cerrado = True
         try:
             self._net_offline = False
+            self._marcar_conexion(True, "volvio la red")
             # Unica lectura de la tanda: todavia sin confirmar, asi que esto es
             # exactamente lo que se va a descartar.
-            pending = await context.bot.get_updates(timeout=0)
             try:
                 # offset=-1 confirma y descarta TODO el backlog sin ejecutarlo.
+                # NO se manda ningun aviso: el usuario ya se entero AL INSTANTE
+                # de la caida, en su propia PC (ventana e icono del reloj). Un
+                # "tu comando se perdio" llegado despues no le sirve para nada
+                # y solo lo confunde si el comando si llego a ejecutarse.
                 await context.bot.get_updates(offset=-1, timeout=0)
             except Exception as exc:  # noqa: BLE001
                 logger.warning("No se pudo descartar el backlog: %s", exc)
-            await self._notify_connection_lost(context.bot, pending)
         finally:
             if cerrado and updater is not None:
                 try:
@@ -665,34 +639,6 @@ class YTRemoteBot:
                     )
                 except Exception as exc:  # noqa: BLE001
                     logger.error("No se pudo reanudar el updater: %s", exc)
-
-    async def _notify_connection_lost(self, bot, pending) -> None:
-        """Avisa por escrito que los comandos mandados sin conexion se perdieron."""
-        if self.config.allowed_chat_id is None:
-            return
-        commands = []
-        for upd in pending:
-            msg = upd.message
-            if msg is None or msg.chat_id != self.config.allowed_chat_id:
-                continue
-            text = (msg.text or "").strip()
-            if text.startswith("/"):
-                commands.append(text)
-        if not commands:
-            return
-        shown = commands[:5]
-        extra = len(commands) - len(shown)
-        report = (
-            "🔌 La conexion del bot se perdio un rato y lo que enviaste en "
-            "ese momento NO se ejecuto. Se descartaron estos comandos:\n"
-            + "\n".join(f"• {c}" for c in shown)
-            + (f"\n…y {extra} más." if extra else "")
-            + "\n\nEnvialos de nuevo si todavia los necesitas."
-        )
-        try:
-            await self._enviar_al_chat(self.config.allowed_chat_id, report)
-        except Exception as exc:  # noqa: BLE001 - no debe tumbar nada
-            logger.warning("No se pudo notificar la conexion perdida: %s", exc)
 
     def _require(self, role: str, handler):
         """Envuelve un handler exigiendo un rol minimo."""
@@ -1442,6 +1388,37 @@ class YTRemoteBot:
         if item.channel:
             return item.channel
         return ""
+
+    def _marcar_conexion(self, online: bool, motivo: str = "") -> None:
+        """Deja en data/conexion.json si hay conexion con Telegram, AL INSTANTE.
+
+        El launcher (ventana e icono del reloj) lo lee para avisarte en tu PC en
+        el momento en que se cae la red. Es el unico canal posible: sin internet
+        el bot no puede escribirte por Telegram, porque para hablar con Telegram
+        necesita internet.
+
+        Se escribe a archivo porque es LOCAL: aunque no haya red, el archivo se
+        escribe igual, que es justo el caso que importa.
+        """
+        try:
+            from bot_process import data_dir
+
+            path = data_dir() / "conexion.json"
+            path.parent.mkdir(parents=True, exist_ok=True)
+            tmp = path.with_suffix(".json.tmp")
+            with tmp.open("w", encoding="utf-8") as f:
+                json.dump(
+                    {
+                        "online": online,
+                        "motivo": motivo,
+                        "ts": time.time(),
+                    },
+                    f,
+                    ensure_ascii=False,
+                )
+            os.replace(tmp, path)
+        except Exception as exc:  # noqa: BLE001 - el aviso nunca debe tumbar el bot
+            logger.warning("No se pudo marcar el estado de conexion: %s", exc)
 
     def _search_tanda(self) -> int:
         """Cuantos resultados se piden a YouTube en esta busqueda.
