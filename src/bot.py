@@ -32,6 +32,7 @@ from telegram.ext import (
     filters,
 )
 
+import artist_match
 from card import QUALITY_LEVELS, CardManager
 from config import Config
 from player import Player
@@ -1122,15 +1123,8 @@ class YTRemoteBot:
 
     @staticmethod
     def _normalizar(s: str) -> str:
-        """Normaliza un texto para comparaciones: minusculas, sin acentos,
-        sin puntuacion ni espacios ("Kent Leroy" -> "kentleroy")."""
-        import re as _re
-        import unicodedata
-
-        s = "".join(
-            c for c in unicodedata.normalize("NFD", s.lower()) if unicodedata.category(c) != "Mn"
-        )
-        return _re.sub(r"[^a-z0-9]", "", s)
+        """Delegado a artist_match.normalizar (10/11)."""
+        return artist_match.normalizar(s)
 
     def _artist_seed(self, item: QueueItem) -> str:
         """Semilla de la radio: el artista de lo que esta sonando ahora.
@@ -1194,59 +1188,24 @@ class YTRemoteBot:
         return _SEARCH_BATCH_CON_ARTISTA if self._search_artist else _SEARCH_BATCH
 
     def _clave_texto(self, valor: str) -> str:
-        """Clave para comparar nombres de artista o de canal.
-
-        Sin mayusculas, sin acentos y solo letras y numeros, para que "GP BAND",
-        "Gp Band", "gp band" y "gpband" sean la MISMA clave. Si no, comparar
-        cadenas escritas por personas distintas no termina nunca.
-        """
-        base = unicodedata.normalize("NFKD", valor or "")
-        sin_acentos = "".join(c for c in base if not unicodedata.combining(c))
-        return "".join(c for c in sin_acentos.lower() if c.isalnum())
+        """Delegado a artist_match.clave_texto (10/11)."""
+        return artist_match.clave_texto(valor)
 
     def _coincide_artista(self, artist: str, r: SearchResult) -> bool:
-        """¿Este resultado es del artista pedido?
+        """Delegado a artist_match.coincide_artista (10/11).
 
-        SOLO el canal decide, y a proposito. Se probo tambien con el titulo y
-        es un error: una cover de otro artista pone el nombre del original en el
-        titulo ("IMPACTANTE - Mafe Restrepo - GP BAND - Video Oficial") y
-        entonces la cover pasaba como si fuera del artista. El canal es el unico
-        dato estructurado que dice quien es.
-
-        Con menos de 3 letras no se filtra nada: con claves tan cortas cualquier
-        palabra contiene a otra y se terminaria descartando todo.
+        SOLO el canal decide; el por que esta en artist_match.
         """
-        clave = self._clave_texto(artist)
-        if len(clave) < 3:
-            return True
-        canal = self._clave_texto(r.channel)
-        if not canal:
-            return False
-        return clave in canal or (len(canal) >= 3 and canal in clave)
+        return artist_match.coincide_artista(artist, r)
 
     def _filtrar_por_artista(
         self, resultados: list[SearchResult]
     ) -> tuple[list[SearchResult], str]:
-        """Deja el listado en el artista pedido.
+        """Delegado a artist_match.filtrar_por_artista (10/11).
 
-        Un `/buscar gp band - impacto` que devuelve primero a Mafe Restrepo y a
-        Luisa Yepez hace que el usuario elija otra cosa, y si elige la
-        equivocada la radio se queda anclada a un artista que no pidio.
-
-        Sin coincidencia NO se oculta nada y NO se reordena: cuando el canal no
-        es el artista no hay forma honesta de distinguir una version original de
-        una cover, porque las dos ponen el mismo titulo. Se avisa y el usuario
-        elige. Antes se prometeria "esto es lo mas parecido" sin poder cumplirlo.
+        El unico estado que necesita es el artista pedido de esta sesion.
         """
-        artist = self._search_artist
-        if not artist:
-            return resultados, ""
-        del_articista = [r for r in resultados if self._coincide_artista(artist, r)]
-        if del_articista:
-            return del_articista, f"solo {artist}"
-        return resultados, (
-            f"ningun resultado es de «{artist}»: te muestro los que parece"
-        )
+        return artist_match.filtrar_por_artista(self._search_artist, resultados)
 
     async def _pick_next_candidate(
         self, current: QueueItem
