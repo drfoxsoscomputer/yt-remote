@@ -387,6 +387,9 @@ class Store:
             """,
             (int(user_id), name, role, int(joined_at)),
         )
+        # Sin esto la fila se queda en la transaccion abierta y se pierde al
+        # cerrar. `guardar_usuarios` si commitea; esta tambien.
+        self.conn.commit()
 
     def borrar_usuario(self, user_id: int) -> None:
         self._verificar_escritura()
