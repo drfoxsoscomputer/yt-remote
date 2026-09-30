@@ -19,7 +19,6 @@ from telegram import (
     BotCommand,
     InlineKeyboardButton,
     InlineKeyboardMarkup,
-    InputMediaPhoto,
     Update,
 )
 from telegram.constants import ParseMode
@@ -33,6 +32,7 @@ from telegram.ext import (
     filters,
 )
 
+from card import QUALITY_LEVELS, CardManager
 from config import Config
 from player import Player
 from persistence import StateStore
@@ -75,8 +75,6 @@ _PLAYLIST_WINDOW = 30
 # seguir con lo que hay. Es el tope de seguridad por si la carga se traba.
 _PLAYLIST_ESPERAS = 15
 
-# Niveles de calidad disponibles para el admin. 1080 es el tope maximo.
-QUALITY_LEVELS = (144, 240, 360, 480, 720, 1080)
 
 # Mensaje de lista (boton 📋): temas visibles por pagina.
 _LIST_PAGE_SIZE = 10
@@ -164,9 +162,11 @@ class YTRemoteBot:
         # Mini reproductor persistente: un solo mensaje editable con botones.
         # El bot rastrea pausa y volumen porque el IPC de mpv no devuelve
         # respuestas a comandos (la respuesta se pierde en el handle efimero).
-        self._card_chat_id: int | None = None
-        self._card_message_id: int | None = None
-        self._card_is_photo: bool = False
+        # La tarjeta es una pieza aparte (card.CardManager) con su propia
+        # identidad y su propio ciclo de vida. Las tres propiedades de abajo
+        # delegan su estado: no puede haber dos verdades.
+        self.card = CardManager(self)
+
         # Tope de resolucion elegido por el admin (None = 1080 por defecto).
         # Se aplica a search.MAX_HEIGHT y se persiste en state.json.
         self._max_height: int | None = None
@@ -195,9 +195,6 @@ class YTRemoteBot:
         self._expanding_playlist_url: str | None = None
         self._expanding_total: int = 0
         self._expand_task: asyncio.Task | None = None
-        # Seria la re-creacion de la tarjeta (borrar + enviar de nuevo): dos
-        # updates seguidos no deben borrar dos veces para duplicar la card.
-        self._card_lock: asyncio.Lock = asyncio.Lock()
         self._paused: bool = False
         self._volume: int = 100
         # True mientras se ejecuta una accion disparada por un boton de la
@@ -682,39 +679,11 @@ class YTRemoteBot:
         return wrapper
 
     async def _card_exists_in(self, chat_id: int | None) -> bool:
-        return (
-            chat_id is not None
-            and self._card_chat_id == chat_id
-            and self._card_message_id is not None
-        )
+        return await self.card.exists_in(chat_id)
 
     def _with_card_reposition(self, handler):
-        """Envuelve un handler para que, al terminar, la tarjeta vuelva a ser
-        el ULTIMO mensaje del chat.
+        return self.card.with_reposition(handler)
 
-        Si la tarjeta ya existia antes del handler (el usuario escribio algo
-        arriba: comando, texto, respuesta del bot), se borra con su
-        desvanecimiento y se re-envia al final: los mensajes quedan arriba y
-        la tarjeta pasa a ser la ultima visualizacion. Si el handler creo la
-        tarjeta desde cero (no existia), no se reposiciona (ya quedo de ultima).
-
-        Excepcion: mientras el listado de resultados de /buscar sigue en
-        pantalla (_search_list_pending), NO se reposiciona: la card queda
-        donde esta, arriba del listado, y elegir/cancelar la gestiona el pick.
-        """
-
-        async def wrapper(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-            chat_id = update.effective_chat.id if update.effective_chat else None
-            existia = await self._card_exists_in(chat_id)
-            await handler(update, context)
-            if existia and await self._card_exists_in(chat_id):
-                if self._search_list_pending:
-                    # Listado de /buscar visible: la card no se mueve.
-                    return
-                await self._reposition_card(chat_id)  # type: ignore[arg-type]
-
-        wrapper.__name__ = getattr(handler, "__name__", "wrapper")
-        return wrapper
 
     async def _passive_card_reposition(
         self, update: Update, _context: ContextTypes.DEFAULT_TYPE
@@ -938,325 +907,88 @@ class YTRemoteBot:
             return item.thumbnail
         return thumbnail_from_url(item.url)
 
-    async def _send_track_card(
-        self, update, caption: str, item: QueueItem | None
-    ) -> None:
-        """Refresca la tarjeta persistente del mini reproductor.
+    # --- La tarjeta vive en card.CardManager ------------------------------
+    # Estas 16 lineas son TODO el contrato entre el bot y la tarjeta. Los
+    # handlers (y las 119 referencias en las pruebas) siguen hablando con
+    # `self._render_card(...)`; quien sabe de verdad es card.py.
+    #
+    # Los tres atributos tambien delegan, en lectura y escritura, porque la
+    # identidad del mensaje-vivo se persiste y se restaura a traves de ellos:
+    # si el estado viviera dos veces, el snapshot guardaria una cosa y el
+    # render usaria otra.
 
-        Es la unica confirmacion visual: miniatura + estado + botones se
-        re-renderizan en el mismo mensaje (nada de fotos sueltas duplicadas).
-        El caption se usa solo como fallback si no hay item que reflejar.
-        """
-        if self._from_card:
-            # Desde un boton de la tarjeta, el cierre de _on_control ya
-            # re-renderiza la tarjeta en su lugar.
-            return
-        if item is None:
-            await self._reply(update, caption)
-            return
-        chat = update.effective_chat
-        if chat is None:
-            return
-        await self._show_card(chat.id)
+    @property
+    def _card_chat_id(self) -> int | None:
+        return self.card.chat_id
+
+    @_card_chat_id.setter
+    def _card_chat_id(self, valor: int | None) -> None:
+        self.card.chat_id = valor
+
+    @property
+    def _card_message_id(self) -> int | None:
+        return self.card.message_id
+
+    @_card_message_id.setter
+    def _card_message_id(self, valor: int | None) -> None:
+        self.card.message_id = valor
+
+    @property
+    def _card_is_photo(self) -> bool:
+        return self.card.is_photo
+
+    @_card_is_photo.setter
+    def _card_is_photo(self, valor: bool) -> None:
+        self.card.is_photo = valor
+
+    async def _card_exists_in(self, chat_id: int | None) -> bool:
+        return await self.card.exists_in(chat_id)
+
+    def _with_card_reposition(self, handler):
+        return self.card.with_reposition(handler)
+
+    async def _send_track_card(self, update, caption: str, item) -> None:
+        await self.card.send_track_card(update, caption, item)
 
     def _truncate(self, text: str, limit: int = 80) -> str:
-        """Trunca un texto con elipsis para que no rompa la tarjeta."""
-        text = " ".join(text.split())
-        if len(text) <= limit:
-            return text
-        return text[: limit - 1].rstrip() + "…"
+        return self.card.truncate(text, limit)
 
     def _track_status_text(self) -> str:
-        """Estado actual para la tarjeta persistente del mini reproductor.
+        return self.card.status_text()
 
-        Linea 1: estado (Sonando/Pausado). Linea 2: titulo (truncado). El
-        volumen no va en el texto: vive en la fila de botones de la tarjeta.
-        """
-        cur = self.queue.current
-        if cur is None:
-            return "No hay ninguna cancion sonando."
-        state = "⏸️ Pausado" if self._paused else "▶️ Sonando"
-        text = f"{state}\n🎵 {self._truncate(cur.title)}"
-        if self._restored:
-            self._restored = False
-            text += "\n🔄 Retomada del cierre anterior: usa ▶ para reanudar."
-        return text
-
-    async def _render_pending(
-        self, title: str, item: QueueItem | None = None
-    ) -> None:
-        """La tarjeta cambia YA con el titulo nuevo + espera del stream.
-
-        Al tocar ⏭/⏮ sin prefetch, la tarjeta se actualiza al instante con
-        "⏳ Cargando…" en vez de quedarse con el titulo anterior hasta que
-        yt-dlp termine; el audio entra cuando el stream esté resuelto.
-
-        Recibe el item del candidato para mostrar su miniatura y su titulo
-        SIN tocar queue._current: si el stream falla, el estado queda igual
-        y la tarjeta refleja la realidad cuando el error se re-renderiza.
-        Tambien sirve para avisos de espera sin item (p.ej. expandir una
-        playlist): item=None usa la miniatura del tema actual.
-        """
-        await self._render_card(
-            f"⏳ Cargando…\n🎵 {self._truncate(title)}", item=item
-        )
+    async def _render_pending(self, title: str, item=None) -> None:
+        await self.card.render_pending(title, item)
 
     def _control_keyboard(self) -> InlineKeyboardMarkup:
-        """Teclado del mini reproductor persistente.
-
-        Fila 1: ⏮ anterior | ▶/⏸ alternar play-pause | ⏭ siguiente | ⏹ detener
-        Fila 2: 🔊−10 | <volumen actual> | 🔊+10 | 📋 lista
-        Fila 3: ⚙️ Calidad: Np | 👥 Usuarios (solo admin puede usarlas)
-        """
-        play_pause = "▶️" if self._paused else "⏸️"
-        keyboard = [
-            [
-                InlineKeyboardButton("⏮", callback_data="ctl:prev"),
-                InlineKeyboardButton(play_pause, callback_data="ctl:pp"),
-                InlineKeyboardButton("⏭", callback_data="ctl:next"),
-                InlineKeyboardButton("⏹", callback_data="ctl:stop"),
-            ],
-            [
-                InlineKeyboardButton("🔊−10", callback_data="ctl:vol-10"),
-                InlineKeyboardButton(f"🔊 {self._volume}", callback_data="ctl:vol-info"),
-                InlineKeyboardButton("🔊+10", callback_data="ctl:vol+10"),
-                InlineKeyboardButton("📋", callback_data="ctl:lista"),
-            ],
-            [
-                InlineKeyboardButton(
-                    f"⚙️ Calidad: {(self._max_height or 1080)}p",
-                    callback_data="ctl:calidad",
-                ),
-                InlineKeyboardButton("👥 Usuarios", callback_data="ctl:usuarios"),
-            ],
-        ]
-        return InlineKeyboardMarkup(keyboard)
+        return self.card.control_keyboard()
 
     def _quality_keyboard(self) -> InlineKeyboardMarkup:
-        """Grilla de calidades para el admin (el vigente se marca con ✓)."""
-        current = self._max_height or 1080
-        rows: list[list[InlineKeyboardButton]] = []
-        current_row: list[InlineKeyboardButton] = []
-        for level in QUALITY_LEVELS:
-            label = f"{level} ✓" if level == current else str(level)
-            current_row.append(
-                InlineKeyboardButton(label, callback_data=f"cl:calidad:{level}")
-            )
-            if len(current_row) == 4:
-                rows.append(current_row)
-                current_row = []
-        if current_row:
-            rows.append(current_row)
-        rows.append(
-            [InlineKeyboardButton("❌", callback_data="cl:calidad:cerrar")]
-        )
-        return InlineKeyboardMarkup(rows)
+        return self.card.quality_keyboard()
 
-    async def _render_card(
-        self, text: str, chat_id: int | None = None, item: QueueItem | None = None
-    ) -> None:
-        """Edita el mensaje persistente del mini reproductor (si existe).
-
-        Si la tarjeta es una FOTO, edita miniatura + texto + teclado juntos
-        (edit_message_media), asi al pasar de cancion cambia TODO el mensaje
-        y no queda la miniatura de la cancion anterior clavada. Si la tarjeta
-        es un mensaje de texto (sin miniatura disponible), edita solo el texto.
-
-        No envia una tarjeta nueva: para crear la primera usar _show_card.
-
-        Si se pasa `item`, la miniatura se toma de ese item (feedback de carga
-        del candidato); si no, del tema actual. La presentacion nunca altera
-        queue._current: ese es estado de dominio y se commitea solo al exito.
-        """
-        if self._card_chat_id is None or self._card_message_id is None:
-            return
-        chat_id = chat_id or self._card_chat_id
-        bot = self._app.bot
-        source = item if item is not None else self.queue.current
-        thumb = self._thumbnail_for(source) if source else ""
-        try:
-            if self._card_is_photo:
-                if thumb:
-                    await bot.edit_message_media(
-                        media=InputMediaPhoto(media=thumb, caption=text),
-                        chat_id=chat_id,
-                        message_id=self._card_message_id,
-                        reply_markup=self._control_keyboard(),
-                    )
-                else:
-                    # Sin miniatura para el tema nuevo: se actualiza solo el
-                    # texto (no se puede poner un mensaje de texto sobre una
-                    # foto editando el media a vacio).
-                    await bot.edit_message_caption(
-                        caption=text,
-                        chat_id=chat_id,
-                        message_id=self._card_message_id,
-                        reply_markup=self._control_keyboard(),
-                    )
-            else:
-                try:
-                    await bot.edit_message_text(
-                        text,
-                        chat_id=chat_id,
-                        message_id=self._card_message_id,
-                        reply_markup=self._control_keyboard(),
-                    )
-                except Exception as exc_text:  # noqa: BLE001
-                    if "no text in the message" not in str(exc_text).lower():
-                        raise
-                    # El mensaje real es una FOTO (la identidad de la tarjeta
-                    # se desincrono entre sesiones: el tipo persistido dice
-                    # texto pero el mensaje es foto). El edit de texto falla
-                    # con "There is no text in the message to edit"; se
-                    # reintenta como caption y se corrige el tipo para que
-                    # los proximos re-renders usen la ruta correcta.
-                    await bot.edit_message_caption(
-                        caption=text,
-                        chat_id=chat_id,
-                        message_id=self._card_message_id,
-                        reply_markup=self._control_keyboard(),
-                    )
-                    self._card_is_photo = True
-                    self._persist_dirty()
-        except Exception as exc:  # noqa: BLE001 - no debe romper el control
-            if "message is not modified" in str(exc):
-                # Re-render con el mismo texto/teclado: es un no-op valido.
-                return
-            logger.warning("No se pudo editar la tarjeta: %s", exc)
+    async def _render_card(self, text: str, chat_id=None, item=None) -> None:
+        await self.card.render_card(text, chat_id, item)
 
     async def _swap_card_keyboard(self, keyboard: InlineKeyboardMarkup) -> None:
-        """Cambia SOLO el teclado de la tarjeta (edit_message_reply_markup).
-
-        Ni borra la card ni re-renderiza texto/miniatura: la grilla de calidad
-        reemplaza a los controles y al elegir/cerrar vuelven los controles,
-        todo sobre el MISMO mensaje (sin desvanecimiento ni recreacion).
-        """
-        if self._card_chat_id is None or self._card_message_id is None:
-            return
-        try:
-            await self._app.bot.edit_message_reply_markup(
-                chat_id=self._card_chat_id,
-                message_id=self._card_message_id,
-                reply_markup=keyboard,
-            )
-        except Exception as exc:  # noqa: BLE001 - no debe romper la card
-            if "message is not modified" in str(exc):
-                return
-            logger.warning("No se pudo cambiar el teclado de la tarjeta: %s", exc)
+        await self.card.swap_keyboard(keyboard)
 
     async def _send_card(self, chat_id: int) -> None:
-        """Crea la tarjeta persistente del mini reproductor en un chat.
-
-        Primera creacion: se usa una FOTO (miniatura) con caption + teclado en
-        un solo mensaje. Si el tema no tiene miniatura o falla el envio de foto,
-        se crea como texto con botones.
-        """
-        text = self._track_status_text()
-        thumb = self._thumbnail_for(self.queue.current) if self.queue.current else ""
-        try:
-            if thumb:
-                try:
-                    msg = await self._app.bot.send_photo(
-                        chat_id,
-                        photo=thumb,
-                        caption=text,
-                        reply_markup=self._control_keyboard(),
-                    )
-                    self._card_is_photo = True
-                except Exception as exc_photo:  # noqa: BLE001
-                    logger.warning("Fallo send_photo, cayendo a send_message: %s", exc_photo)
-                    msg = await self._app.bot.send_message(
-                        chat_id,
-                        text,
-                        reply_markup=self._control_keyboard(),
-                    )
-                    self._card_is_photo = False
-            else:
-                msg = await self._app.bot.send_message(
-                    chat_id,
-                    text,
-                    reply_markup=self._control_keyboard(),
-                )
-                self._card_is_photo = False
-            self._card_chat_id = chat_id
-            self._card_message_id = msg.message_id
-            # Persistir identidad y tipo YA: si el bot se reinicia, sabe que
-            # tarjeta borrar al arrancar y con que tipo re-renderizar.
-            self._persist_dirty()
-        except Exception as exc:  # noqa: BLE001 - no debe romper el control
-            logger.warning("No se pudo crear la tarjeta: %s", exc)
+        await self.card.send_card(chat_id)
 
     async def _show_card(self, chat_id: int) -> None:
-        """Muestra o refresca la tarjeta del mini reproductor en un chat."""
-        if self._card_chat_id is None or self._card_message_id is None:
-            await self._send_card(chat_id)
-            return
-        if self._card_chat_id != chat_id:
-            await self._send_card(chat_id)
-            return
-        await self._render_card(self._track_status_text(), chat_id)
+        await self.card.show_card(chat_id)
 
     async def _remove_card(self) -> None:
-        """Borra la tarjeta persistente si existe (con su desvanecimiento).
-
-        No envia ninguna nueva: deja la card en None para que el siguiente
-        _show_card/_send_card cree una fresca al final de la conversacion.
-        Seriada con _card_lock y tolerante a mensajes que Telegram no deja
-        borrar (viejos).
-        """
-        async with self._card_lock:
-            old_chat = self._card_chat_id
-            old_msg = self._card_message_id
-            self._card_chat_id = None
-            self._card_message_id = None
-            if old_msg is not None and old_chat is not None:
-                try:
-                    await self._app.bot.delete_message(old_chat, old_msg)
-                except Exception as exc:  # noqa: BLE001 - no debe romper la card
-                    logger.warning("No se pudo borrar la tarjeta vieja: %s", exc)
+        await self.card.remove()
 
     async def _reposition_card(self, chat_id: int) -> None:
-        """Re-crea la tarjeta como el ULTIMO mensaje del chat.
-
-        Borra la tarjeta vieja (con su animacion de desvanecimiento) y la
-        re-envia al final de la conversacion: los mensajes y comandos quedan
-        arriba y la tarjeta pasa a ser siempre la ultima visualizacion.
-
-        Si Telegram no deja borrar la vieja (mensaje muy antiguo), se tolera
-        el fallo y solo se envía la nueva.
-        """
-        await self._remove_card()
-        await self._send_card(chat_id)
+        await self.card.reposition(chat_id)
 
     async def _dejar_card_al_final(self, chat_id: int) -> None:
-        """Re-envia la tarjeta al final del chat si vive ahi.
-
-        Se llama despues de CADA mensaje que el bot suelta por su cuenta
-        (bienvenida, aviso de red, aviso de rol). Antes cada sitio tenia que
-        acordarse de reposicionar la tarjeta, y los que no se acordaban la
-        dejaban clavada arriba del aviso.
-
-        Excepcion: con el listado de /buscar en pantalla NO se mueve, porque
-        ese listado va debajo a proposito y lo gestiona el boton de elegir o de
-        cancelar.
-        """
-        if not await self._card_exists_in(chat_id):
-            return
-        if self._search_list_pending:
-            return
-        await self._reposition_card(chat_id)
+        await self.card.dejar_al_final(chat_id)
 
     async def _enviar_al_chat(self, chat_id, text, **kwargs):
-        """Envia un mensaje al chat del grupo dejando la tarjeta al final.
+        return await self.card.enviar_al_chat(chat_id, text, **kwargs)
 
-        Es el UNICO punto por donde el bot escribe por su cuenta, para que la
-        tarjeta vuelva sola sin depender de que cada sitio se acuerde. No se
-        usa para el listado de /buscar ni para la lista de la tarjeta (los dos
-        son paneles que abre el usuario y que viven debajo a proposito).
-        """
-        msg = await self._app.bot.send_message(chat_id, text, **kwargs)
-        await self._dejar_card_al_final(chat_id)
-        return msg
 
     def _mpv_track_ended_callback(self) -> None:
         """Callback invocado por el reader thread cuando mpv detecta end-file.

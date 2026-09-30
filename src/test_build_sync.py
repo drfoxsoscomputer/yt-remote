@@ -14,19 +14,26 @@ sys.path.insert(0, str(SRC))
 from testkit import run_sync_tests  # noqa: E402
 
 DIST_SRC = SRC.parent / "dist" / "ytremote" / "src"
-MODULOS = (
-    "__init__.py",
-    "bot.py",
-    "config.py",
-    "main.py",
-    "persistence.py",
-    "player.py",
-    "queue_manager.py",
-    "roles.py",
-    "search.py",
-    "security.py",
-    "setup_cli.py",
-)
+
+# La lista de modulos se DERIVA del arbol, no se escribe a mano. Escribida a
+# mano se quedo vieja dos veces y ninguna prueba lo dijo: `store.py` (el
+# almacenamiento) y `card.py` (la tarjeta) quedaron fuera del chequeo mientras
+# el exe los llevaba —o no— sin que nadie se enterara. Un modulo nuevo que el
+# helper post-build no copie tiene que romper ESTA prueba, no el bot del usuario.
+NO_SE_EMPAQUETAN = {
+    "demo_roles.py",  # demo en terminal, no es parte de la app
+    "launcher.py",    # GUI vieja: la app usa launcher_web (main_launcher.py)
+}
+
+
+def _modulos_del_arbol() -> list[str]:
+    return sorted(
+        p.name
+        for p in SRC.glob("*.py")
+        if not p.name.startswith("test_")
+        and p.name != "testkit.py"
+        and p.name not in NO_SE_EMPAQUETAN
+    )
 
 
 def _normalizado(path: Path) -> bytes:
@@ -37,7 +44,7 @@ def test_modulos_del_exe_iguales_al_arbol():
     if not DIST_SRC.is_dir():
         return
     desactualizados: list[str] = []
-    for nombre in MODULOS:
+    for nombre in _modulos_del_arbol():
         en_arbol = SRC / nombre
         en_exe = DIST_SRC / nombre
         if not en_exe.is_file():
