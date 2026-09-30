@@ -125,7 +125,6 @@ class YTRemoteBot:
         self._search_pagina: int = 0
         self._search_chat_id: int | None = None
         self._search_message_id: int | None = None
-        self._search_es_foto: bool = False
         self._search_sin_mas: bool = False
         # Candado anti-colision de botones: una sola accion de control a la
         # vez. Si ya hay una en curso (p.ej. resolviendo el stream de un
@@ -2074,7 +2073,6 @@ class YTRemoteBot:
         self._search_list_pending = True
         self._search_chat_id = chat_id
         self._search_message_id = None
-        self._search_es_foto = False
         await self._search_pintar(context.bot, chat_id, pending_id)
 
     def _search_paginas(self) -> int:
@@ -2088,9 +2086,13 @@ class YTRemoteBot:
         return self._search_resultados[inicio : inicio + _SEARCH_PAGE_SIZE]
 
     def _search_teclado(self) -> InlineKeyboardMarkup:
-        """Teclado del listado: un boton por resultado de la pagina con su
-        informacion completa (titulo, canal y duracion) y al pie la fila de
-        navegacion [◀ ❌ ▶], igual que la lista de canciones y la de usuarios.
+        """Teclado del listado: un boton por cancion con su nombre y su duracion,
+        y al pie la fila de navegacion [◀ ❌ ▶], igual que la lista de canciones.
+
+        En un boton de Telegram NADA salta de linea: lo que no cabe se recorta y
+        el usuario no lo ve. Por eso el boton lleva solo lo imprescindible (el
+        canal ya viene dentro del titulo del video) y no lleva numeros: el
+        contador de pagina va en el texto del mensaje, no aqui.
 
         En la ultima pagina el boton derecho no se apaga: pasa a ser
         "🔎 Buscar más", que trae otra tanda de la misma consulta sin repetir
@@ -2105,10 +2107,14 @@ class YTRemoteBot:
         for i in range(inicio, min(inicio + _SEARCH_PAGE_SIZE, len(self._search_resultados))):
             r = self._search_resultados[i]
             self._search_cache[f"pick:{i}"] = r
-            datos = " · ".join(p for p in (r.channel, r.duration) if p)
-            etiqueta = f"{i + 1}. {r.title}"
-            if datos:
-                etiqueta = f"{etiqueta} — {datos}"
+            # Cada cancion lleva su nombre y su duracion. El canal NO se agrega:
+            # YouTube ya lo trae dentro del propio titulo del video, y ponerlo
+            # aqui era lo que desbordaba la linea y lo recortaba el celular.
+            # "Si la informacion no se ve, no existe": nada de lo que se mande
+            # aqui puede depender de que quepa en una sola linea del boton.
+            etiqueta = r.title
+            if r.duration and r.duration not in ("--:--", "0:00"):
+                etiqueta = f"{etiqueta} {r.duration}"
             filas.append([InlineKeyboardButton(etiqueta, callback_data=f"pick:{i}")])
 
         previo = (
@@ -2138,16 +2144,14 @@ class YTRemoteBot:
         self._search_pagina = 0
         self._search_chat_id = None
         self._search_message_id = None
-        self._search_es_foto = False
         self._search_sin_mas = False
 
     async def _search_aviso(self, texto: str) -> None:
-        """Escribe un aviso en el pie del listado de /buscar.
+        """Escribe un aviso en el listado de /buscar, en el mismo mensaje.
 
-        El listado puede ser foto o mensaje de texto, asi que el aviso va en el
-        pie de la foto si es foto, y en el texto si no. Nunca se manda un
-        mensaje nuevo: el listado se queda donde esta, con sus botones, para
-        que el usuario elija otra opcion.
+        El listado es siempre de texto (nunca foto), asi que el aviso va en el
+        texto. Nunca se manda un mensaje nuevo: el listado se queda donde esta,
+        con sus botones, para que el usuario elija otra opcion.
         """
         chat_id = self._search_chat_id
         msg_id = self._search_message_id
@@ -2155,94 +2159,62 @@ class YTRemoteBot:
             return
         teclado = self._search_teclado()
         try:
-            if self._search_es_foto:
-                await self._app.bot.edit_message_caption(
-                    caption=texto, chat_id=chat_id, message_id=msg_id, reply_markup=teclado
-                )
-            else:
-                await self._app.bot.edit_message_text(
-                    texto, chat_id=chat_id, message_id=msg_id, reply_markup=teclado
-                )
+            await self._app.bot.edit_message_text(
+                texto, chat_id=chat_id, message_id=msg_id, reply_markup=teclado
+            )
         except Exception as exc:  # noqa: BLE001 - el aviso es informativo
             logger.warning("No se pudo escribir el aviso en el listado: %s", exc)
 
     async def _search_pintar(
         self, bot, chat_id: int, pendiente_id: int | None = None
     ) -> None:
-        """Muestra el listado en UN solo mensaje: la foto del primer resultado
-        de la pagina y, debajo, los botones con el resto de la informacion.
+        """Muestra el listado de /buscar en UN mensaje de texto.
 
-        Telegram no deja convertir un mensaje de texto en foto, asi que la
-        primera vez se manda la foto y se borra el "Buscando..."; despues la
-        misma foto se va editando en cada pagina, igual que hace la tarjeta del
-        reproductor. Si el resultado no trae miniatura, el listado baja a texto
-        y se edita como texto.
+        El texto es solo "Página N" y cada cancion es un boton con su nombre y
+        su duracion. SIN miniatura: la foto era la del primer resultado, o sea
+        la de la cancion que YouTube rankeo primero, que no era la que el
+        usuario pidio y no representaba nada del conjunto. Se pidio una
+        miniatura por cada resultado y Telegram no la puede poner en un boton;
+        como no se puede, se quita la que habia.
         """
         teclado = self._search_teclado()
         visibles = self._search_visibles()
         if not visibles:
             return
-        pie = (
-            f"Resultados para «{self._search_consulta}» — "
-            f"página {self._search_pagina + 1} de {self._search_paginas()}"
-        )
-        thumb = visibles[0].thumbnail or thumbnail_from_url(visibles[0].url)
-        quiere_foto = bool(thumb)
+        pie = f"Página {self._search_pagina + 1}"
 
-        # 1) Si el listado ya existe y es del mismo tipo, se actualiza en sitio.
-        if self._search_message_id is not None and self._search_es_foto == quiere_foto:
+        # 1) Si el listado ya existe, se actualiza en sitio.
+        if self._search_message_id is not None:
             try:
-                if quiere_foto:
-                    await bot.edit_message_media(
-                        media=InputMediaPhoto(media=thumb, caption=pie),
-                        chat_id=chat_id,
-                        message_id=self._search_message_id,
-                        reply_markup=teclado,
-                    )
-                else:
-                    await bot.edit_message_text(
-                        pie, chat_id=chat_id, message_id=self._search_message_id, reply_markup=teclado
-                    )
+                await bot.edit_message_text(
+                    pie, chat_id=chat_id, message_id=self._search_message_id, reply_markup=teclado
+                )
                 self._anticipate_urls([r.url for r in visibles])
                 return
             except Exception as exc:  # noqa: BLE001 - se rehace el mensaje
                 logger.warning("No se pudo actualizar el listado: %s", exc)
 
-        # 2) Si hay un "Buscando..." y el listado es de texto, se edita ese
-        #    mismo: queda un solo mensaje en el chat.
-        if pendiente_id is not None and not quiere_foto:
+        # 2) Si hay un "Buscando..." se edita ese mismo: queda un solo
+        #    mensaje en el chat.
+        if pendiente_id is not None:
             try:
                 await bot.edit_message_text(
                     pie, chat_id=chat_id, message_id=pendiente_id, reply_markup=teclado
                 )
                 self._search_message_id = pendiente_id
-                self._search_es_foto = False
                 self._anticipate_urls([r.url for r in visibles])
                 return
             except Exception:  # noqa: BLE001 - se manda el listado aparte
                 pass
 
-        # 3) Se limpia lo que hubiera y se manda el listado. Telegram no deja
-        #    convertir un texto en foto, asi que ahi el mensaje viejo se borra.
+        # 3) Se limpia lo que hubiera y se manda el listado.
         for viejo in (self._search_message_id, pendiente_id):
             if viejo is not None:
                 try:
                     await bot.delete_message(chat_id, viejo)
                 except Exception:  # noqa: BLE001 - ya no importa
                     pass
-        if quiere_foto:
-            try:
-                nuevo = await bot.send_photo(
-                    chat_id, photo=thumb, caption=pie, reply_markup=teclado
-                )
-                self._search_es_foto = True
-            except Exception as exc:  # noqa: BLE001 - sin foto, texto
-                logger.warning("No se pudo mandar la foto del listado: %s", exc)
-                nuevo = await bot.send_message(chat_id, pie, reply_markup=teclado)
-                self._search_es_foto = False
-        else:
-            nuevo = await bot.send_message(chat_id, pie, reply_markup=teclado)
-            self._search_es_foto = False
+        nuevo = await bot.send_message(chat_id, pie, reply_markup=teclado)
         self._search_message_id = nuevo.message_id
         self._anticipate_urls([r.url for r in visibles])
 

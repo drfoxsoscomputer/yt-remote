@@ -2410,9 +2410,9 @@ async def test_load_sin_file_loaded_lanza_error_real():
 
 
 async def test_search_keyboard_has_cancel_button():
-    """El listado de /buscar muestra 5 resultados por pagina con su informacion
-    completa y termina con la fila de navegacion [◀ ❌ ▶]: en la primera pagina
-    el atras queda inerte y en la ultima el derecho pasa a "Buscar mas".
+    """El listado de /buscar muestra 5 canciones por pagina, cada una con su
+    nombre y su duracion, y termina con la fila [◀ ❌ ▶]: en la primera pagina el
+    atras queda inerte y en la ultima el derecho pasa a "Buscar mas".
     Queda marcado como pendiente (la card arriba no se reposiciona)."""
     import bot as bot_mod
     from search import SearchResult
@@ -2436,11 +2436,11 @@ async def test_search_keyboard_has_cancel_button():
         bot_mod.search = original_search
         if b._anticipate_task is not None:
             b._anticipate_task.cancel()
-    edited = [e for e in b._app.bot.edited if "Resultados para" in str(e[2])]
+    edited = [e for e in b._app.bot.edited if "Página" in str(e[2])]
     assert edited, b._app.bot.edited
     markup = edited[-1][3]["reply_markup"]
     rows = markup.inline_keyboard
-    assert len(rows) == 3, rows  # 2 resultados + fila de navegacion
+    assert len(rows) == 3, rows  # 2 canciones + fila de navegacion
     nav = rows[-1]
     assert len(nav) == 3, nav
     assert nav[0].callback_data == "pick:noop", nav  # primera pagina: sin atras
@@ -2450,9 +2450,9 @@ async def test_search_keyboard_has_cancel_button():
 
 
 async def test_search_list_paginates_with_navigation():
-    """El listado trae una tanda de 10, muestra 5 por pagina con la
-    informacion completa (titulo, canal y duracion) y la fila de navegacion
-    pasa de pagina. En la ultima pagina el boton derecho trae otra tanda."""
+    """El listado trae una tanda de 10, muestra 5 por pagina con el nombre y la
+    duracion de cada cancion, y la fila de navegacion pasa de pagina. En la
+    ultima pagina el boton derecho trae otra tanda."""
     import bot as bot_mod
     from search import SearchResult
 
@@ -2482,10 +2482,13 @@ async def test_search_list_paginates_with_navigation():
     assert b._search_paginas() == 2, b._search_paginas()
 
     primera = b._search_teclado().inline_keyboard
-    assert len(primera) == 6, primera  # 5 resultados + fila de navegacion
+    assert len(primera) == 6, primera  # 5 canciones + fila de navegacion
     boton = primera[0][0]
-    assert boton.text.startswith("1. Tema 0"), boton.text
-    assert "Canal0" in boton.text and "3:00" in boton.text, boton.text
+    # Nombre y duracion. SIN numero: el contador va en el texto del mensaje.
+    # SIN canal aparte: ya viene dentro del titulo y lo que sobra se recorta.
+    assert boton.text == "Tema 0 3:00", boton.text
+    assert not boton.text[0].isdigit(), f"el boton no lleva numero: {boton.text!r}"
+    assert "Canal0" not in boton.text, f"el canal se repite de mas: {boton.text!r}"
     assert primera[-1][0].callback_data == "pick:noop", primera[-1]
     assert primera[-1][2].callback_data == "pick:next", primera[-1]
 
@@ -2493,7 +2496,7 @@ async def test_search_list_paginates_with_navigation():
 
     segunda = b._search_teclado().inline_keyboard
     assert b._search_pagina == 1, b._search_pagina
-    assert segunda[0][0].text.startswith("6. Tema 5"), segunda[0][0].text
+    assert segunda[0][0].text == "Tema 5 3:00", segunda[0][0].text
     assert segunda[-1][0].callback_data == "pick:prev", segunda[-1]
     assert segunda[-1][2].callback_data == "pick:mas", segunda[-1]
 
