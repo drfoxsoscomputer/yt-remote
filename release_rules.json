@@ -34,21 +34,18 @@
     "scripts"
   ],
   "folders": {
-    "src": {
-      "allowed_files": [
-        "__init__.py",
-        "bot.py",
-        "config.py",
-        "main.py",
-        "persistence.py",
-        "player.py",
-        "queue_manager.py",
-        "roles.py",
-        "search.py",
-        "security.py",
-        "setup_cli.py"
-      ]
-    },
+"src": {
+   "allow_all": true,
+   "_comment": "allow_all: se empaqueta todo src/*.py del arbol. La lista escrita a mano se quedo vieja y el ZIP salio roto (sin store.py ni los modulos nuevos).",
+   "exclude_files": [
+    "demo_roles.py",
+    "launcher.py",
+    "testkit.py"
+   ],
+   "exclude_globs": [
+    "test_*.py"
+   ]
+  },
     "data": {
       "allowed_files": [
         ".gitkeep"

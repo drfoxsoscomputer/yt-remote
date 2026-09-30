@@ -13,6 +13,7 @@ cargaría pip, pytest, customtkinter y otra basura de desarrollo que el bot
 no usa.
 """
 
+import fnmatch
 import json
 import os
 import sys
@@ -123,6 +124,30 @@ def add_directory_rules(zf, base: Path, folders_rules: dict):
             _add_runtime(zf, folder_path, rules)
             continue
         allowed = rules.get("allowed_files", [])
+        if rules.get("allow_all"):
+            # `src/` se arma desde el arbol, no desde una lista escrita a mano.
+            #
+            # La lista se quedo vieja DOS veces y las dos veces el ZIP salio
+            # roto: se publico 1.1.3 sin `store.py`, `card.py`, `playback.py`,
+            # `constants.py` ni `artist_match.py`, y el bot no arranca sin
+            # `store` (lo importa `persistence`). Una lista a mano siempre se
+            # queda vieja; lo unico que evita eso es dejar de escribirla.
+            #
+            # Se excluyen a proposito: los tests (no van al release) y dos
+            # modulos que no son de la app (demo en terminal y la GUI vieja,
+            # que usa `launcher_web`).
+            excluye = set(rules.get("exclude_files", []))
+            globs = list(rules.get("exclude_globs", []))
+            for file_path in sorted(folder_path.glob("*.py")):
+                nombre = file_path.name
+                if nombre in excluye:
+                    continue
+                if any(fnmatch.fnmatch(nombre, g) for g in globs):
+                    continue
+                if _matches_any(str(file_path.relative_to(base)), rules.get("always_exclude_globs", [])):
+                    continue
+                zf.write(file_path, file_path.relative_to(base).as_posix())
+            continue
         for file in allowed:
             file_path = folder_path / file
             if file_path.exists() and file_path.is_file():
