@@ -12,7 +12,9 @@ Garantia 2: la lista de canciones y el historial NO se pierden por una busqueda
 Garantia 3: lo que se compila es lo que se escribio. Vive en test_build_sync.py.
 """
 
+import json
 import sys
+import tempfile
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -34,6 +36,73 @@ def _ultimo_mensaje_del_bot(bot) -> int:
     """Id del ultimo mensaje que envio el bot. El fake los numera en orden,
     asi que el ultimo enviado es el unico que puede ser la tarjeta."""
     return len(bot.sent) + 99
+
+
+async def test_garantia_al_arrancar_vuelve_a_existir_la_tarjeta():
+    """El hallazgo que hizo esta tarea, como prueba de ARRANQUE REAL.
+
+    No arma el estado a mano: escribe un state.json como el de una sesion
+    anterior (cancion en curso + tarjeta persistida) y arranca el bot leyendolo,
+    igual que haria un reinicio de verdad. Es la diferencia entre esta prueba y
+    las otras: estas arman `_card_message_id = 7` y por eso el defecto de abajo
+    convivio con la suite entera en verde.
+
+    El defecto: el arranque borraba la tarjeta persistida y luego comprobaba
+    `_card_message_id is not None` para re-crearla. Pero borrar la tarjeta pone
+    esa variable en None, asi que la condicion nunca era cierta: la tarjeta se
+    iba y no volvia. El usuario se quedaba sin miniatura, sin botones y sin
+    forma de reanudar lo que estaba sonando.
+    """
+    estado = {
+        "version": 1,
+        "volume": 100,
+        "paused": True,
+        "current": QueueItem(
+            url="u1", title="Mi Cancion", thumbnail="https://img/1"
+        ).to_dict(),
+        "playlist": [QueueItem(url="u1", title="Mi Cancion").to_dict()],
+        "cursor": 0,
+        "list_page": 0,
+        "history": [],
+        "radio_artist": "",
+        "max_height": None,
+        "card": {"chat_id": 44, "message_id": 500, "is_photo": True},
+    }
+    state_file = Path(tempfile.mkdtemp()) / "state.json"
+    state_file.write_text(json.dumps(estado), encoding="utf-8")
+
+    b = make_bot(state_file=state_file)
+    fb = b._app.bot
+
+    # Lo que se restaura del state.json antes de arrancar.
+    assert b.queue.current is not None and b.queue.current.url == "u1", (
+        "la prueba no esta partiendo de una sesion real: no se restauro la cancion"
+    )
+    assert (b._card_chat_id, b._card_message_id) == (44, 500), (
+        f"la prueba no esta partiendo de una sesion real: card={b._card_chat_id}/"
+        f"{b._card_message_id}"
+    )
+
+    await b._secuencia_arranque(fb)
+
+    assert (44, 500) in fb.deleted, (
+        f"la tarjeta vieja del reinicio anterior quedo viva: {fb.deleted}"
+    )
+    assert fb.sent, "el arranque no mando ninguna tarjeta: el usuario se queda sin controles"
+    assert b._card_message_id == _ultimo_mensaje_del_bot(fb), (
+        f"la tarjeta no quedo como ultimo mensaje: card={b._card_message_id}, "
+        f"ultimo={_ultimo_mensaje_del_bot(fb)}"
+    )
+    texto = " ".join(str(m[1]) for m in fb.sent)
+    assert "Mi Cancion" in texto, f"la tarjeta no muestra la cancion restaurada: {fb.sent}"
+    assert "Retomada del cierre anterior" in texto, (
+        f"la tarjeta no avisa que quedo en pausa: {fb.sent}"
+    )
+    teclado = fb.sent[-1][2].get("reply_markup")
+    assert teclado is not None, "la tarjeta se mando sin botones: no hay forma de reanudar"
+    assert any(btn.text == "▶️" for btn in teclado.inline_keyboard[0]), (
+        f"la tarjeta no ofrece reanudar: {[b_.text for b_ in teclado.inline_keyboard[0]]}"
+    )
 
 
 async def test_garantia_tarjeta_al_final_tras_bienvenida_de_nuevo_miembro():

@@ -205,7 +205,10 @@ class FakeUpdate:
         return self.chat
 
 
-def make_bot(fail_loads=0):
+def make_bot(fail_loads=0, state_file=None):
+    """Construye un bot aislado. `state_file` permite arrancar el bot leyendo un
+    state.json REAL (una sesion anterior), que es lo que hace una reinicio de
+    verdad; sin ese argumento arranca con el estado vacio de siempre."""
     import bot as bot_mod
     from config import Config
 
@@ -222,8 +225,18 @@ def make_bot(fail_loads=0):
     # del StateStore default; si  el state.json real trae pausa/artista/
     # historial de un uso previo, no debe filtrarse a los tests. (Los roles
     # ya estan aislados a nivel modulo: ROLES_PATH apunta a un temp.)
-    with isolated_state_path():
-        b = bot_mod.YTRemoteBot(config)
+    if state_file is None:
+        with isolated_state_path():
+            b = bot_mod.YTRemoteBot(config)
+    else:
+        import persistence as persistence_mod
+
+        real = persistence_mod.STATE_PATH
+        persistence_mod.STATE_PATH = Path(state_file)
+        try:
+            b = bot_mod.YTRemoteBot(config)
+        finally:
+            persistence_mod.STATE_PATH = real
     b._app = FakeApp()
     object.__setattr__(b, "player", player)
     b.roles.set_role(77, "dj")
