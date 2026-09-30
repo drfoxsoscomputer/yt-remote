@@ -32,6 +32,11 @@ import roles as _roles_mod
 
 _ROLES_TEST_DIR = tempfile.mkdtemp()
 _roles_mod.ROLES_PATH = Path(_ROLES_TEST_DIR) / "roles.json"
+# ALSO el SQLite. Aislar solo el JSON no alcanzaba: `RoleManager` guarda en
+# `roles.db`, asi que toda la suite estaba ESCRIBIENDO en el data/roles.db
+# real del usuario (y con el DELETE-on-load de antes, ademas lo vaciaba).
+# Se redirecta la base al mismo temp.
+_roles_mod.DB_PATH = Path(_ROLES_TEST_DIR) / "roles.db"
 
 
 @contextmanager
