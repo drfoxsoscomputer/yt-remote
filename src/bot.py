@@ -525,7 +525,7 @@ class YTRemoteBot:
             + "\n\nEnvialos de nuevo si todavia los necesitas."
         )
         try:
-            await bot.send_message(self.config.allowed_chat_id, report)
+            await self._enviar_al_chat(self.config.allowed_chat_id, report)
         except Exception as exc:  # noqa: BLE001 - no debe tumbar el arranque
             logger.warning("No se pudo notificar el backlog descartado: %s", exc)
 
@@ -619,7 +619,7 @@ class YTRemoteBot:
             + "\n\nEnvialos de nuevo si todavia los necesitas."
         )
         try:
-            await bot.send_message(self.config.allowed_chat_id, report)
+            await self._enviar_al_chat(self.config.allowed_chat_id, report)
         except Exception as exc:  # noqa: BLE001 - no debe tumbar nada
             logger.warning("No se pudo notificar la conexion perdida: %s", exc)
 
@@ -758,7 +758,7 @@ class YTRemoteBot:
                 horas = int(self.config.kick_after_hours)
                 text += f"\nAcceso de invitado: {horas} h. Pasado el plazo se lo retira del grupo si no tiene rol dj/admin."
             try:
-                await context.bot.send_message(message.chat.id, text)
+                await self._enviar_al_chat(message.chat.id, text)
             except Exception as exc:  # noqa: BLE001 - no romper la entrada
                 logger.warning("No se pudo enviar la bienvenida: %s", exc)
 
@@ -841,7 +841,7 @@ class YTRemoteBot:
         if chat is None:
             return
         try:
-            await self._app.bot.send_message(chat, text)
+            await self._enviar_al_chat(chat, text)
         except Exception as exc:  # noqa: BLE001 - no romper el flujo
             logger.warning("No se pudo notificar en el grupo: %s", exc)
 
@@ -1210,6 +1210,36 @@ class YTRemoteBot:
         """
         await self._remove_card()
         await self._send_card(chat_id)
+
+    async def _dejar_card_al_final(self, chat_id: int) -> None:
+        """Re-envia la tarjeta al final del chat si vive ahi.
+
+        Se llama despues de CADA mensaje que el bot suelta por su cuenta
+        (bienvenida, aviso de red, aviso de rol). Antes cada sitio tenia que
+        acordarse de reposicionar la tarjeta, y los que no se acordaban la
+        dejaban clavada arriba del aviso.
+
+        Excepcion: con el listado de /buscar en pantalla NO se mueve, porque
+        ese listado va debajo a proposito y lo gestiona el boton de elegir o de
+        cancelar.
+        """
+        if not await self._card_exists_in(chat_id):
+            return
+        if self._search_list_pending:
+            return
+        await self._reposition_card(chat_id)
+
+    async def _enviar_al_chat(self, chat_id, text, **kwargs):
+        """Envia un mensaje al chat del grupo dejando la tarjeta al final.
+
+        Es el UNICO punto por donde el bot escribe por su cuenta, para que la
+        tarjeta vuelva sola sin depender de que cada sitio se acuerde. No se
+        usa para el listado de /buscar ni para la lista de la tarjeta (los dos
+        son paneles que abre el usuario y que viven debajo a proposito).
+        """
+        msg = await self._app.bot.send_message(chat_id, text, **kwargs)
+        await self._dejar_card_al_final(chat_id)
+        return msg
 
     def _mpv_track_ended_callback(self) -> None:
         """Callback invocado por el reader thread cuando mpv detecta end-file.
