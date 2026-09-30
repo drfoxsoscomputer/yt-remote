@@ -3,6 +3,12 @@ data/roles.json
 data/*.json
 data/*.db
 data/settings.enc
+# Los legacy ya migrados (state.json.migrado, roles.db.migrado) siguen siendo
+# datos del usuario: no se versionan. Y los acompanantes de SQLite (wal/shm)
+# tampoco, o un `git add .` sube la base del grupo partida en pedazos.
+data/*.migrado
+data/*.db-wal
+data/*.db-shm
 
 # Cache Python
 __pycache__/

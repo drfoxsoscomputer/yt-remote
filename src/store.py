@@ -333,6 +333,33 @@ class Store:
                 salida.append(dict(t))
         return salida
 
+    def reemplazar_historial(self, tracks: list[dict], limite: int = 100) -> None:
+        """Deja el historial exactamente como viene, y lo poda al tope.
+
+        El bot trae el historial en memoria (un deque de 100) y lo persiste
+        entero en cada guardado. Se reescribe el bloque, no se incrementally:
+        son 100 filas, no vale la pena llevar la cuenta de los cambios y el
+        riesgo de que se desincronice con la memoria del bot.
+        """
+        self._verificar_escritura()
+        self.conn.execute("DELETE FROM history")
+        ahora = int(time.time())
+        filas = []
+        for i, t in enumerate(tracks):
+            video_id = t.get("video_id") or t.get("url") or ""
+            if not video_id:
+                continue
+            filas.append(((ahora + i), video_id, t))
+        for _, video_id, t in filas:
+            self.guardar_track(t)
+        if filas:
+            self.conn.executemany(
+                "INSERT INTO history (played_at, video_id) VALUES (?, ?)",
+                [(quedada, vid) for quedada, vid, _ in filas],
+            )
+        self.conn.commit()
+        self.podar_historial(limite)
+
     def podar_historial(self, limite: int = 100) -> None:
         self._verificar_escritura()
         self.conn.execute(
@@ -383,29 +410,38 @@ class Store:
 
         Los archivos viejos no se borran: se renombran con `.migrado`. Si algo
         sale mal, el original sigue ahi y no se perdio nada.
+
+        OJO: los legacy se buscan en la CARPETA de esta base, no en las rutas
+        globales del modulo. Si usáramos `LEGACY_STATE` / `LEGACY_ROLES`, una
+        base de prueba abriria los datos reales del usuario y los renombraria:
+        los tests moviendo archivos que no les pertenecen.
         """
         if self.leer_ajuste(CLAVE_MIGRADO):
             return
 
+        carpeta = self.path.parent
         importo = False
-        estado = _leer_json(LEGACY_STATE)
-        if estado:
+        legacy_state = _legacy(carpeta, LEGACY_STATE.name)
+        legacy_roles = _legacy(carpeta, LEGACY_ROLES.name)
+
+        estado = _leer_json(legacy_state) if legacy_state else None
+        if estado and legacy_state:
             try:
                 self._importar_state(estado)
                 importo = True
-                _marcar_migrado(LEGACY_STATE)
+                guardado = _marcar_migrado(legacy_state)
                 logger.info(
                     "Migracion de datos: playlist (%d), historial (%d) y ajustes "
                     "traidos de state.json. El original quedo como %s",
                     len(estado.get("playlist") or []),
                     len(estado.get("history") or []),
-                    LEGACY_STATE.name + ".migrado",
+                    guardado.name,
                 )
             except Exception as exc:  # noqa: BLE001 - no debe tumbar el arranque
                 logger.error("No se pudo migrar state.json: %s", exc)
 
-        roles = _leer_roles_viejo(LEGACY_ROLES)
-        if roles:
+        roles = _leer_roles_viejo(legacy_roles) if legacy_roles else None
+        if roles and legacy_roles:
             try:
                 self.guardar_usuarios(
                     [
@@ -415,12 +451,12 @@ class Store:
                     ]
                 )
                 importo = True
-                _marcar_migrado(LEGACY_ROLES)
+                guardado = _marcar_migrado(legacy_roles)
                 logger.info(
                     "Migracion de datos: %d usuario(s) con su rol traidos de "
                     "roles.db. El original quedo como %s",
                     len(roles),
-                    LEGACY_ROLES.name + ".migrado",
+                    guardado.name,
                 )
             except Exception as exc:  # noqa: BLE001
                 logger.error("No se pudo migrar roles.db: %s", exc)
@@ -520,10 +556,32 @@ def _leer_roles_viejo(ruta: Path) -> dict[int, dict]:
     return salida
 
 
-def _marcar_migrado(ruta: Path) -> None:
+def _legacy(carpeta: Path, nombre: str) -> Optional[Path]:
+    """El archivo viejo, o su `.migrado` si ya habia sido renombrado.
+
+    Sin esto pasaba esto, y es la forma mas silenciosa de perderlo todo: una
+    corrida anterior renombro `state.json` y todavia NO habia nada en la base.
+    La siguiente corrida no encuentra `state.json`, no importa nada, se marca
+    la migracion como hecha y el usuario arranca con la lista y el historial
+    vacios para siempre. Buscando tambien el `.migrado`, esa base se arregla
+    sola.
+    """
+    normal = carpeta / nombre
+    if normal.is_file():
+        return normal
+    renombrado = carpeta / (nombre + ".migrado")
+    return renombrado if renombrado.is_file() else None
+
+
+def _marcar_migrado(ruta: Path) -> Path:
     """Renombra el archivo viejo para que no se vuelva a leer."""
+    if ruta.name.endswith(".migrado"):
+        return ruta
+    destino = ruta.with_name(ruta.name + ".migrado")
     try:
         if ruta.exists():
-            ruta.rename(ruta.with_name(ruta.name + ".migrado"))
+            ruta.rename(destino)
     except OSError as exc:
         logger.error("No se pudo renombrar %s: %s", ruta.name, exc)
+        return ruta
+    return destino

@@ -1,22 +1,27 @@
-"""Persistencia del estado del bot en data/state.json.
+"""Estado del bot, guardado en la base comun (data/ytremote.db).
 
-Estado persistido:
-- volume: nivel de volumen actual
-- paused: True si esta en pausa al cerrarse
-- current: QueueItem serializado de la cancion actual
-- playlist: lista de QueueItem serializados de la cola fija
-- cursor: posicion del tema actual dentro de la playlist
-- list_page: pagina del listado 📋 en la que iba el usuario
-- history: ultimas 100 canciones reproducidas
-- radio_artist: semilla de la radio
-- max_height: tope de resolucion elegido por el admin (None = 1080)
+QUE ES ESTE ARCHIVO HOY
 
-Escritura atomica con os.replace para no dejar archivos corruptos
-si el bot se cierra a mitad de escritura.
+Una FACHADA. Antes escribia un `state.json` COMPLETO en cada cambio: la cola,
+el historial y los ajustes, todo reescrito entero. Lo unico que crecia era justo
+lo que estaba en la peor herramienta.
 
-Versionado:
-- version 1: formato actual
-- version > 1: se ignora y se usa defaults (futuro: migracion)
+Ahora delega en `store.Store` (esquema con tablas de verdad) y traduce al
+diccionario que el bot ya conoce, para que `bot.py` no tenga que cambiar ni
+saber donde se guarda nada. Tocar el volumen ya no reescribe la cola.
+
+Lo que se conserva intacto es la API que el bot ya usa: `load()`, `save()`,
+`mark_dirty()`, `flush()` y `current_state()`.
+
+LECTURA SEGURA
+
+Si la base es de una version mas nueva que este codigo, o no se pudo abrir,
+queda en SOLO LECTURA: el bot arranca con valores por defecto pero NO escribe.
+Tu lista, tu historial y tu volumen quedan intactos. Perder datos en silencio
+es peor que no arrancar.
+
+`path` se sigue aceptando porque las pruebas lo usan para aislar: lo que manda
+es el DIRECTORIO del archivo, y la base vive ahi (`<dir>/ytremote.db`).
 """
 import json
 import logging
@@ -31,81 +36,172 @@ STATE_PATH = DATA_DIR / "state.json"
 CURRENT_VERSION = 1
 MAX_HISTORY = 100
 DEBOUNCE_SECS = 0.5
+NOMBRE_BASE = "ytremote.db"
 
 logger = logging.getLogger("bot")
 
 
+def _para_guardar(items) -> list[dict]:
+    """Normaliza una lista de QueueItem/dict a filas del catalogo.
+
+    El `video_id` se deriva de la URL: es la clave del catalogo. Si la URL no
+    esta, no hay fila: guardar una cancion sin identidad no serviria de nada.
+    """
+    salida: list[dict] = []
+    for item in items or []:
+        if hasattr(item, "to_dict"):
+            item = item.to_dict()
+        if not isinstance(item, dict):
+            continue
+        url = item.get("url") or ""
+        if not url:
+            continue
+        fila = dict(item)
+        fila["video_id"] = item.get("video_id") or url
+        salida.append(fila)
+    return salida
+
+
 class StateStore:
-    """Carga, persiste y administra el estado del bot con debouncing."""
+    """Estado del bot sobre la base comun, con debouncing."""
 
     def __init__(self, path: Path | None = None) -> None:
-        self.path = path or STATE_PATH
+        # `path` manda como "directorio de datos"; si no viene, el de por
+        # defecto. Asi las pruebas siguen aislando con un STATE_PATH temporal.
+        base = Path(path) if path else STATE_PATH
+        self.path = base
         self._dirty = False
         self._flush_timer: TimerHandle | None = None
-        self._loop = None
-        self._current: dict | None = None
         self._loop: AbstractEventLoop | None = None
-        # Cuando el archivo NO se puede leer con seguridad (version de formato
-        # mas nueva, o corrupto), el bot arranca con defaults pero se NIEGA a
-        # sobrescribir el archivo.
+        self._current: dict | None = None
         self._solo_lectura = False
         self._motivo_solo_lectura = ""
+        self._store = None
+        self._conectar(base.parent / NOMBRE_BASE)
 
-    # --- API publica ---
+    # --- Conexion -------------------------------------------------------
+    def _conectar(self, ruta: Path) -> None:
+        try:
+            from store import Store
 
+            self._store = Store(ruta)
+            if self._store.solo_lectura:
+                self._solo_lectura = True
+                self._motivo_solo_lectura = self._store.motivo_solo_lectura
+                logger.error(
+                    "NO se guarda el estado: %s. Tu lista, tu historial y tu "
+                    "volumen quedan intactos.",
+                    self._motivo_solo_lectura,
+                )
+        except Exception as exc:  # noqa: BLE001 - sin base, se arranca igual
+            self._solo_lectura = True
+            self._motivo_solo_lectura = f"no se pudo abrir la base ({exc})"
+            logger.error(
+                "NO se guarda el estado: %s. Los datos que hubiera siguen en "
+                "%s.",
+                self._motivo_solo_lectura,
+                self.path.name,
+            )
+
+    # --- API publica ----------------------------------------------------
     def load(self) -> dict:
-        """Carga el estado desde el archivo.
-
-        Si el archivo no existe, es JSON invalido o su version de formato es
-        mas nueva que la que este codigo entiende, arranca con defaults PERO se
-        queda en solo lectura: jamas pisa un archivo que no sabe leer. Antes si
-        lo pisaba, y eso hacia que la lista de canciones quedara perdida para
-        siempre y en silencio, sin ningun aviso.
-        """
-        self._current = self._read_raw()
+        """Trae el estado completo como el diccionario que el bot ya conoce."""
+        defaults = self._defaults()
+        if self._store is None or self._solo_lectura:
+            self._current = defaults
+            return self._current
+        try:
+            s = self._store
+            self._current = {
+                "version": CURRENT_VERSION,
+                "volume": s.leer_ajuste("volume", 100),
+                "paused": s.leer_ajuste("paused", False),
+                "current": s.leer_ajuste("current"),
+                "playlist": s.leer_cola(),
+                "cursor": s.leer_ajuste("cursor", 0),
+                "list_page": s.leer_ajuste("list_page", 0),
+                "history": s.leer_historial(MAX_HISTORY),
+                "radio_artist": s.leer_ajuste("radio_artist", ""),
+                "max_height": s.leer_ajuste("max_height"),
+                "card": s.leer_ajuste("card", {}) or {},
+            }
+        except Exception as exc:  # noqa: BLE001 - no debe tumbar el arranque
+            logger.error("No se pudo leer el estado: %s. Arranca con defaults", exc)
+            self._current = defaults
         return self._current
 
     def save(self, state: dict) -> None:
-        """Escribe el estado de forma atomica en self.path.
-
-        Creates parent directory if needed. Uses os.replace for atomicity:
-        either the old file or the new one, never a partial write.
-
-        Si el archivo existente es de una version mas nueva (o esta corrupto),
-        NO escribe: esos datos son del usuario y este codigo no los entiende lo
-        bastante como para reemplazarlos. Deja una copia del original al lado y
-        lo avisa en el log.
-        """
-        if self._solo_lectura:
-            logger.error(
-                "NO se guarda el estado: %s. Se conserva el archivo tal cual "
-                "(copia en %s). Arranca con valores por defecto.",
-                self._motivo_solo_lectura,
-                self._copia_de_seguridad(),
-            )
+        """Guarda el estado por partes: solo se tocan las filas que cambian."""
+        if self._solo_lectura or self._store is None:
             self._dirty = False
             return
-        state.setdefault("version", CURRENT_VERSION)
-        state.setdefault("volume", 100)
-        state.setdefault("paused", False)
-        state.setdefault("current", None)
-        state.setdefault("playlist", [])
-        state.setdefault("cursor", 0)
-        state.setdefault("list_page", 0)
-        state.setdefault("history", [])
-        state.setdefault("radio_artist", "")
-        state.setdefault("max_height", None)
-
-        if "history" in state and len(state["history"]) > MAX_HISTORY:
-            state["history"] = state["history"][-MAX_HISTORY:]
-
-        self.path.parent.mkdir(parents=True, exist_ok=True)
-        tmp = self.path.with_suffix(".json.tmp")
-        with tmp.open("w", encoding="utf-8") as f:
-            json.dump(state, f, ensure_ascii=False, indent=2)
-        os.replace(tmp, self.path)
+        for clave in (
+            "volume",
+            "paused",
+            "cursor",
+            "list_page",
+            "radio_artist",
+            "max_height",
+            "card",
+            "current",
+        ):
+            if clave in state:
+                try:
+                    self._store.escribir_ajuste(clave, state[clave])
+                except RuntimeError as exc:
+                    self._solo_lectura = True
+                    self._motivo_solo_lectura = str(exc)
+                    logger.error("NO se guarda el estado: %s", exc)
+                    self._dirty = False
+                    return
+        if "playlist" in state:
+            try:
+                self._store.guardar_cola(_para_guardar(state["playlist"]))
+            except RuntimeError as exc:
+                self._solo_lectura = True
+                self._motivo_solo_lectura = str(exc)
+                logger.error("NO se guarda el estado: %s", exc)
+                self._dirty = False
+                return
+        if "history" in state:
+            try:
+                self._store.reemplazar_historial(
+                    _para_guardar(state["history"]), MAX_HISTORY
+                )
+            except RuntimeError as exc:
+                self._solo_lectura = True
+                self._motivo_solo_lectura = str(exc)
+                logger.error("NO se guarda el estado: %s", exc)
+                self._dirty = False
+                return
         self._dirty = False
         self._current = state
+
+    def marcar_historial(self, item) -> None:
+        """Suma UNA cancion al historial (con repeticiones, como antes).
+
+        Antes el historial vivia dentro del JSON y se reescribia entero en cada
+        cancion. Ahora es una fila.
+        """
+        if self._solo_lectura or self._store is None:
+            return
+        filas = _para_guardar([item])
+        if not filas:
+            return
+        try:
+            self._store.agregar_historial(filas[0])
+            self._store.podar_historial(MAX_HISTORY)
+        except Exception as exc:  # noqa: BLE001
+            logger.error("No se pudo guardar el historial: %s", exc)
+
+    def marcar_lista_vacia(self) -> None:
+        """Vacia la cola (el usuario la limpio desde el boton 📋)."""
+        if self._solo_lectura or self._store is None:
+            return
+        try:
+            self._store.guardar_cola([])
+        except Exception as exc:  # noqa: BLE001
+            logger.error("No se pudo vaciar la cola: %s", exc)
 
     def mark_dirty(self) -> None:
         """Marca el estado como modificado. Programa un flush con debouncing."""
@@ -118,9 +214,7 @@ class StateStore:
         except RuntimeError:
             return
         if self._loop.is_running():
-            self._flush_timer = self._loop.call_later(
-                DEBOUNCE_SECS, self._do_flush
-            )
+            self._flush_timer = self._loop.call_later(DEBOUNCE_SECS, self._do_flush)
 
     def flush(self) -> None:
         """Fuerza el guardado inmediato de estado pendiente."""
@@ -129,13 +223,12 @@ class StateStore:
             self.save(self._current)
 
     def current_state(self) -> dict:
-        """Devuelve el estado en memoria, o defaults si no hay nada cargado."""
+        """Devuelve el estado en memoria, o defaults si no se ha cargado."""
         if self._current is not None:
             return self._current
         return self._defaults()
 
-    # --- Internals ---
-
+    # --- Internals ------------------------------------------------------
     def _defaults(self) -> dict:
         return {
             "version": CURRENT_VERSION,
@@ -150,98 +243,6 @@ class StateStore:
             "max_height": None,
         }
 
-    def _read_raw(self) -> dict:
-        """Lee el archivo y valida version. Devuelve defaults si falla.
-
-        PERO si el archivo existe y no se puede entender (corrupto, o de una
-        version de formato mas nueva), deja el store en solo lectura y deja una
-        copia. Antes devolvia defaults y el proximo guardado pisaba el archivo:
-        la lista de canciones, el historial y el artista de la radio del
-        usuario desaparecian sin que nadie se enterara. Perder datos en
-        silencio es peor que no arrancar: por eso aqui se grita en el log y se
-        conserva el original.
-        """
-        if not self.path.exists():
-            logger.info("state.json no existe: se usaran defaults")
-            return self._defaults()
-
-        try:
-            with self.path.open(encoding="utf-8") as f:
-                data = json.load(f)
-        except (json.JSONDecodeError, ValueError, OSError) as exc:
-            logger.error(
-                "state.json esta CORRUPTO (%s). Se arranca con defaults pero NO "
-                "se va a sobrescribir: se conserva el archivo. Copia en %s",
-                exc,
-                self._copia_de_seguridad(),
-            )
-            self._solo_lectura = True
-            self._motivo_solo_lectura = f"el archivo esta corrupto ({exc})"
-            return self._defaults()
-
-        if not isinstance(data, dict):
-            logger.error(
-                "state.json no es un objeto JSON: se conserva sin tocar. Copia en %s",
-                self._copia_de_seguridad(),
-            )
-            self._solo_lectura = True
-            self._motivo_solo_lectura = "el archivo no es un objeto JSON"
-            return self._defaults()
-
-        version = data.get("version", 1)
-        if not isinstance(version, int) or isinstance(version, bool):
-            # Una version que no es un numero no se puede comparar con nada.
-            # Antes esto reventaba con TypeError al arrancar; ahora se trata
-            # como lo que es: un archivo que este codigo no entiende.
-            logger.error(
-                "state.json tiene una version ilegible (%r). Se arranca con "
-                "defaults pero NO se va a sobrescribir. Copia en %s",
-                version,
-                self._copia_de_seguridad(),
-            )
-            self._solo_lectura = True
-            self._motivo_solo_lectura = (
-                f"la version del archivo es ilegible ({version!r})"
-            )
-            return self._defaults()
-
-        if version > CURRENT_VERSION:
-            logger.error(
-                "state.json es de la version %d y este bot solo entiende hasta "
-                "la %d. Se arranca con defaults pero NO se va a sobrescribir: "
-                "tu lista, tu historial y tu volumen quedan intactos. Copia "
-                "en %s",
-                version,
-                CURRENT_VERSION,
-                self._copia_de_seguridad(),
-            )
-            self._solo_lectura = True
-            self._motivo_solo_lectura = (
-                f"el archivo es de la version {version} y este bot entiende "
-                f"hasta la {CURRENT_VERSION}"
-            )
-            return self._defaults()
-
-        return data
-
-    def _copia_de_seguridad(self) -> Path:
-        """Copia el state.json actual al lado, con fecha, una sola vez.
-
-        Se llama cuando el archivo no se pudo entender: el original se deja
-        intacto y esta copia queda por si hay que revisarlo a mano.
-        """
-        if not self.path.exists():
-            return self.path
-        destino = self.path.with_name(
-            f"{self.path.name}.intacto-{time.strftime('%Y%m%d-%H%M%S')}"
-        )
-        try:
-            shutil.copy2(self.path, destino)
-            return destino
-        except OSError as exc:
-            logger.error("No se pudo hacer la copia de seguridad: %s", exc)
-            return self.path
-
     def _do_flush(self) -> None:
         self._flush_timer = None
         if self._dirty and self._current is not None:
@@ -251,6 +252,6 @@ class StateStore:
         if self._flush_timer is not None:
             try:
                 self._flush_timer.cancel()
-            except Exception:
+            except Exception:  # noqa: BLE001
                 pass
             self._flush_timer = None

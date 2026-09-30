@@ -25,24 +25,16 @@ from store import CLAVE_MIGRADO, SCHEMA_VERSION, Store  # noqa: E402
 def _store() -> Store:
     """Store en una carpeta temporal. Aísla TAMBIÉN los archivos viejos.
 
-    Importante: si solo se aísla la ruta de la base, el Store sigue yendo a
-    buscar el `state.json` y el `roles.db` REALES del usuario y los importa en
-    la base de prueba. Ya paso: la prueba de usuarios aparecio con el usuario
-    real del grupo.
+    No hace falta tocar `LEGACY_STATE` / `LEGACY_ROLES`: el Store busca los
+    archivos viejos en la CARPETA de su propia base. Antes sí había que
+    parchearlos a mano, y ese parche estaba tapando el problema de verdad.
     """
     import store as store_mod
 
     carpeta = Path(tempfile.mkdtemp())
-    original = (
-        store_mod.data_dir,
-        store_mod.DB_PATH,
-        store_mod.LEGACY_STATE,
-        store_mod.LEGACY_ROLES,
-    )
+    original = (store_mod.data_dir, store_mod.DB_PATH)
     store_mod.data_dir = lambda: carpeta
     store_mod.DB_PATH = carpeta / "ytremote.db"
-    store_mod.LEGACY_STATE = carpeta / "NO_EXISTE_state.json"
-    store_mod.LEGACY_ROLES = carpeta / "NO_EXISTE_roles.db"
     s = store_mod.DB_PATH
     _RESTAURAR.append((store_mod, original))
     return Store(s)
@@ -57,9 +49,7 @@ def _restaurar_todo() -> None:
 
     while _RESTAURAR:
         store_mod, original = _RESTAURAR.pop()
-        store_mod.data_dir, store_mod.DB_PATH, store_mod.LEGACY_STATE, store_mod.LEGACY_ROLES = (
-            original
-        )
+        store_mod.data_dir, store_mod.DB_PATH = original
 
 
 def test_el_esquema_tiene_columnas_de_verdad():
@@ -377,13 +367,9 @@ def test_la_migracion_no_pierde_una_sola_cancion():
     original = (
         store_mod.data_dir,
         store_mod.DB_PATH,
-        store_mod.LEGACY_STATE,
-        store_mod.LEGACY_ROLES,
     )
     store_mod.data_dir = lambda: carpeta
     store_mod.DB_PATH = carpeta / "y.db"
-    store_mod.LEGACY_STATE = carpeta / "state.json"
-    store_mod.LEGACY_ROLES = carpeta / "NO_EXISTE.db"
     _RESTAURAR.append((store_mod, original))
     try:
         s = store_mod.Store(carpeta / "y.db")
@@ -422,6 +408,76 @@ def test_una_duracion_en_texto_no_tira_la_migracion():
     s.guardar_track({"url": "u1", "video_id": "v1", "duration_seconds": "10:22"})
     fila = s.tracks_por_video_id(["v1"])["v1"]
     assert fila["duration_seconds"] == 622, fila
+    s.cerrar()
+
+
+def test_una_base_temporal_jamas_toca_la_data_del_usuario():
+    """Un Store de prueba no puede leer NI renombrar los datos reales.
+
+    Este es el fallo mas caro que hemos tenido: una prueba abria una base en
+    una carpeta temporal, pero la migracion buscaba el `state.json` y el
+    `roles.db` REALES, los importaba en la base de prueba y los renombraba a
+    `.migrado`. Los datos del usuario se movian mientras corrian los tests.
+
+    Aqui se comprueba que los archivos reales ni se abren ni desaparecen, y que
+    la base de prueba empieza vacia.
+    """
+    import store as store_mod
+
+    reales = store_mod.data_dir()
+    if not reales.is_dir():
+        print("  --  sin data/ local: no hay nada real que proteger")
+        return
+
+    antes = {p.name: p.stat().st_mtime_ns for p in reales.glob("*") if p.is_file()}
+
+    carpeta = Path(tempfile.mkdtemp())
+    (carpeta / "state.json").write_text(
+        json.dumps({"version": 1, "playlist": [{"url": "u", "title": "Ajena"}],
+                    "history": []}),
+        encoding="utf-8",
+    )
+    s = Store(carpeta / "ytremote.db")
+
+    # Importo lo que hay en SU carpeta, no lo de la carpeta real.
+    assert len(s.leer_cola()) == 1, s.leer_cola()
+    assert (carpeta / "state.json.migrado").is_file(), "no marco el legacy local"
+
+    # Y los archivos reales siguen intactos: ni renombrados ni modificados.
+    despues = {p.name: p.stat().st_mtime_ns for p in reales.glob("*") if p.is_file()}
+    assert despues == antes, f"una base temporal toco la data real: {antes} -> {despues}"
+    s.cerrar()
+
+
+def test_la_base_se_repara_si_el_legacy_ya_estaba_renombrado():
+    """Una corrida previa renombro el legacy y la base quedo vacia.
+
+    Es el peor escenario posible y el mas silencioso: el bot no encuentra
+    `state.json`, no importa nada, marca la migracion como hecha y el usuario
+    arranca con la lista y el historial vacios PARA SIEMPRE, sin un solo error
+    en pantalla. La base tiene que reconocer el `.migrado` y traerse los datos.
+    """
+    carpeta = Path(tempfile.mkdtemp())
+    # El legacy ya fue renombrado antes de que existiera esta base.
+    (carpeta / "state.json.migrado").write_text(
+        json.dumps(
+            {
+                "version": 1,
+                "volume": 80,
+                "playlist": [{"url": "u1", "video_id": "v1", "title": "Uno"}],
+                "history": [
+                    {"url": "u9", "video_id": "v9", "title": "Vieja", "duration_seconds": 90}
+                ],
+                "card": {"chat_id": 7, "message_id": 8},
+            }
+        ),
+        encoding="utf-8",
+    )
+    s = Store(carpeta / "ytremote.db")
+    assert len(s.leer_cola()) == 1, f"no se reparo la cola: {s.leer_cola()}"
+    assert len(s.leer_historial(100)) == 1, s.leer_historial(100)
+    assert s.leer_ajuste("volume") == 80, s.leer_ajuste("volume")
+    assert (carpeta / "state.json.migrado").is_file(), "el legacy se perdio"
     s.cerrar()
 
 

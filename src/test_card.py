@@ -1561,7 +1561,11 @@ async def test_quality_select_reloads_current_track():
 
 
 async def test_quality_persisted_across_restart():
-    """Si state.json guarda max_height, un bot nuevo lo restaura y lo aplica."""
+    """Si la base guarda max_height, un bot nuevo lo restaura y lo aplica.
+
+    Antes se sembraba un `state.json` a mano; ahora se siembra la base, que es
+    donde vive el dato de verdad.
+    """
     import bot as bot_mod
     import persistence as persistence_mod
     import search as search_mod
@@ -1586,23 +1590,29 @@ async def test_quality_persisted_across_restart():
             b.roles.set_role(77, "dj")
             return b
 
+        def _sembrar(valor):
+            from persistence import StateStore
+
+            s = StateStore(persistence_mod.STATE_PATH)
+            s.save({"version": 1, "max_height": valor})
+
         b1 = _fresh_bot()
         assert b1._max_height is None
         b1._max_height = 720
         b1._persist_flush()
-        # "Reinicio": un bot nuevo que lee el MISMO state.json.
+        # "Reinicio": un bot nuevo que lee la MISMA base.
         b2 = _fresh_bot()
-        assert b2._max_height == 720
+        assert b2._max_height == 720, b2._max_height
         assert search_mod.MAX_HEIGHT == 720
-        # Y un estado sin tope vuelve al default 1080.
-        persistence_mod.STATE_PATH = Path(tmp) / "otro.json"
+        # Y una base sin tope vuelve al default 1080. OJO: la base vive en el
+        # DIRECTORIO del state.json, no en el archivo: hace falta otra carpeta
+        # para simular "otra instalacion", no otro nombre de archivo.
+        persistence_mod.STATE_PATH = Path(tempfile.mkdtemp()) / "state.json"
         b3 = _fresh_bot()
         assert b3._max_height is None
-        # Un estado viejo con nivel por encima del tope nuevo (1440/2160) cae
-        # a None -> 1080: nunca se aplica una calidad que dejamos de soportar.
-        persistence_mod.STATE_PATH.write_text(
-            '{"version": 1, "max_height": 2160}', encoding="utf-8"
-        )
+        # Un valor viejo por encima del tope actual (1440/2160) cae a None ->
+        # 1080: nunca se aplica una calidad que dejamos de soportar.
+        _sembrar(2160)
         b4 = _fresh_bot()
         assert b4._max_height is None, b4._max_height
         assert search_mod.MAX_HEIGHT == 1080
