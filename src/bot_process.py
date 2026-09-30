@@ -3,6 +3,7 @@
 Extraído de launcher.py para reutilización en launcher_web.py (Flask + pywebview).
 """
 
+import json as _json
 import os
 import sys
 import subprocess
@@ -10,6 +11,19 @@ import threading
 import time
 from pathlib import Path
 from typing import Optional, Dict, Any
+
+
+def data_dir() -> Path:
+    """Carpeta data/ del bot, la misma de session.enc y bot.log.
+
+    Junto al .exe cuando es portable; en el arbol del proyecto cuando se corre
+    desde el codigo. Una sola definicion: si el launcher y el bot la calcularan
+    por su cuenta, un dia apuntaban a carpetas distintas y el estado se perdia
+    sin que nadie se enterara.
+    """
+    if getattr(sys, "frozen", False):
+        return Path(os.path.dirname(os.path.abspath(sys.executable))) / "data"
+    return Path(__file__).resolve().parent.parent / "data"
 
 
 def validate_token(token: str) -> tuple[bool, str]:
@@ -59,11 +73,31 @@ class BotProcess:
 
     def _log_path(self) -> Path:
         """data/bot.log junto al exe (misma ubicacion que session.enc)."""
-        if getattr(sys, "frozen", False):
-            base = Path(os.path.dirname(os.path.abspath(sys.executable)))
-        else:
-            base = Path(__file__).resolve().parent.parent
-        return base / "data" / "bot.log"
+        return data_dir() / "bot.log"
+
+    def read_conexion(self) -> str:
+        """Estado de la conexion del bot con Telegram: "online", "offline" o
+        "?" si el bot todavia no escribio nada.
+
+        El bot escribe data/conexion.json en el INSTANTE en que se cae la red.
+        Es la unica forma de que el launcher se entere a tiempo: por Telegram no
+        se puede avisar de que no hay red, porque justamente no hay red. El
+        archivo es local, asi que se escribe igual.
+
+        Antes el unico aviso era un mensaje en Telegram que decia "tu comando se
+        perdio" DESPUES de la caida, junto a los resultados que si salieron. El
+        usuario lo senalo: ese aviso no sirve para nada, hay que saber ANTES si
+        se puede o no.
+        """
+        try:
+            ruta = data_dir() / "conexion.json"
+            if not ruta.exists():
+                return "?"
+            with ruta.open(encoding="utf-8") as f:
+                estado = _json.load(f)
+            return "online" if estado.get("online") else "offline"
+        except Exception:
+            return "?"
 
     def _append_log(self, text: str) -> None:
         """Vuelca stdout+stderr del bot a data/bot.log (era invisible con --windowed)."""

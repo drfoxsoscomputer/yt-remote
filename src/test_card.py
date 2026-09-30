@@ -638,7 +638,12 @@ def test_singleton_lock_rejects_second_instance():
 
 async def test_net_watch_job_reconnects_and_notifies():
     """Vigilante de conexion: offline no hace nada; al volver descarta el
-    backlog y avisa que esos comandos se perdieron (no se ejecutan con retraso)."""
+    backlog SIN Mandar ningun aviso por Telegram.
+
+    El aviso en el chat se elimino: es un post-mortem que llega tarde y no le
+    sirve al usuario para nada. Lo que mando mal es un comando a un grupo. Lo
+    que tiene que saber es que no hay internet, y eso se entera en su propia
+    PC al instante (data/conexion.json -> ventana e icono del reloj)."""
     b = make_bot()
     b.config.allowed_chat_id = 44
     fb = b._app.bot
@@ -646,7 +651,7 @@ async def test_net_watch_job_reconnects_and_notifies():
         _FakeBacklogUpd(44, "/pause"),
         _FakeBacklogUpd(44, "/volume 30"),
         _FakeBacklogUpd(44, "hola"),
-        _FakeBacklogUpd(99, "/next"),  # de otro chat: no se reporta
+        _FakeBacklogUpd(99, "/next"),  # de otro chat
     ]
     ctx = SimpleNamespace(bot=fb, application=SimpleNamespace(updater=None))
     b._net_offline = True
@@ -657,15 +662,15 @@ async def test_net_watch_job_reconnects_and_notifies():
     assert b._net_offline is True
     assert fb.sent == [], fb.sent
 
-    # vuelve la conexion: se descarta el backlog y se avisa
+    # vuelve la conexion: se descarta el backlog y NO se avisa por chat
     fb.get_me_ok = True
     await b._net_watch_job(ctx)
     assert b._net_offline is False
-    dropped = [m[1] for m in fb.sent if "La conexion del bot se perdio" in str(m[1])]
-    assert dropped, fb.sent
-    assert "/pause" in dropped[0] and "/volume 30" in dropped[0]
-    assert "/next" not in dropped[0]
-    assert "hola" not in dropped[0]
+    # No debe quedar ningun mensaje en el chat con la lista de comandos
+    assert fb.sent == [], f"se volvio a mandar el post-mortem: {fb.sent}"
+    for m in fb.sent:
+        assert "La conexion del bot se perdio" not in str(m[1]), fb.sent
+        assert "Se descartaron estos comandos" not in str(m[1]), fb.sent
 
     # sin backlog (y online): no vuelve a avisar
     fb.sent.clear()

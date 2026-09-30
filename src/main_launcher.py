@@ -83,6 +83,9 @@ def _skeleton_url() -> str:
 _window = None
 _tray = None
 _tray_image = None
+# Ultimo texto puesto en el icono del reloj: evita repetir el trabajo en cada
+# vuelta del vigilante (y compararlo es barato).
+_tray_texto = ""
 _cerrar_programatico = False
 _flask_thread = None
 
@@ -222,7 +225,10 @@ class LauncherApi:
 
     def get_status(self) -> dict:
         """Estado actual del bot."""
-        return {"bot_running": bot_process.is_running()}
+        return {
+            "bot_running": bot_process.is_running(),
+            "conexion": bot_process.read_conexion(),
+        }
 
     def stop_bot(self) -> dict:
         """Detiene el bot (mantiene sesión)."""
@@ -314,8 +320,35 @@ def _crear_tray_icon():
 
             _tray = pystray.Icon("ytremote", _tray_image, APP_NAME, menu)
             threading.Thread(target=_tray.run, daemon=True).start()
+            threading.Thread(target=_vigilar_conexion_tray, daemon=True).start()
         except Exception as e:
             print(f"No se pudo crear tray icon: {e}")
+
+
+def _vigilar_conexion_tray():
+    """Cambia el texto del icono del reloj a "Sin conexion" en el instante.
+
+    La ventana del launcher casi siempre esta escondida (se minimiza sola al
+    tray cuando el bot queda en linea), asi que el icono del reloj es lo
+    primero que el usuario ve cuando algo pasa. Antes el unico aviso de una
+    caida de red llegaba por Telegram y DESPUES, cuando ya no servia.
+    """
+    global _tray, _tray_texto
+    while True:
+        time.sleep(3)
+        try:
+            if _tray is None:
+                continue
+            texto = (
+                f"{APP_NAME} - Sin conexion"
+                if bot_process.read_conexion() == "offline"
+                else APP_NAME
+            )
+            if _tray_texto != texto:
+                _tray.title = texto
+                _tray_texto = texto
+        except Exception:
+            pass
 
 
 def _mostrar_ventana():
