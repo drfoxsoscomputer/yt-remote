@@ -21,6 +21,8 @@ Versionado:
 import json
 import logging
 import os
+import shutil
+import time
 from asyncio import AbstractEventLoop, TimerHandle, get_event_loop
 from pathlib import Path
 
@@ -43,14 +45,22 @@ class StateStore:
         self._loop = None
         self._current: dict | None = None
         self._loop: AbstractEventLoop | None = None
+        # Cuando el archivo NO se puede leer con seguridad (version de formato
+        # mas nueva, o corrupto), el bot arranca con defaults pero se NIEGA a
+        # sobrescribir el archivo.
+        self._solo_lectura = False
+        self._motivo_solo_lectura = ""
 
     # --- API publica ---
 
     def load(self) -> dict:
         """Carga el estado desde el archivo.
 
-        Devuelve defaults si el archivo no existe, es JSON invalido o
-        la version es mayor que la actual.
+        Si el archivo no existe, es JSON invalido o su version de formato es
+        mas nueva que la que este codigo entiende, arranca con defaults PERO se
+        queda en solo lectura: jamas pisa un archivo que no sabe leer. Antes si
+        lo pisaba, y eso hacia que la lista de canciones quedara perdida para
+        siempre y en silencio, sin ningun aviso.
         """
         self._current = self._read_raw()
         return self._current
@@ -60,7 +70,21 @@ class StateStore:
 
         Creates parent directory if needed. Uses os.replace for atomicity:
         either the old file or the new one, never a partial write.
+
+        Si el archivo existente es de una version mas nueva (o esta corrupto),
+        NO escribe: esos datos son del usuario y este codigo no los entiende lo
+        bastante como para reemplazarlos. Deja una copia del original al lado y
+        lo avisa en el log.
         """
+        if self._solo_lectura:
+            logger.error(
+                "NO se guarda el estado: %s. Se conserva el archivo tal cual "
+                "(copia en %s). Arranca con valores por defecto.",
+                self._motivo_solo_lectura,
+                self._copia_de_seguridad(),
+            )
+            self._dirty = False
+            return
         state.setdefault("version", CURRENT_VERSION)
         state.setdefault("volume", 100)
         state.setdefault("paused", False)
@@ -127,7 +151,16 @@ class StateStore:
         }
 
     def _read_raw(self) -> dict:
-        """Lee el archivo y valida version. Devuelve defaults si falla."""
+        """Lee el archivo y valida version. Devuelve defaults si falla.
+
+        PERO si el archivo existe y no se puede entender (corrupto, o de una
+        version de formato mas nueva), deja el store en solo lectura y deja una
+        copia. Antes devolvia defaults y el proximo guardado pisaba el archivo:
+        la lista de canciones, el historial y el artista de la radio del
+        usuario desaparecian sin que nadie se enterara. Perder datos en
+        silencio es peor que no arrancar: por eso aqui se grita en el log y se
+        conserva el original.
+        """
         if not self.path.exists():
             logger.info("state.json no existe: se usaran defaults")
             return self._defaults()
@@ -135,19 +168,79 @@ class StateStore:
         try:
             with self.path.open(encoding="utf-8") as f:
                 data = json.load(f)
-        except (json.JSONDecodeError, ValueError, OSError):
-            logger.warning("state.json corrupto: se usaran defaults")
+        except (json.JSONDecodeError, ValueError, OSError) as exc:
+            logger.error(
+                "state.json esta CORRUPTO (%s). Se arranca con defaults pero NO "
+                "se va a sobrescribir: se conserva el archivo. Copia en %s",
+                exc,
+                self._copia_de_seguridad(),
+            )
+            self._solo_lectura = True
+            self._motivo_solo_lectura = f"el archivo esta corrupto ({exc})"
+            return self._defaults()
+
+        if not isinstance(data, dict):
+            logger.error(
+                "state.json no es un objeto JSON: se conserva sin tocar. Copia en %s",
+                self._copia_de_seguridad(),
+            )
+            self._solo_lectura = True
+            self._motivo_solo_lectura = "el archivo no es un objeto JSON"
             return self._defaults()
 
         version = data.get("version", 1)
+        if not isinstance(version, int) or isinstance(version, bool):
+            # Una version que no es un numero no se puede comparar con nada.
+            # Antes esto reventaba con TypeError al arrancar; ahora se trata
+            # como lo que es: un archivo que este codigo no entiende.
+            logger.error(
+                "state.json tiene una version ilegible (%r). Se arranca con "
+                "defaults pero NO se va a sobrescribir. Copia en %s",
+                version,
+                self._copia_de_seguridad(),
+            )
+            self._solo_lectura = True
+            self._motivo_solo_lectura = (
+                f"la version del archivo es ilegible ({version!r})"
+            )
+            return self._defaults()
+
         if version > CURRENT_VERSION:
-            logger.warning(
-                "state.json version %d es mayor que %d: se usaran defaults",
-                version, CURRENT_VERSION,
+            logger.error(
+                "state.json es de la version %d y este bot solo entiende hasta "
+                "la %d. Se arranca con defaults pero NO se va a sobrescribir: "
+                "tu lista, tu historial y tu volumen quedan intactos. Copia "
+                "en %s",
+                version,
+                CURRENT_VERSION,
+                self._copia_de_seguridad(),
+            )
+            self._solo_lectura = True
+            self._motivo_solo_lectura = (
+                f"el archivo es de la version {version} y este bot entiende "
+                f"hasta la {CURRENT_VERSION}"
             )
             return self._defaults()
 
         return data
+
+    def _copia_de_seguridad(self) -> Path:
+        """Copia el state.json actual al lado, con fecha, una sola vez.
+
+        Se llama cuando el archivo no se pudo entender: el original se deja
+        intacto y esta copia queda por si hay que revisarlo a mano.
+        """
+        if not self.path.exists():
+            return self.path
+        destino = self.path.with_name(
+            f"{self.path.name}.intacto-{time.strftime('%Y%m%d-%H%M%S')}"
+        )
+        try:
+            shutil.copy2(self.path, destino)
+            return destino
+        except OSError as exc:
+            logger.error("No se pudo hacer la copia de seguridad: %s", exc)
+            return self.path
 
     def _do_flush(self) -> None:
         self._flush_timer = None
