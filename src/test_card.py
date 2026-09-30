@@ -2352,8 +2352,10 @@ async def test_load_sin_file_loaded_lanza_error_real():
 
 
 async def test_search_keyboard_has_cancel_button():
-    """El listado de /buscar termina con un boton ❌ Cancelar (pick:cancel) y
-    queda marcado como pendiente (la card arriba no se reposiciona)."""
+    """El listado de /buscar muestra 5 resultados por pagina con su informacion
+    completa y termina con la fila de navegacion [◀ ❌ ▶]: en la primera pagina
+    el atras queda inerte y en la ultima el derecho pasa a "Buscar mas".
+    Queda marcado como pendiente (la card arriba no se reposiciona)."""
     import bot as bot_mod
     from search import SearchResult
 
@@ -2380,10 +2382,62 @@ async def test_search_keyboard_has_cancel_button():
     assert edited, b._app.bot.edited
     markup = edited[-1][3]["reply_markup"]
     rows = markup.inline_keyboard
-    assert len(rows) == 3, rows  # 2 resultados + fila de cancelar
-    assert [btn.text for btn in rows[-1]] == ["❌ Cancelar"], rows
-    assert rows[-1][0].callback_data == "pick:cancel", rows
+    assert len(rows) == 3, rows  # 2 resultados + fila de navegacion
+    nav = rows[-1]
+    assert len(nav) == 3, nav
+    assert nav[0].callback_data == "pick:noop", nav  # primera pagina: sin atras
+    assert nav[1].callback_data == "pick:cancel", nav
+    assert nav[2].callback_data == "pick:mas", nav  # ultima pagina: buscar mas
     assert b._search_list_pending is True
+
+
+async def test_search_list_paginates_with_navigation():
+    """El listado trae una tanda de 10, muestra 5 por pagina con la
+    informacion completa (titulo, canal y duracion) y la fila de navegacion
+    pasa de pagina. En la ultima pagina el boton derecho trae otra tanda."""
+    import bot as bot_mod
+    from search import SearchResult
+
+    b = make_bot()
+    original_search = bot_mod.search
+    original_resolve = _patch_resolve(bot_mod, {})
+    tanda = [
+        SearchResult(
+            url=f"u{i}", title=f"Tema {i}", duration="3:00", channel=f"Canal{i}", thumbnail=""
+        )
+        for i in range(10)
+    ]
+    try:
+        bot_mod.search = lambda q, n: tanda
+        await b._run_search(
+            FakeMessageUpdate("/buscar"),
+            SimpleNamespace(args=[], bot=b._app.bot),
+            "artista cancion",
+        )
+    finally:
+        bot_mod.resolve_stream_url = original_resolve
+        bot_mod.search = original_search
+        if b._anticipate_task is not None:
+            b._anticipate_task.cancel()
+
+    assert len(b._search_resultados) == 10, len(b._search_resultados)
+    assert b._search_paginas() == 2, b._search_paginas()
+
+    primera = b._search_teclado().inline_keyboard
+    assert len(primera) == 6, primera  # 5 resultados + fila de navegacion
+    boton = primera[0][0]
+    assert boton.text.startswith("1. Tema 0"), boton.text
+    assert "Canal0" in boton.text and "3:00" in boton.text, boton.text
+    assert primera[-1][0].callback_data == "pick:noop", primera[-1]
+    assert primera[-1][2].callback_data == "pick:next", primera[-1]
+
+    await b._on_search_nav(FakeUpdate("pick:next").callback_query)
+
+    segunda = b._search_teclado().inline_keyboard
+    assert b._search_pagina == 1, b._search_pagina
+    assert segunda[0][0].text.startswith("6. Tema 5"), segunda[0][0].text
+    assert segunda[-1][0].callback_data == "pick:prev", segunda[-1]
+    assert segunda[-1][2].callback_data == "pick:mas", segunda[-1]
 
 
 async def test_pick_cancel_removes_list_and_keeps_card():

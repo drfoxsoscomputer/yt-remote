@@ -72,6 +72,12 @@ _LIST_PAGE_SIZE = 10
 # Editor de usuarios (boton 👥): usuarios conocidos visibles por pagina.
 _MEMBERS_PAGE_SIZE = 10
 
+# Listado de resultados de /buscar: cuantos resultados se traen por tanda y
+# cuantos se ven por pagina. El listado se pagina, asi que traer 10 de una no
+# hace esperar mas: es la MISMA busqueda con mas resultados.
+_SEARCH_BATCH = 10
+_SEARCH_PAGE_SIZE = 5
+
 
 class YTRemoteBot:
     """Ensambla bot, player, cola y roles."""
@@ -101,6 +107,16 @@ class YTRemoteBot:
         # En ese lapso la card NO se reposiciona: queda arriba del listado.
         # Se limpia al elegir, al cancelar o ante un /buscar o /play nuevo.
         self._search_list_pending: bool = False
+        # Listado de resultados de /buscar: se acumulan entre tandas para poder
+        # paginar sin pegarle a YouTube en cada pagina, con la consulta, la
+        # pagina a la vista y la identidad del mensaje del listado.
+        self._search_resultados: list[SearchResult] = []
+        self._search_consulta: str = ""
+        self._search_pagina: int = 0
+        self._search_chat_id: int | None = None
+        self._search_message_id: int | None = None
+        self._search_es_foto: bool = False
+        self._search_sin_mas: bool = False
         # Candado anti-colision de botones: una sola accion de control a la
         # vez. Si ya hay una en curso (p.ej. resolviendo el stream de un
         # salto), los toques extra se descartan al instante en vez de
@@ -1897,7 +1913,7 @@ class YTRemoteBot:
         # "Buscando..." nunca quede eterno.
         try:
             results = await asyncio.wait_for(
-                asyncio.to_thread(search, query, self.config.max_results),
+                asyncio.to_thread(search, query, _SEARCH_BATCH),
                 timeout=_SEARCH_TIMEOUT,
             )
         except asyncio.TimeoutError:
@@ -1948,53 +1964,236 @@ class YTRemoteBot:
                 await self._reply(update, msg)
             return
 
-        # Nueva busqueda reemplaza el cache de streams: queda solo con las
-        # URLs de los resultados que van a anticiparse abajo.
+        # Nueva busqueda: arranca un listado nuevo. El cache de streams se
+        # vacia (los resultados viejos ya no son los que se van a elegir) y
+        # la lista de resultados se reemplaza por esta tanda.
         self._clear_stream_cache()
-        self._search_cache.clear()
+        self._search_resultados = list(results)
+        self._search_consulta = query
+        self._search_pagina = 0
+        self._search_sin_mas = False
         # Mientras el listado esta en pantalla la card NO se reposiciona: la
         # proxima edicion del wrapper se salta para dejar la card arriba, al
         # alcance del ojo, con los resultados debajo. Se limpia en el pick.
         self._search_list_pending = True
-        keyboard = []
-        for i, r in enumerate(results):
-            cb = f"pick:{i}"
-            self._search_cache[cb] = r
-            label = f"{i+1}. {r.title} ({r.duration})"
-            keyboard.append([InlineKeyboardButton(label, callback_data=cb)])
-        # Boton de salida: si el listado no se elige, cancelar lo borra (con
-        # su desvanecimiento) y la card que estaba arriba queda visible.
-        keyboard.append([InlineKeyboardButton("❌ Cancelar", callback_data="pick:cancel")])
+        self._search_chat_id = chat_id
+        self._search_message_id = None
+        self._search_es_foto = False
+        await self._search_pintar(context.bot, chat_id, pending_id)
 
-        # El mesonero: se anticipan los streams de los resultados en la cola
-        # de resolucion serial, para que elegir uno suene casi al instante.
-        self._anticipate_urls([r.url for r in results])
+    def _search_paginas(self) -> int:
+        """Cuantas paginas tiene el listado de resultados."""
+        total = len(self._search_resultados)
+        return max(1, (total + _SEARCH_PAGE_SIZE - 1) // _SEARCH_PAGE_SIZE)
 
-        reply_markup = InlineKeyboardMarkup(keyboard)
-        # Editamos el mismo mensaje "Buscando..." con los resultados: queda
-        # un solo mensaje en el chat, no dos.
+    def _search_visibles(self) -> list[SearchResult]:
+        """Los resultados de la pagina a la vista."""
+        inicio = self._search_pagina * _SEARCH_PAGE_SIZE
+        return self._search_resultados[inicio : inicio + _SEARCH_PAGE_SIZE]
+
+    def _search_teclado(self) -> InlineKeyboardMarkup:
+        """Teclado del listado: un boton por resultado de la pagina con su
+        informacion completa (titulo, canal y duracion) y al pie la fila de
+        navegacion [◀ ❌ ▶], igual que la lista de canciones y la de usuarios.
+
+        En la ultima pagina el boton derecho no se apaga: pasa a ser
+        "🔎 Buscar más", que trae otra tanda de la misma consulta sin repetir
+        lo ya visto. Asi nunca queda un boton muerto ni se pierde el hilo.
+        """
+        paginas = self._search_paginas()
+        self._search_pagina = max(0, min(self._search_pagina, paginas - 1))
+        self._search_cache.clear()
+        inicio = self._search_pagina * _SEARCH_PAGE_SIZE
+
+        filas: list[list[InlineKeyboardButton]] = []
+        for i in range(inicio, min(inicio + _SEARCH_PAGE_SIZE, len(self._search_resultados))):
+            r = self._search_resultados[i]
+            self._search_cache[f"pick:{i}"] = r
+            datos = " · ".join(p for p in (r.channel, r.duration) if p)
+            etiqueta = f"{i + 1}. {r.title}"
+            if datos:
+                etiqueta = f"{etiqueta} — {datos}"
+            filas.append([InlineKeyboardButton(etiqueta, callback_data=f"pick:{i}")])
+
+        previo = (
+            InlineKeyboardButton("◀", callback_data="pick:prev")
+            if self._search_pagina > 0
+            else InlineKeyboardButton("·", callback_data="pick:noop")
+        )
+        if self._search_sin_mas:
+            siguiente = InlineKeyboardButton("·", callback_data="pick:noop")
+        elif self._search_pagina < paginas - 1:
+            siguiente = InlineKeyboardButton("▶", callback_data="pick:next")
+        else:
+            siguiente = InlineKeyboardButton("🔎 Buscar más", callback_data="pick:mas")
+        filas.append(
+            [previo, InlineKeyboardButton("❌", callback_data="pick:cancel"), siguiente]
+        )
+        return InlineKeyboardMarkup(filas)
+
+    def _search_limpiar(self) -> None:
+        """Cierra el listado de /buscar: se vacian resultados, paginas, cache
+        y la identidad del mensaje. Lo usa tanto elegir como cancelar."""
+        self._search_list_pending = False
+        self._search_artist = ""
+        self._search_cache.clear()
+        self._search_resultados = []
+        self._search_consulta = ""
+        self._search_pagina = 0
+        self._search_chat_id = None
+        self._search_message_id = None
+        self._search_es_foto = False
+        self._search_sin_mas = False
+
+    async def _search_aviso(self, texto: str) -> None:
+        """Escribe un aviso en el pie del listado de /buscar.
+
+        El listado puede ser foto o mensaje de texto, asi que el aviso va en el
+        pie de la foto si es foto, y en el texto si no. Nunca se manda un
+        mensaje nuevo: el listado se queda donde esta, con sus botones, para
+        que el usuario elija otra opcion.
+        """
+        chat_id = self._search_chat_id
+        msg_id = self._search_message_id
+        if chat_id is None or msg_id is None:
+            return
+        teclado = self._search_teclado()
         try:
-            if pending_id is not None:
-                await context.bot.edit_message_text(
-                    f"Resultados para '{query}':",
-                    chat_id=chat_id,
-                    message_id=pending_id,
-                    reply_markup=reply_markup,
+            if self._search_es_foto:
+                await self._app.bot.edit_message_caption(
+                    caption=texto, chat_id=chat_id, message_id=msg_id, reply_markup=teclado
                 )
             else:
-                await context.bot.send_message(
-                    chat_id,
-                    f"Resultados para '{query}':",
-                    reply_markup=reply_markup,
+                await self._app.bot.edit_message_text(
+                    texto, chat_id=chat_id, message_id=msg_id, reply_markup=teclado
                 )
-        except Exception:
-            # Si la edicion falla (mensaje viejo, race condition), mandamos
-            # uno nuevo para no dejar al usuario sin respuesta.
-            await context.bot.send_message(
-                chat_id,
-                f"Resultados para '{query}':",
-                reply_markup=reply_markup,
+        except Exception as exc:  # noqa: BLE001 - el aviso es informativo
+            logger.warning("No se pudo escribir el aviso en el listado: %s", exc)
+
+    async def _search_pintar(
+        self, bot, chat_id: int, pendiente_id: int | None = None
+    ) -> None:
+        """Muestra el listado en UN solo mensaje: la foto del primer resultado
+        de la pagina y, debajo, los botones con el resto de la informacion.
+
+        Telegram no deja convertir un mensaje de texto en foto, asi que la
+        primera vez se manda la foto y se borra el "Buscando..."; despues la
+        misma foto se va editando en cada pagina, igual que hace la tarjeta del
+        reproductor. Si el resultado no trae miniatura, el listado baja a texto
+        y se edita como texto.
+        """
+        teclado = self._search_teclado()
+        visibles = self._search_visibles()
+        if not visibles:
+            return
+        pie = (
+            f"Resultados para «{self._search_consulta}» — "
+            f"página {self._search_pagina + 1} de {self._search_paginas()}"
+        )
+        thumb = visibles[0].thumbnail or thumbnail_from_url(visibles[0].url)
+        quiere_foto = bool(thumb)
+
+        # 1) Si el listado ya existe y es del mismo tipo, se actualiza en sitio.
+        if self._search_message_id is not None and self._search_es_foto == quiere_foto:
+            try:
+                if quiere_foto:
+                    await bot.edit_message_media(
+                        media=InputMediaPhoto(media=thumb, caption=pie),
+                        chat_id=chat_id,
+                        message_id=self._search_message_id,
+                        reply_markup=teclado,
+                    )
+                else:
+                    await bot.edit_message_text(
+                        pie, chat_id=chat_id, message_id=self._search_message_id, reply_markup=teclado
+                    )
+                self._anticipate_urls([r.url for r in visibles])
+                return
+            except Exception as exc:  # noqa: BLE001 - se rehace el mensaje
+                logger.warning("No se pudo actualizar el listado: %s", exc)
+
+        # 2) Si hay un "Buscando..." y el listado es de texto, se edita ese
+        #    mismo: queda un solo mensaje en el chat.
+        if pendiente_id is not None and not quiere_foto:
+            try:
+                await bot.edit_message_text(
+                    pie, chat_id=chat_id, message_id=pendiente_id, reply_markup=teclado
+                )
+                self._search_message_id = pendiente_id
+                self._search_es_foto = False
+                self._anticipate_urls([r.url for r in visibles])
+                return
+            except Exception:  # noqa: BLE001 - se manda el listado aparte
+                pass
+
+        # 3) Se limpia lo que hubiera y se manda el listado. Telegram no deja
+        #    convertir un texto en foto, asi que ahi el mensaje viejo se borra.
+        for viejo in (self._search_message_id, pendiente_id):
+            if viejo is not None:
+                try:
+                    await bot.delete_message(chat_id, viejo)
+                except Exception:  # noqa: BLE001 - ya no importa
+                    pass
+        if quiere_foto:
+            try:
+                nuevo = await bot.send_photo(
+                    chat_id, photo=thumb, caption=pie, reply_markup=teclado
+                )
+                self._search_es_foto = True
+            except Exception as exc:  # noqa: BLE001 - sin foto, texto
+                logger.warning("No se pudo mandar la foto del listado: %s", exc)
+                nuevo = await bot.send_message(chat_id, pie, reply_markup=teclado)
+                self._search_es_foto = False
+        else:
+            nuevo = await bot.send_message(chat_id, pie, reply_markup=teclado)
+            self._search_es_foto = False
+        self._search_message_id = nuevo.message_id
+        self._anticipate_urls([r.url for r in visibles])
+
+    async def _search_ampliar(self) -> None:
+        """🔎 Buscar más: otra tanda de la MISMA consulta, sin repetir URLs.
+
+        Pide los ya vistos mas los nuevos de una (es la misma busqueda con mas
+        resultados, no una busqueda distinta) y se queda con los que faltaban.
+        """
+        chat_id = self._search_chat_id
+        if chat_id is None or not self._search_consulta:
+            return
+        vistos = {r.url for r in self._search_resultados}
+        try:
+            más = await asyncio.wait_for(
+                asyncio.to_thread(
+                    search, self._search_consulta, len(self._search_resultados) + _SEARCH_BATCH
+                ),
+                timeout=_SEARCH_TIMEOUT,
             )
+        except Exception as exc:  # noqa: BLE001 - avisar y seguir
+            logger.warning("No se pudo ampliar la busqueda: %s", exc)
+            más = []
+        nuevos = [r for r in más if r.url not in vistos][:_SEARCH_BATCH]
+        if not nuevos:
+            self._search_sin_mas = True
+            await self._search_pintar(self._app.bot, chat_id)
+            return
+        antes = len(self._search_resultados)
+        self._search_resultados.extend(nuevos)
+        self._search_pagina = antes // _SEARCH_PAGE_SIZE
+        await self._search_pintar(self._app.bot, chat_id)
+
+    async def _on_search_nav(self, query) -> None:
+        """Botones de navegacion del listado de /buscar (◀, ▶, 🔎 Buscar más)."""
+        await query.answer()
+        if query.data == "pick:prev":
+            self._search_pagina = max(0, self._search_pagina - 1)
+        elif query.data == "pick:next":
+            self._search_pagina = min(self._search_paginas() - 1, self._search_pagina + 1)
+        elif query.data == "pick:mas":
+            await self._search_ampliar()
+            return
+        else:
+            return
+        if self._search_chat_id is not None:
+            await self._search_pintar(self._app.bot, self._search_chat_id)
 
     async def on_callback(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         query = update.callback_query
@@ -2011,13 +2210,14 @@ class YTRemoteBot:
             # Botones del mensaje de la lista (temas, paginacion, cerrar).
             await self._on_list_callback(update, context)
             return
+        if query.data in ("pick:prev", "pick:next", "pick:mas", "pick:noop"):
+            await self._on_search_nav(query)
+            return
         if query.data == "pick:cancel":
             # Cancelar el listado de /buscar: se borra (con su desvanecimiento)
             # sin reproducir nada y sin mover la card. El listado queda limpio
             # y el cache se descarta; la card que estaba arriba queda visible.
-            self._search_list_pending = False
-            self._search_artist = ""
-            self._search_cache.clear()
+            self._search_limpiar()
             await query.answer("Busqueda cancelada.")
             try:
                 await query.message.delete()
@@ -2046,9 +2246,19 @@ class YTRemoteBot:
             artist=artist,
         )
         if await self._stream_for(item.url) is None:
-            # _play_item reporta el motivo real y avisa al admin, y falla de
-            # inmediato sin haber tocado nada.
-            await self._play_item(update, item)
+            # No arranca: no se toca lista, historial, ancla ni tarjeta. El
+            # motivo se escribe EN EL LISTADO (que sigue en pantalla) para que
+            # elija otra opcion, y el admin recibe el detalle por privado.
+            motivo = last_resolve_error()
+            if motivo and "resuelto con client" in motivo:
+                motivo = "todas las variantes de yt-dlp fallaron"
+            aviso = f"❌ «{item.title}» no se pudo reproducir."
+            if motivo:
+                aviso += f"\nMotivo: {motivo}"
+            await self._search_aviso(aviso)
+            await self._notify_admin(
+                f"Fallo de resolucion: {item.title}\n{motivo or 'sin motivo detallado'}"
+            )
             return
 
         # Resuelto: ahora si, la intencion es nueva de verdad.
@@ -2066,6 +2276,7 @@ class YTRemoteBot:
                 await query.edit_message_text("▶️ Listo, reproduciendo...")
             except Exception as exc2:  # noqa: BLE001
                 logger.warning("No se pudo editar mensaje tras fallo de borrado: %s", exc2)
+        self._search_limpiar()
 
         # Tarjeta fresca al final de la conversacion: se borra la previa para
         # que _play_item cree la nueva al final del chat.
