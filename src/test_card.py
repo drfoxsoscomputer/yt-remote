@@ -2622,6 +2622,58 @@ async def test_cmd_play_link_resets_pending_search():
     assert b._search_list_pending is False
 
 
+def test_la_tarjeta_vive_en_card_py_y_no_duplicada_en_bot():
+    """La tarjeta es una pieza, no un metodo mas del bot.
+
+    Sin esta garantia el proximo que agregue un metodo de tarjeta lo mete en
+    `bot.py` "porque es mas rapido", y el archivo vuelve a crecer con una
+    pieza que tiene su propia identidad y su propio ciclo de vida. El bot solo
+    debe DELEGAR: si un metodo aparece con su cuerpo aqui, esta prueba falla.
+    """
+    import bot as bot_mod
+    from card import CardManager
+
+    assert isinstance(bot_mod.YTRemoteBot.__dict__.get("_render_card"), object)
+
+    # Los 16 delegadores existen y son de una linea: delegan a la tarjeta.
+    delegadores = [
+        "_card_exists_in",
+        "_with_card_reposition",
+        "_send_track_card",
+        "_truncate",
+        "_track_status_text",
+        "_render_pending",
+        "_control_keyboard",
+        "_quality_keyboard",
+        "_render_card",
+        "_swap_card_keyboard",
+        "_send_card",
+        "_show_card",
+        "_remove_card",
+        "_reposition_card",
+        "_dejar_card_al_final",
+        "_enviar_al_chat",
+    ]
+    for nombre in delegadores:
+        metodo = getattr(bot_mod.YTRemoteBot, nombre, None)
+        assert metodo is not None, f"el bot ya no delega {nombre}"
+        assert metodo.__qualname__.startswith("YTRemoteBot."), metodo.__qualname__
+
+    # Y la pieza tiene TODOS esos metodos con el cuerpo de verdad.
+    for nombre in ("exists_in", "with_reposition", "send_track_card", "truncate",
+                   "status_text", "render_pending", "control_keyboard",
+                   "quality_keyboard", "render_card", "swap_keyboard",
+                   "send_card", "show_card", "remove", "reposition",
+                   "dejar_al_final", "enviar_al_chat"):
+        assert callable(getattr(CardManager, nombre, None)), f"CardManager sin {nombre}"
+
+    # El estado de la tarjeta vive en la pieza, no duplicado en el bot.
+    fuente_bot = Path(bot_mod.__file__).read_text(encoding="utf-8")
+    assert "InputMediaPhoto" not in fuente_bot, "el render de foto volvio a bot.py"
+    assert "edit_message_caption" not in fuente_bot, "el render de la tarjeta volvio a bot.py"
+    assert "_card_lock" not in fuente_bot, "el lock de la tarjeta volvio a bot.py"
+
+
 def run():
     total = run_sync_tests(globals())
     print(f"TARJETA TESTS OK ({total} pruebas)")
