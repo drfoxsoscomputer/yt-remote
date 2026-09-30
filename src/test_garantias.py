@@ -200,6 +200,81 @@ async def test_garantia_el_elegido_es_de_otro_artista_manda_ese():
     )
 
 
+async def test_garantia_el_aviso_de_red_no_se_contradice_con_lo_que_paso():
+    """La carrera de la red, tal como la vio el usuario.
+
+    El aviso decia "tu comando se perdio, mandalo de nuevo" y un segundo despues
+    aparecia el listado de resultados de ESE MISMO comando. No era que el aviso
+    mintiera: dos partes leian la misma tanda. El polling de Telegram se
+    recupera solo y ejecutaba lo que habia llegado durante la caida; hasta 15
+    segundos despues el vigilante volvia a leer esa misma tanda, que seguia sin
+    confirmar, y la declaraba descartada.
+
+    Aqui se comprueba lo que NO tiene que pasar: el polling tiene que estar
+    cerrado ANTES de que el vigilante lea, para que la tanda tenga un solo lector.
+    """
+    import asyncio
+
+    b = make_bot()
+    b.config.allowed_chat_id = 44
+    b._card_chat_id = 44
+    b._card_message_id = 7
+    fb = b._app.bot
+    fb.pending_updates = [_FakeBacklogUpd(44, "/buscar algo")]
+
+    eventos: list[str] = []
+    senal = asyncio.Event()
+
+    class UpdaterLento:
+        """El cierre del polling no se completa hasta que vuelve la senal, que
+        es justo lo que tarda en pasar en la vida real."""
+
+        async def stop(self):
+            await senal.wait()
+            eventos.append("polling cerrado")
+
+        async def start_polling(self, **kwargs):
+            eventos.append("polling reanudado")
+
+    updater = UpdaterLento()
+    ctx = SimpleNamespace(bot=fb, application=SimpleNamespace(updater=updater))
+
+    lecturas: list[str] = []
+    original_get_updates = fb.get_updates
+
+    async def get_updates_espia(timeout=None, offset=None, **kwargs):
+        estado = "cerrado" if "polling cerrado" in eventos else "ABIERTO"
+        lecturas.append(f"{estado} timeout={timeout} offset={offset}")
+        return await original_get_updates(timeout=timeout, offset=offset, **kwargs)
+
+    fb.get_updates = get_updates_espia
+
+    # 1) Se cae la red y el polling se agenda para cerrarse.
+    b._net_offline = True
+    b._detener_polling(ctx)
+    assert b._net_stop_task is not None, "el polling no se programo para cerrarse"
+
+    # 2) El vigilante arranca mientras el polling SIGUE abierto.
+    tarea = asyncio.ensure_future(b._net_watch_job(ctx))
+    for _ in range(5):
+        await asyncio.sleep(0)
+
+    # 3) Con el polling abierto, el vigilante NO puede haber leido nada: si
+    #    leyeran ahora, la tanda tendria dos lectores, que es el defecto.
+    assert lecturas == [], f"el vigilante leyo con el polling abierto: {lecturas}"
+
+    # 4) Vuelve la senal: el polling se cierra y recien ahi se decide la tanda.
+    senal.set()
+    await tarea
+
+    leidas = [l for l in lecturas if l.startswith("cerrado") and "timeout=0 offset=None" in l]
+    assert len(leidas) == 1, f"la tanda se leyo mas de una vez: {lecturas}"
+    assert eventos == ["polling cerrado", "polling reanudado"], eventos
+    # Con un solo lector, el aviso que sale es cierto: lo que lista, lo
+    # descarto de verdad. No puede decir "se perdio" de algo que se ejecuto.
+    assert any("se perdio" in str(m[1]) for m in fb.sent), fb.sent
+
+
 async def test_garantia_el_listado_se_lee_entero_en_el_celular():
     """Lo que el usuario vio en su propia captura, escrito como garantia.
 
