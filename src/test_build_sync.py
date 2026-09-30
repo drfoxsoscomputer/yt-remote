@@ -41,8 +41,19 @@ def _normalizado(path: Path) -> bytes:
 
 
 def test_modulos_del_exe_iguales_al_arbol():
-    if not DIST_SRC.is_dir():
-        return
+    if not DIST_SRC.parent.is_dir():
+        return  # no hay portable construido todavia: nada que comparar
+    # Si el portable existe pero sin src/, esto NO es "nada que comparar": es un
+    # portable MUERTO. El bot corre de dist/ytremote/src/main.py con el runtime
+    # portable, asi que sin esa carpeta el exe arranca y el bot no.
+    #
+    # Antes esta prueba se devolvia en silencio en ese caso y daba verde: la
+    # carpeta se habia perdido justo al reconstruir y el guardian no dijo nada.
+    assert DIST_SRC.is_dir(), (
+        f"El portable existe pero no tiene {DIST_SRC}: el bot no puede arrancar. "
+        "Copia src/ (y runtime/) del arbol al portable y repite."
+    )
+
     desactualizados: list[str] = []
     for nombre in _modulos_del_arbol():
         en_arbol = SRC / nombre
