@@ -30,6 +30,7 @@ from test_card import (  # noqa: E402
     make_bot,
 )
 from testkit import run_sync_tests  # noqa: E402
+import playback as playback_mod
 
 
 def _ultimo_mensaje_del_bot(bot) -> int:
@@ -89,6 +90,7 @@ async def test_garantia_la_busqueda_respeta_al_artista():
         b._search_resultados, b._search_nota = b._filtrar_por_artista(reales)
     finally:
         bot_mod.resolve_stream_url = original_resolve
+        playback_mod.resolve_stream_url = original_resolve
 
     assert [r.url for r in b._search_resultados] == ["u1", "u2", "u3", "u4", "u5"], (
         f"oculto resultados cuando ningun canal es del artista: "
@@ -153,6 +155,7 @@ async def test_garantia_sin_coincidencias_avisa_y_no_oculta_nada():
         resultados, nota = b._filtrar_por_artista(reales)
     finally:
         bot_mod.resolve_stream_url = original_resolve
+        playback_mod.resolve_stream_url = original_resolve
 
     assert len(resultados) == 3, f"oculto resultados cuando no hay coincidencia: {resultados}"
     assert "ningun resultado es de" in nota, nota
@@ -187,12 +190,14 @@ async def test_garantia_el_elegido_es_de_otro_artista_manda_ese():
         return True
 
     b._play_item = play_ok
+    b.playback.play_item = play_ok
     try:
         await b.on_callback(
             FakeUpdate("pick:0", message_id=500, chat_id=44), SimpleNamespace(args=[])
         )
     finally:
         bot_mod.resolve_stream_url = original_resolve
+        playback_mod.resolve_stream_url = original_resolve
 
     assert reproduced, "no se reprodujo nada"
     assert reproduced[0].artist == "Mafe Restrepo", (
@@ -320,6 +325,16 @@ async def test_garantia_el_listado_se_lee_entero_en_el_celular():
             )
             for i in range(5)
         ]
+        playback_mod.search = lambda q, n: [
+            SearchResult(
+                url=f"u{i}",
+                title=f"Tema {i}",
+                duration="3:0%d" % i,
+                channel=f"Canal{i}",
+                thumbnail=f"https://img/{i}",
+            )
+            for i in range(5)
+        ]
         await b._run_search(
             FakeMessageUpdate("/buscar"),
             SimpleNamespace(args=[], bot=b._app.bot),
@@ -327,7 +342,9 @@ async def test_garantia_el_listado_se_lee_entero_en_el_celular():
         )
     finally:
         bot_mod.resolve_stream_url = original_resolve
+        playback_mod.resolve_stream_url = original_resolve
         bot_mod.search = original_search
+        playback_mod.search = original_search
         if b._anticipate_task is not None:
             b._anticipate_task.cancel()
 
@@ -552,7 +569,9 @@ async def test_garantia_lista_sobrevive_si_el_pick_no_reproduce():
         return None
 
     b._play_item = play_falla
+    b.playback.play_item = play_falla
     b._stream_for = no_se_resuelve
+    b.playback.stream_for = no_se_resuelve
     await b.on_callback(FakeUpdate("pick:0", message_id=500, chat_id=44), SimpleNamespace(args=[]))
 
     assert b._card_message_id == 7, "la tarjeta no se borra si no se reprodujo"
@@ -595,6 +614,7 @@ async def test_garantia_lista_sobrevive_si_una_playlist_no_reproduce():
         return False
 
     b._play_item = play_falla
+    b.playback.play_item = play_falla
     link = "https://youtube.com/playlist?list=XYZ"
     try:
         await b._play_link_or_playlist(
