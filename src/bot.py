@@ -63,6 +63,16 @@ _QUICK_TIMEOUT = 15.0
 _MAX_PLAYLIST = 5000
 _EXPAND_TIMEOUT = 300.0
 
+# La playlist se carga de a VENTANAS, no entera: se mantienen estos temas
+# cargados por delante de lo que esta sonando y se pide la tanda siguiente
+# cuando la reproduccion se acerca al final de lo cargado. Con una lista de
+# 1.882 temas, traerla entera era descargar 1.882 metadatos para mostrar 10
+# por pagina.
+_PLAYLIST_WINDOW = 30
+# Cuantas vueltas de espera (1 s cada una) se le dan a una tanda antes de
+# seguir con lo que hay. Es el tope de seguridad por si la carga se traba.
+_PLAYLIST_ESPERAS = 15
+
 # Niveles de calidad disponibles para el admin. 1080 es el tope maximo.
 QUALITY_LEVELS = (144, 240, 360, 480, 720, 1080)
 
@@ -1345,19 +1355,21 @@ class YTRemoteBot:
         flag distingue "la radio se acabo" (catalogo agotado) de "no pude
         buscar" (red caida / yt-dlp fallo) para dar un mensaje util al user.
         """
-        # Si el arranque al toque sigue expandiendo la playlist en segundo
-        # plano y el cursor esta en el ULTIMO tema cargado, el peek devolveria
-        # un wrap prematuro (la cola aun no tiene el resto). Espero un rato a
-        # que la expansion anexe mas; con un tope de seguridad: si no llega
-        # nada en ~30s (expansion lenta o fallo silencioso), la reproduccion
-        # sigue con lo que hay (la playlist quedo en eso).
+        # La playlist se carga a ventanas. Si la reproduccion llega al final de
+        # lo que esta cargado, el peek devolveria un wrap prematuro (la cola
+        # aun no tiene el resto): se pide la tanda siguiente y se espera a que
+        # llegue. Eso es lo que garantiza que el avance automatico nunca se
+        # quede sin tema siguiente. Tope de seguridad: si en _PLAYLIST_ESPERAS
+        # segundos no llega nada, se sigue con lo que hay.
         _expand_esperas = 0
         while (
-            self._expanding_playlist
+            self.queue.has_playlist
             and self.queue._items
-            and self.queue._cursor == len(self.queue._items) - 1
-            and _expand_esperas < 30
+            and self.queue._cursor >= len(self.queue._items) - 1
+            and _expand_esperas < _PLAYLIST_ESPERAS
         ):
+            if not self._playlist_asegurar_ventana():
+                break
             _expand_esperas += 1
             try:
                 await asyncio.sleep(1.0)
@@ -1804,15 +1816,48 @@ class YTRemoteBot:
         self._expanding_playlist_url = None
         self._expanding_total = 0
 
+    def _playlist_asegurar_ventana(self) -> bool:
+        """Pide la siguiente tanda de la playlist si la cola se esta quedando
+        sin camino por delante.
+
+        Es lo que garantiza que el avance automatico nunca se quede sin tema
+        siguiente: cuando el cursor llega al final de lo cargado, se pide una
+        ventana mas y se espera a que llegue. Si ya hay una tanda en camino no
+        se pide otra (no se solapan).
+
+        Devuelve True si hay una ventana en camino (recien pedida o ya en
+        vuelo) y False si no queda nada que cargar: en ese caso no hay que
+        esperar a nada.
+        """
+        url = self._expanding_playlist_url
+        if not url or not self.queue.has_playlist or not self.queue._items:
+            return False
+        if self._expand_task is not None and not self._expand_task.done():
+            return True
+        cargados = len(self.queue._items)
+        if self._expanding_total and cargados >= self._expanding_total:
+            return False
+        self._expanding_playlist = True
+        self._expand_task = asyncio.create_task(self._expand_playlist_background(url))
+        return True
+
     async def _expand_playlist_background(self, url: str) -> None:
-        """Trae el resto de la playlist por detras y lo anexa a la cola.
+        """Trae UNA VENTANA de la playlist por detras y la anexa a la cola.
 
         Corre como tarea aparte (asyncio) tras el arranque al toque: no
         congela los botones ni la resolucion de streams.
+
+        Antes traia la lista COMPLETA (hasta _MAX_PLAYLIST): con una lista de
+        1.882 temas eso era descargar 1.882 metadatos y guardarlos en memoria
+        para mostrar 10 por pagina. Ahora pide solo los _PLAYLIST_WINDOW
+        temas siguientes, y las siguientes tandas se piden cuando la
+        reproduccion se acerca al final de lo cargado (ver
+        _playlist_asegurar_ventana).
         """
+        inicio = len(self.queue._items)
         try:
             extra = await asyncio.wait_for(
-                asyncio.to_thread(expand_playlist, url, _MAX_PLAYLIST),
+                asyncio.to_thread(expand_playlist, url, _PLAYLIST_WINDOW, inicio + 1),
                 timeout=_EXPAND_TIMEOUT,
             )
         except asyncio.TimeoutError:
@@ -1829,11 +1874,11 @@ class YTRemoteBot:
         # Al terminar, la expansion SOLO se deja ver si sigue siendo la misma
         # (misma URL): si el usuario arranco otra playlist (o la cancelo / no
         # trajo nada), la tarea vieja es de datos caducos y no debe tocar la
-        # cola nueva. Sea el camino que sea, siempre se cierran los flags.
+        # cola nueva. Sea el camino que sea, siempre se cierra el flag de
+        # "cargando"; la URL y el total se conservan porque las proximas
+        # ventanas los necesitan.
         vigente = self._expanding_playlist and self._expanding_playlist_url == url
         self._expanding_playlist = False
-        self._expanding_playlist_url = None
-        self._expanding_total = 0
         if not vigente:
             return
         if not extra:

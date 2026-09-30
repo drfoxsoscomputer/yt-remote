@@ -1391,7 +1391,7 @@ async def test_playlist_feedback_renders_in_card():
     bot_mod.quick_playlist = lambda q, n: (
         [SearchResult(url="u1", title="T1", duration="3:00", thumbnail="")], 39
     )
-    bot_mod.expand_playlist = lambda q, n: []
+    bot_mod.expand_playlist = lambda q, n, *_: []
     try:
         upd = FakeMessageUpdate("https://youtube.com/playlist?list=XYZ")
         await b._play_link_or_playlist(upd, SimpleNamespace(args=[]), upd.message.text)
@@ -2045,7 +2045,7 @@ async def test_playlist_quick_load_starts_immediately():
         [SearchResult(url=f"u{i}", title=f"T{i}", duration="3:00", thumbnail="") for i in range(n)],
         1882,
     )
-    bot_mod.expand_playlist = lambda q, n: []
+    bot_mod.expand_playlist = lambda q, n, *_: []
     try:
         assert b._expanding_total == 0, "arranque: aun sin expansion"
         upd = FakeMessageUpdate("https://youtube.com/playlist?list=XYZ")
@@ -2091,7 +2091,7 @@ async def test_playlist_background_expansion_does_not_duplicate():
     )
     # La expansion completa incluye tambien los 2 primeros (igual URL): el
     # dedupe debe dejar solo los 2 nuevos al final.
-    bot_mod.expand_playlist = lambda q, n: [
+    bot_mod.expand_playlist = lambda q, n, *_: [
         SearchResult(url="u0", title="T0", duration="3:00", thumbnail=""),
         SearchResult(url="u1", title="T1", duration="3:00", thumbnail=""),
         SearchResult(url="u2", title="T2", duration="3:00", thumbnail=""),
@@ -2136,7 +2136,7 @@ async def test_playlist_background_expansion_ignores_swapped_queue():
     b._expanding_playlist = False
     b._expanding_playlist_url = None
     orig_exp = bot_mod.expand_playlist
-    bot_mod.expand_playlist = lambda q, n: [
+    bot_mod.expand_playlist = lambda q, n, *_: [
         SearchResult(url="u1", title="T1", duration="3:00", thumbnail="")
     ]
     try:
@@ -2179,6 +2179,11 @@ async def test_pick_next_waits_for_expansion_no_early_wrap():
         b._expanding_playlist_url = None
         b._expanding_total = 0
 
+    # La ventana que pide el propio bot no debe pegarle a la red: aqui no
+    # aporta nada (la ficticia de arriba es la que anexa).
+    orig_expand = bot_mod.expand_playlist
+    bot_mod.expand_playlist = lambda q, n, *_: []
+
     tarea = _asyncio.create_task(expansion_fake())
     try:
         actual = cast(QueueItem, b.queue.current)
@@ -2186,8 +2191,48 @@ async def test_pick_next_waits_for_expansion_no_early_wrap():
         assert candidato is not None and candidato.url == "u2", candidato
         assert de_cola is True
     finally:
+        bot_mod.expand_playlist = orig_expand
+        b._cancel_playlist_expansion()
         if not tarea.done():
             tarea.cancel()
+
+
+async def test_playlist_ventana_se_amplia_y_nunca_se_queda_sin_tema():
+    """La playlist se carga a ventanas: al llegar al final de lo cargado se
+    pide SOLO la tanda siguiente (no la lista entera) y el siguiente tema sale
+    de la cola recien cargada, no de la radio ni de un wrap al primero."""
+    import bot as bot_mod
+    from queue_manager import QueueItem
+    from search import SearchResult
+
+    b = make_bot()
+    pedidos: list[tuple[int, int]] = []
+
+    def expansion_por_ventana(url, max_results, inicio=1):
+        pedidos.append((inicio, max_results))
+        return [
+            SearchResult(url=f"p{i}", title=f"P{i}", duration="3:00", thumbnail="")
+            for i in range(inicio - 1, inicio - 1 + max_results)
+        ]
+
+    orig_expand = bot_mod.expand_playlist
+    bot_mod.expand_playlist = expansion_por_ventana
+    try:
+        b._expanding_playlist_url = "https://youtube.com/playlist?list=XYZ"
+        b._expanding_total = 200
+        b.queue.set_playlist([QueueItem(url=f"c{i}", title=f"C{i}") for i in range(3)])
+        b.queue._cursor = 2  # ultimo tema cargado
+
+        candidato, de_cola, err = await b._pick_next_candidate(b.queue.current)
+    finally:
+        bot_mod.expand_playlist = orig_expand
+        b._cancel_playlist_expansion()
+
+    assert err is False, err
+    assert de_cola is True, "el siguiente debe salir de la cola, no de la radio"
+    assert candidato is not None and candidato.url == "p3", candidato
+    assert pedidos == [(4, 30)], f"debio pedir una sola ventana desde la 4: {pedidos}"
+    assert len(b.queue._items) == 33, f"debio cargar 30 por ventana: {len(b.queue._items)}"
 
 
 def test_live_stream_resolves_separated():

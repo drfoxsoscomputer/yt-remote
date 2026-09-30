@@ -186,12 +186,19 @@ def is_playlist_url(url: str) -> bool:
     return list_id != "WL"
 
 
-def expand_playlist(url: str, max_results: int = 50) -> list[SearchResult]:
+def expand_playlist(url: str, max_results: int = 50, inicio: int = 1) -> list[SearchResult]:
     """Expande una playlist o mix de YouTube a sus tracks.
 
     Usa yt-dlp con extract_flat para no descargar nada: solo los metadatos
     (id, titulo, url, duracion) de cada track. Devuelve [] si falla o si la
     URL no es una playlist.
+
+    `inicio` es la posicion (base 1) del primer track a traer y trae
+    `max_results` tracks desde ahi. Se apoya en `playlist_items` de yt-dlp,
+    que acepta un rango "[START]:[STOP]" (1-based) y se combine con
+    extract_flat: asi la ventana que carga el reproductor pide SOLO el tramo
+    que necesita, en vez de arrastrar la lista entera para mostrar 10 por
+    pagina.
     """
     import yt_dlp
 
@@ -204,6 +211,7 @@ def expand_playlist(url: str, max_results: int = 50) -> list[SearchResult]:
         "skip_download": True,
         "extract_flat": True,
         "noplaylist": False,
+        "playlist_items": f"{inicio}:{inicio + max_results - 1}",
     }
 
     tracks: list[SearchResult] = []
