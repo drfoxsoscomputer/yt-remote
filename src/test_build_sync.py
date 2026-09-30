@@ -69,6 +69,47 @@ def test_modulos_del_exe_iguales_al_arbol():
     )
 
 
+def test_el_zip_no_puede_dejar_afuera_un_modulo_del_arbol():
+    """El ZIP tiene que llevar TODO src/*.py que el bot necesita.
+
+    `release_rules.json` usaba una lista de modulos escrita a mano. Se quedo
+    vieja y el ZIP de 1.1.3 salio ROTO: sin `store.py` (lo importa
+    `persistence`) ni `card.py`, `playback.py`, `constants.py` o
+    `artist_match.py`. El bot no arranca y el ZIP recien compilado lo
+    demuestra: la prueba de sincronizacion daba verde porque compara el arbol
+    contra `dist/`, y esa copia si tenia todo.
+
+    Aqui se comprueba la OTRA mitad: que la regla del release no pueda dejar
+    afuera un modulo. Los tests y los dos modulos que no son de la app si se
+    excluyen, y estan nombrados.
+    """
+    import json
+
+    reglas = json.loads((SRC.parent / "release_rules.json").read_text(encoding="utf-8"))
+    src = reglas.get("folders", {}).get("src", {})
+
+    if not src.get("allow_all"):
+        # Modo lista: cada modulo del arbol tiene que estar nombrado.
+        nombrados = set(src.get("allowed_files", []))
+        faltan = [m for m in _modulos_del_arbol() if m not in nombrados]
+        assert not faltan, (
+            "La lista de modulos del release se quedo vieja. Faltan: "
+            + ", ".join(faltan)
+            + ". Agregalos, o mejor: pon allow_all y deja que se tome del arbol."
+        )
+
+    # Modo arbol: lo que se excluye tiene que estarjustificado, no growing.
+    excluidos = set(src.get("exclude_files", [])) | {"testkit.py"}
+    assert not (excluidos & set(_modulos_del_arbol())), (
+        f"Se esta excluyendo del ZIP un modulo que el bot usa: "
+        f"{sorted(excluidos & set(_modulos_del_arbol()))}"
+    )
+    assert "test_*.py" in src.get("exclude_globs", []), (
+        "Las pruebas no van al ZIP; sin este glob se subirian los archivos de "
+        "prueba al release."
+    )
+
+
 def run():
     total = run_sync_tests(globals())
     print(f"BUILD SYNC TESTS OK ({total} pruebas)")
