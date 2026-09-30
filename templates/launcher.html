@@ -42,6 +42,10 @@
 </style>
 </head>
 <body class="bg-fondo text-texto min-h-screen antialiased flex flex-col justify-between px-4 py-3 select-none">
+<!-- Llave de las llamadas al launcher: la genera el servidor en cada arranque.
+     Va acá y no en un archivo del proyecto para que no quede escrita en disco.
+     Solo la usa esta ventana; una pagina ajena no puede leer este HTML. -->
+<script>window.__YTR_API_TOKEN = {{ api_token | tojson }};</script>
 
   <!-- Cabecera limpia -->
   <header class="flex items-center justify-between w-full max-w-sm mx-auto pt-1">
