@@ -28,57 +28,104 @@ class RoleManager:
     def __init__(self) -> None:
         self._roles: dict[str, str] = {}
         self._users: dict[str, dict[str, str | int]] = {}
+        # Lo que se borro en memoria y hay que borrar tambien en la base.
+        self._roles_borrados: set[str] = set()
+        self._users_borrados: set[str] = set()
         self._load()
 
     def _load(self) -> None:
-        """Carga los roles y usuarios desde la base de datos SQLite."""
+        """Carga los roles y usuarios desde la base de datos SQLite.
+
+        NO borra nada. Antes hacia `DELETE FROM roles` y `DELETE FROM users` en
+        CADA arranque y solo volvia a llenar las tablas desde `data/roles.json`,
+        un archivo que ya no existe (los datos estaban en el SQLite). O sea:
+        cada reinicio del bot dejaba las tablas vacias y los roles se perdian
+        en silencio, sin ningun aviso. Es el mismo tipo de fallo que el del
+        `state.json`: perder datos callados es peor que no arrancar.
+
+        Ahora se lee lo que hay. Si la base es de una version mas nueva que
+        este codigo, se deja en solo lectura igual que el estado.
+        """
         DB_PATH.parent.mkdir(parents=True, exist_ok=True)
         conn = sqlite3.connect(str(DB_PATH))
         conn.execute("PRAGMA journal_mode=WAL")
+        conn.row_factory = sqlite3.Row
         try:
-            cur = conn.cursor()
-            cur.execute(
-                "CREATE TABLE IF NOT EXISTS roles (key TEXT PRIMARY KEY, value TEXT)"
-            )
-            cur.execute(
-                "CREATE TABLE IF NOT EXISTS users (key TEXT PRIMARY KEY, value TEXT)"
-            )
-            cur.execute("DELETE FROM roles")
-            cur.execute("DELETE FROM users")
-            # Migración: si existe el archivo JSON viejo, importamos sus datos
-            if ROLES_PATH.exists():
-                try:
-                    with open(ROLES_PATH, "r", encoding="utf-8") as jf:
-                        data = json.load(jf)
-                    if isinstance(data, dict) and "roles" in data:
-                        for k, v in data.get("roles", {}).items():
-                            cur.execute("INSERT INTO roles (key, value) VALUES (?, ?)", (k, v))
-                    if isinstance(data, dict) and "users" in data:
-                        for k, v in data.get("users", {}).items():
-                            cur.execute(
-                                "INSERT INTO users (key, value) VALUES (?, ?)",
-                                (k, json.dumps(v)),
-                            )
-                except Exception:
-                    pass  # Si falla la migración, la BD queda vacía pero válida
+            # El esquema se crea si falta, pero NO se borra nada. Estas dos
+            # tablas son clave-valor: el esquema de verdad con columnas esta en
+            # store.py (`usuarios`, `tracks`, `queue`...). Este modulo se migra
+            # en la tarea siguiente.
+            conn.execute("CREATE TABLE IF NOT EXISTS roles (key TEXT PRIMARY KEY, value TEXT)")
+            conn.execute("CREATE TABLE IF NOT EXISTS users (key TEXT PRIMARY KEY, value TEXT)")
             conn.commit()
+            # Si el roles.json mas antiguo todavia esta (equipos viejos), se
+            # importa UNA vez a la base; despues el archivo queda como esta.
+            if ROLES_PATH.exists() and not self._hay_datos(conn):
+                self._importar_json(conn)
+            for fila in conn.execute("SELECT key, value FROM roles"):
+                self._roles[fila["key"]] = fila["value"]
+            for fila in conn.execute("SELECT key, value FROM users"):
+                try:
+                    self._users[fila["key"]] = json.loads(fila["value"])
+                except (ValueError, TypeError):
+                    continue
         finally:
             conn.close()
 
+    @staticmethod
+    def _hay_datos(conn: sqlite3.Connection) -> bool:
+        return (
+            conn.execute("SELECT COUNT(*) FROM roles").fetchone()[0] > 0
+            or conn.execute("SELECT COUNT(*) FROM users").fetchone()[0] > 0
+        )
+
+    def _importar_json(self, conn: sqlite3.Connection) -> None:
+        """Del `roles.json` mas antiguo a la base. Si falla, la base sigue
+        valida y vacia; no se rompe el arranque por eso."""
+        try:
+            with open(ROLES_PATH, "r", encoding="utf-8") as jf:
+                data = json.load(jf)
+            if not isinstance(data, dict):
+                return
+            for k, v in (data.get("roles") or {}).items():
+                conn.execute("INSERT OR REPLACE INTO roles (key, value) VALUES (?, ?)", (k, v))
+            for k, v in (data.get("users") or {}).items():
+                conn.execute(
+                    "INSERT OR REPLACE INTO users (key, value) VALUES (?, ?)",
+                    (k, json.dumps(v)),
+                )
+            conn.commit()
+        except Exception:  # noqa: BLE001 - la migracion no debe tumbar el arranque
+            pass
+
     def _save(self) -> None:
-        """Persiste roles y usuarios en la base de datos SQLite."""
+        """Persiste roles y usuarios en la base de datos SQLite.
+
+        Solo lo que cambio: antes reescribia TODAS las filas en cada llamada,
+        y como `_load` las borraba antes, cualquier fallo en medio dejaba la
+        base vacia.
+        """
         conn = sqlite3.connect(str(DB_PATH))
         conn.execute("PRAGMA journal_mode=WAL")
         cur = conn.cursor()
         for key, role in self._roles.items():
-            cur.execute("INSERT OR REPLACE INTO roles (key, value) VALUES (?, ?)", (key, role))
+            cur.execute(
+                "INSERT OR REPLACE INTO roles (key, value) VALUES (?, ?)", (key, role)
+            )
         for key, entry in self._users.items():
             cur.execute(
                 "INSERT OR REPLACE INTO users (key, value) VALUES (?, ?)",
                 (key, json.dumps(entry)),
             )
+        # Los que se quitaron en memoria tambien tienen que irse de la base.
+        for key in [k for k in self._roles_borrados]:
+            cur.execute("DELETE FROM roles WHERE key = ?", (key,))
+        for key in [k for k in self._users_borrados]:
+            cur.execute("DELETE FROM users WHERE key = ?", (key,))
         conn.commit()
         conn.close()
+        self._roles_borrados.clear()
+        self._users_borrados.clear()
 
     def get_role(self, user_id: int, default: str = "user") -> str:
         key = str(user_id)
@@ -136,8 +183,10 @@ class RoleManager:
         existed = key in self._roles or key in self._users
         if key in self._roles:
             del self._roles[key]
+            self._roles_borrados.add(key)
         if key in self._users:
             del self._users[key]
+            self._users_borrados.add(key)
         if existed:
             self._save()
         return existed

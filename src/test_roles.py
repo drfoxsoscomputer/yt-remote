@@ -365,6 +365,55 @@ async def test_buscar_rejected_before_search_for_user():
     print("  OK  test_buscar_rejected_before_search_for_user")
 
 
+def test_los_roles_sobreviven_a_reiniciar_el_bot():
+    """LA REGRESION PRINCIPAL DE roles.py.
+
+    `_load()` hacia `DELETE FROM roles` y `DELETE FROM users` en cada arranque y
+    despues solo reimportaba de `data/roles.json`, un archivo que ya no existe
+    (los datos llevaban semanas en el SQLite). O sea: **cada reinicio del bot
+    dejaba la tabla vacia y los roles se perdian en silencio**.
+
+    Se comprueba con VARIOS RoleManager de verdad sobre la misma base: cada uno
+    es un reinicio.
+    """
+    import tempfile
+
+    import roles as roles_mod
+
+    carpeta = Path(tempfile.mkdtemp())
+    original_db = roles_mod.DB_PATH
+    original_json = roles_mod.ROLES_PATH
+    roles_mod.DB_PATH = carpeta / "roles.db"
+    roles_mod.ROLES_PATH = carpeta / "NO_EXISTE_roles.json"
+    try:
+        # Arranque 1: se asignan roles.
+        r1 = roles_mod.RoleManager()
+        r1.set_role(77, "admin", "Dueño")
+        r1.set_role(88, "dj", "Dj Uno")
+        r1.set_role(99, "user", "Invitado")
+
+        # Arranque 2 (el reinicio): antes esto vaciaba todo.
+        r2 = roles_mod.RoleManager()
+        assert r2.get_role(77) == "admin", f"se perdio el admin: {r2._roles}"
+        assert r2.get_role(88) == "dj", f"se perdio el dj: {r2._roles}"
+        assert r2.get_name(77) == "Dueño", f"se perdio el nombre: {r2._users}"
+        assert r2.get_joined_at(88) is not None, "se perdio la fecha de entrada"
+
+        # Arranque 3, por las dudas.
+        r3 = roles_mod.RoleManager()
+        assert r3.get_role(77) == "admin", r3._roles
+        assert len(r3.known_users()) == 3, r3.known_users()
+
+        # Y quitar uno de verdad lo quita de la base, no solo de la memoria.
+        r3.remove_user(99)
+        r4 = roles_mod.RoleManager()
+        assert r4.get_name(99) is None, f"no se borro de la base: {r4.known_users()}"
+        assert r4.get_role(77) == "admin", "borrar uno se llevo los demas"
+    finally:
+        roles_mod.DB_PATH = original_db
+        roles_mod.ROLES_PATH = original_json
+
+
 def run():
     print("\n=== Tests de modelo de roles ===\n")
     total = run_sync_tests(globals())
