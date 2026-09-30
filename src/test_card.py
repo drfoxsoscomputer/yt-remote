@@ -470,11 +470,15 @@ async def test_cmd_play_routes():
         FakeMessageUpdate(""), SimpleNamespace(args=["GP", "Band", "-", "Inexplicable"])
     )
     assert calls == ["GP Band Inexplicable"], calls
-    assert b._radio_artist == "GP Band", b._radio_artist
+    # El ancla de la radio NO se mueve todavia: se mueve cuando el usuario
+    # elige un resultado y arranca. Buscar solo anota el artista del listado.
+    assert b._search_artist == "GP Band", b._search_artist
+    assert b._radio_artist == "", b._radio_artist
 
     await b.cmd_play(FakeMessageUpdate(""), SimpleNamespace(args=["Mafe Restrepo"]))
     assert calls == ["GP Band Inexplicable", "Mafe Restrepo"], calls
-    assert b._radio_artist == "Mafe Restrepo", b._radio_artist
+    assert b._search_artist == "Mafe Restrepo", b._search_artist
+    assert b._radio_artist == "", b._radio_artist
 
 
 async def _wait_until(pred, timeout=2.0):
@@ -1320,7 +1324,11 @@ async def test_pick_removes_orphan_card():
         played.append(item)
         return True
 
+    async def fake_stream(url):
+        return ("stream", None)
+
     b._play_item = fake_play
+    b._stream_for = fake_stream
     upd = FakeUpdate("pick:0", message_id=500, chat_id=44)
     await b.on_callback(upd, SimpleNamespace(args=[]))
     assert (44, 7) in [(d[0], d[1]) for d in b._app.bot.deleted], b._app.bot.deleted
@@ -2434,7 +2442,11 @@ async def test_pick_result_clears_pending_search():
     async def fake_play(update, item, **kwargs):
         return True
 
+    async def fake_stream(url):
+        return ("stream", None)
+
     b._play_item = fake_play
+    b._stream_for = fake_stream
     upd = FakeUpdate("pick:0", message_id=500, chat_id=44)
     await b.on_callback(upd, SimpleNamespace(args=[]))
     assert b._search_list_pending is False

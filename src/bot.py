@@ -87,6 +87,10 @@ class YTRemoteBot:
         # (todo lo que va antes del guion). /next y el auto-advance lo reusan
         # tal cual, sin re-derivar en cada salto.
         self._radio_artist: str = ""
+        # Artista del LISTADO de busqueda que esta en pantalla. Es a donde
+        # va el ancla de la radio SOLO si el usuario elige un resultado y
+        # arranca; buscar, buscar mal o cancelar no cambia lo que suena.
+        self._search_artist: str = ""
         # Vigilante de conexion: True mientras el polling esta caido por red
         # (sin internet / Telegram inalcanzable). Al volver, se descarta el
         # backlog acumulado y se avisa al usuario que esos comandos se perdieron.
@@ -300,6 +304,38 @@ class YTRemoteBot:
         nuevo /play, detener, etc.) para que el historial no se mezcle."""
         self._nav_back.clear()
         self._nav_forward.clear()
+
+    def _snapshot_reproduccion(self) -> dict:
+        """Copia de todo lo que un arranque nuevo va a reemplazar.
+
+        La usa /buscar y /play con link: si el tema elegido no arranca, con
+        restore() la lista, el historial, el artista de la radio y la tarjeta
+        quedan exactamente como estaban.
+        """
+        return {
+            "queue": self.queue.snapshot(),
+            "radio_artist": self._radio_artist,
+            "search_artist": self._search_artist,
+            "nav_back": list(self._nav_back),
+            "nav_forward": list(self._nav_forward),
+            "card_chat_id": self._card_chat_id,
+            "card_message_id": self._card_message_id,
+            "card_is_photo": self._card_is_photo,
+        }
+
+    def _restore_reproduccion(self, snap: dict) -> None:
+        """Vuelve al estado guardado por _snapshot_reproduccion()."""
+        self.queue.restore(snap["queue"])
+        self._radio_artist = snap["radio_artist"]
+        self._search_artist = snap["search_artist"]
+        self._nav_back.clear()
+        self._nav_back.extend(snap["nav_back"])
+        self._nav_forward.clear()
+        self._nav_forward.extend(snap["nav_forward"])
+        self._card_chat_id = snap["card_chat_id"]
+        self._card_message_id = snap["card_message_id"]
+        self._card_is_photo = snap["card_is_photo"]
+        self._persist_dirty()
 
     def _register_owner(self) -> None:
         """El dueno (OWNER_ID) queda como admin automaticamente."""
@@ -1259,13 +1295,21 @@ class YTRemoteBot:
         return _re.sub(r"[^a-z0-9]", "", s)
 
     def _artist_seed(self, item: QueueItem) -> str:
-        """Semilla de la radio: el artista EXACTO que escribió el usuario.
+        """Semilla de la radio: el artista de lo que esta sonando ahora.
 
-        Se fija una sola vez, en el /buscar (o, para playlist/link directo,
-        con el canal del video: quien sube suele ser el artista o su sello).
-        Nunca se re-deriva desde títulos. Si no hay ancla ni canal, la radio
-        se detiene con aviso en vez de improvisar con cualquier cancion.
+        Cada tema lleva su propio artista (`QueueItem.artist`), asi que la
+        semilla sigue a la cancion REAL: si el usuario busco "Y", eligio una de
+        "Y" y despues se devuelve con /prev a una de "X", la radio sigue con
+        "X". Antes se usaba el ancla de sesion a secas y el programa reproducia
+        del artista equivocado.
+
+        Cadena de respaldo: artista del tema, luego ancla de la sesion, luego
+        el canal de quien subio el video (en playlist/link suele ser el artista
+        o su sello). Nunca se re-deriva desde los titulos. Si no hay nada de
+        eso, la radio se detiene con aviso en vez de improvisar.
         """
+        if item.artist:
+            return item.artist
         if self._radio_artist:
             return self._radio_artist
         if item.channel:
@@ -1602,9 +1646,10 @@ class YTRemoteBot:
             artist = query
             song = ""
         # El artista es EXACTAMENTE lo que escribió el usuario, nunca se
-        # deriva de títulos. Queda fijado antes de la busqueda.
-        self._radio_artist = artist
-        self._persist_dirty()
+        # deriva de títulos. Queda anotado para el LISTADO: el ancla de la
+        # radio solo se mueve si el usuario elige un resultado y arranca, así
+        # que una búsqueda que no va a ningún lado no cambia lo que suena.
+        self._search_artist = artist
         search_query = f"{artist} {song}".strip()
         await self._run_search(update, context, search_query)
 
@@ -1613,11 +1658,14 @@ class YTRemoteBot:
     ) -> None:
         """Reproduce un link de YouTube (video directo o playlist/mix).
 
-        Nueva intencion: se descarta el ancla anterior de la radio. En una
-        playlist, la radio se ancla conservadoramente al canal del primer
+        El estado de antes (lista, historial, ancla de la radio) se guarda al
+        entrar y se restaura si el tema NO arranca: pegar un link que no se
+        reproduce no puede dejar al usuario sin lo que estaba escuchando. En
+        una playlist, la radio se ancla conservadoramente al canal del primer
         track (quien sube suele ser el artista o su sello); nunca se inventa
         un artista a partir del titulo.
         """
+        snap = self._snapshot_reproduccion()
         self._radio_artist = ""
         self._clear_nav_stacks()
         if is_playlist_url(query):
@@ -1659,6 +1707,7 @@ class YTRemoteBot:
                     except Exception:
                         pass
                 await self._reply(update, "No se pudo expandir esa lista.")
+                self._restore_reproduccion(snap)
                 if await self._card_exists_in(chat_id):
                     await self._render_card(self._track_status_text())
                 return
@@ -1685,12 +1734,18 @@ class YTRemoteBot:
             # plano: el usuario ya escucha el primer track mientras carga.
             self._start_playlist_expansion(query, total)
             started = await self._play_item(update, first, preserve_current=True)
-            if started:
-                await self._reply(
-                    update,
-                    f"▶️ Playlist ({len(items)}/{total or '…'}): {first.title}\n"
-                    f"Tocando YA; el resto se carga en segundo plano (boton 📋 para verla).",
-                )
+            if not started:
+                # El primer tema no arranca: se corta la expansion en segundo
+                # plano (anexaria temas a la lista restaurada) y se devuelve
+                # todo al estado anterior.
+                self._cancel_playlist_expansion()
+                self._restore_reproduccion(snap)
+                return
+            await self._reply(
+                update,
+                f"▶️ Playlist ({len(items)}/{total or '…'}): {first.title}\n"
+                f"Tocando YA; el resto se carga en segundo plano (boton 📋 para verla).",
+            )
             return
 
         await context.bot.send_message(
@@ -1699,6 +1754,10 @@ class YTRemoteBot:
         item = QueueItem(url=query, title=query, thumbnail=thumbnail_from_url(query))
         started = await self._play_item(update, item)
         if not started:
+            # Link directo que no arranca: la lista, el historial y el ancla
+            # de la radio quedan como estaban, y la cancion anterior sigue
+            # sonando con su tarjeta.
+            self._restore_reproduccion(snap)
             return
 
     def _start_playlist_expansion(self, url: str, total: int) -> None:
@@ -1957,6 +2016,7 @@ class YTRemoteBot:
             # sin reproducir nada y sin mover la card. El listado queda limpio
             # y el cache se descarta; la card que estaba arriba queda visible.
             self._search_list_pending = False
+            self._search_artist = ""
             self._search_cache.clear()
             await query.answer("Busqueda cancelada.")
             try:
@@ -1972,13 +2032,32 @@ class YTRemoteBot:
             await query.edit_message_text("Esa busqueda ya expiro, busca de nuevo.")
             return
 
-        # El usuario eligio un resultado: el listado deja de estar en pantalla.
+        # El usuario eligio un resultado. NADA se destruye todavia: primero se
+        # resuelve el stream. Si no arranca, la lista de antes, el historial, el
+        # artista de la radio y la tarjeta quedan intactos, y el listado de
+        # resultados sigue en pantalla para que elija otra opcion.
+        artist = self._search_artist
+        item = QueueItem(
+            url=result.url,
+            title=result.title,
+            duration_seconds=result.duration_seconds,
+            thumbnail=result.thumbnail,
+            channel=result.channel,
+            artist=artist,
+        )
+        if await self._stream_for(item.url) is None:
+            # _play_item reporta el motivo real y avisa al admin, y falla de
+            # inmediato sin haber tocado nada.
+            await self._play_item(update, item)
+            return
+
+        # Resuelto: ahora si, la intencion es nueva de verdad.
+        snap = self._snapshot_reproduccion()
         self._search_list_pending = False
 
-        # Confirmar la eleccion: la tarjeta persistente (mini reproductor con
-        # miniatura + estado + botones) ES la unica confirmacion; _play_item
-        # la crea/actualiza al reproducir. Se quita el listado de resultados
-        # para no dejar el titulo duplicado en el chat.
+        # La tarjeta persistente (mini reproductor con miniatura + estado +
+        # botones) ES la unica confirmacion; _play_item la crea al reproducir.
+        # Se quita el listado de resultados para no dejar el titulo duplicado.
         try:
             await query.message.delete()
         except Exception as exc:  # noqa: BLE001
@@ -1988,29 +2067,25 @@ class YTRemoteBot:
             except Exception as exc2:  # noqa: BLE001
                 logger.warning("No se pudo editar mensaje tras fallo de borrado: %s", exc2)
 
-        # Forzar creación de tarjeta fresca: borrar la card previa (con su
-        # desvanecimiento) para que _play_item cree la nueva al final de la
-        # conversación. Antes quedaba huérfana porque solo se resetaban los
-        # ids, sin borrar el mensaje.
+        # Tarjeta fresca al final de la conversacion: se borra la previa para
+        # que _play_item cree la nueva al final del chat.
         await self._remove_card()
-        # Nueva intención: limpiar stacks de navegación.
         self._clear_nav_stacks()
+        self._radio_artist = artist
 
-        # ANCLA DE LA RADIO: ya quedó fijada en el /buscar, con el texto que va
-        # antes del guion. Aquí solo se propaga al item; el artista NUNCA se
-        # re-deriva desde títulos ni desde el canal.
-        artist = self._radio_artist
-
-        item = QueueItem(
-            url=result.url,
-            title=result.title,
-            duration_seconds=result.duration_seconds,
-            thumbnail=result.thumbnail,
-            channel=result.channel,
-            artist=artist,
-        )
         started = await self._play_item(update, item)
         if not started:
+            # El stream estaba resuelto pero mpv fallo al cargar. Se deshace
+            # todo lo demas; la tarjeta no se puede recuperar (su mensaje ya
+            # estaba borrado), asi que se rehace con la cancion que sigue
+            # sonando para que el usuario no se quede sin controles.
+            self._restore_reproduccion(snap)
+            self._card_chat_id = None
+            self._card_message_id = None
+            self._card_is_photo = False
+            chat = getattr(query.message, "chat", None)
+            if chat is not None:
+                await self._send_card(chat.id)
             return
 
     async def _play_item(
