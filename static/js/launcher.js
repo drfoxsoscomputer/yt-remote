@@ -67,8 +67,17 @@
     const ms = timeoutMs || 15000;
     const ctrl = new AbortController();
     const timer = setTimeout(() => ctrl.abort(), ms);
+    // Llave del arranque: la inyecta el HTML. Evita que una pagina ajena en el
+    // navegador use el launcher como puente (no puede leer este HTML).
+    const headers = Object.assign(
+      { 'X-Ytr-Token': (window.__YTR_API_TOKEN || '') },
+      (opts && opts.headers) || {}
+    );
     try {
-      const r = await fetch(url, Object.assign({}, opts, { signal: ctrl.signal }));
+      const r = await fetch(
+        url,
+        Object.assign({}, opts, { headers, signal: ctrl.signal })
+      );
       const texto = await r.text();
       let data;
       try {
@@ -449,8 +458,19 @@
   async function cargarForm() {
     try {
       const s = await req('/api/session');
-      inputToken.value = s.bot_token || '';
-      inputAdmin.value = s.admin_id ? String(s.admin_id) : '';
+      // El token y el ID NO vienen: ya estan guardados y no se muestran. Los
+      // campos quedan vacios y vacio significa "conserva lo que hay". Escribir
+      // algo los reemplaza.
+      inputToken.value = '';
+      inputAdmin.value = '';
+      inputToken.setAttribute(
+        'placeholder',
+        s.has_session ? 'Guardado — solo si querés cambiarlo' : 'Token de @BotFather'
+      );
+      inputAdmin.setAttribute(
+        'placeholder',
+        s.admin_id_set ? 'Guardado — solo si querés cambiarlo' : 'Tu ID numérico'
+      );
       inputKick.value = s.kick_after_hours != null ? String(s.kick_after_hours) : '0';
     } catch (e) {
       /* sin sesión: formulario vacío */
@@ -471,12 +491,18 @@
     const adminId = cleanInvisible(inputAdmin.value.trim());
     const kickHours = parseInt(inputKick.value, 10) || 0;
 
-    if (!token) {
+    // Con sesión guardada, dejar los campos vacíos significa "conserva lo que
+    // ya está": así se pueden cambiar las horas de invitado sin volver a
+    // escribir el token, que ya no se muestra en ninguna parte.
+    const hayGuardado = !token && !adminId
+      ? (await req('/api/session').catch(() => null) || {}).has_session
+      : true;
+    if (!hayGuardado) {
       showError('Ingrese el token del bot');
       inputToken.focus();
       return;
     }
-    if (!/^\d+$/.test(adminId) || parseInt(adminId, 10) <= 0) {
+    if (adminId !== '' && (!/^\d+$/.test(adminId) || parseInt(adminId, 10) <= 0)) {
       showError('ID de admin inválido (debe ser número positivo)');
       inputAdmin.focus();
       return;

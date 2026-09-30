@@ -11,6 +11,7 @@ Rutas:
 import sys
 import os
 import json
+import secrets as _secrets
 import threading
 from pathlib import Path
 from typing import Optional, Dict, Any
@@ -103,6 +104,23 @@ def _persist_username(handle: str) -> None:
 
 
 # ─── Rutas API ────────────────────────────────────────────────────
+# Clave de las llamadas de la interfaz. Se genera AL AZAR en cada arranque y
+# viaja en un header. No es magia contra el malware local (un programa en esta
+# PC puede leer el HTML igual); lo que evita es que una PAGINA abierta en el
+# navegador pueda usar el launcher como puente: una pagina ajena no puede leer
+# este HTML (CORS), asi que nunca ve la clave.
+_API_TOKEN = _secrets.token_urlsafe(32)
+
+
+@app.before_request
+def _guard_api_token():
+    """Toda /api/* exige la clave del arranque."""
+    if not request.path.startswith("/api/"):
+        return
+    if request.headers.get("X-Ytr-Token", "") != _API_TOKEN:
+        return jsonify({"ok": False, "error": "Llave de launcher invalida"}), 403
+
+
 # Anti-CSRF local: el launcher es un servidor localhost y un POST cross-site
 # (fetch/form desde una página externa) podría tumbar la app. Los navegadores
 # SIEMPRE envían el header Origin en los POST cross-site; aquí solo se acepta
@@ -120,27 +138,40 @@ def _guard_csrf():
 
 @app.route("/launcher")
 def launcher_page():
-    """Sirve el HTML del formulario de conexión."""
-    return render_template("launcher.html")
+    """Sirve el HTML del formulario de conexión.
+
+    La llave de la API se inyecta acá: es la única forma de que la ventana
+    pueda hablar con /api/* sin que quede escrita en un archivo del proyecto.
+    """
+    return render_template("launcher.html", api_token=_API_TOKEN)
 
 
 @app.route("/api/session", methods=["GET"])
 def api_session():
-    """Verifica si existe sesión válida y devuelve sus datos (para precargar
-    el formulario; el servidor es localhost, la sesión ya está en claro al
-    descifrarla en esta máquina)."""
+    """Dice si hay sesión guardada. **NO devuelve el token ni el ID.**
+
+    Antes devolvia el token en claro para "precargar el formulario". Eso
+    ponia la credencial en el DOM de la ventana, en la respuesta HTTP local y
+    en cualquier captura de pantalla. Guardarla bien y despues mostrarla es
+    peor que no guardarla bien: el token queda de SOLO LECTURA para afuera,
+    que es como tiene que ser.
+
+    Se devuelven solo datos que no son credenciales y que el usuario puede ver
+    igual en su chat: si hay sesión, cuántas horas de invitado hay, el @ del bot
+    y un booleano que dice que el ID ya está puesto.
+    """
     data = _load_session()
     if data:
-        resp = jsonify({
-            "has_session": True,
-            "bot_token": data.get("bot_token", ""),
-            "admin_id": data.get("admin_id"),
-            "kick_after_hours": data.get("kick_after_hours", 0),
-            "bot_username": data.get("bot_username", ""),
-        })
+        resp = jsonify(
+            {
+                "has_session": True,
+                "admin_id_set": bool(data.get("admin_id")),
+                "kick_after_hours": data.get("kick_after_hours", 0),
+                "bot_username": data.get("bot_username", ""),
+            }
+        )
     else:
-        resp = jsonify({"has_session": False})
-    # La respuesta lleva datos sensibles en claro: prohibido cachear.
+        resp = jsonify({"has_session": False, "admin_id_set": False})
     resp.headers["Cache-Control"] = "no-store"
     return resp
 
@@ -158,8 +189,17 @@ def api_save():
     admin_id_str = (payload.get("admin_id") or "").strip()
     kick_hours = payload.get("kick_after_hours", 0)
 
+    # Campos vacíos = "dejá lo que ya está". Como el token ya NO vuelve a la
+    # pantalla, editar la configuración (por ejemplo las horas de invitado) no
+    # obliga a volver a escribirlo: si no hay sesión es un error de verdad, pero
+    # si la hay, vacío significa "conserva el guardado".
+    actual = _load_session() or {}
+    if not token:
+        token = actual.get("bot_token", "")
     if not token:
         return jsonify({"ok": False, "error": "Token del bot requerido"}), 400
+    if not admin_id_str:
+        admin_id_str = str(actual.get("admin_id") or "")
     if not admin_id_str.isdigit() or int(admin_id_str) <= 0:
         return jsonify({"ok": False, "error": "ID de admin inválido (debe ser número positivo)"}), 400
 
