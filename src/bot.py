@@ -117,6 +117,9 @@ class YTRemoteBot:
         # (sin internet / Telegram inalcanzable). Al volver, se descarta el
         # backlog acumulado y se avisa al usuario que esos comandos se perdieron.
         self._net_offline: bool = False
+        # Tarea que deja de pedir updates en cuanto se cae la red. Existe para
+        # que el vigilante sea el UNICO lector de la tanda que se acumulo.
+        self._net_stop_task: "asyncio.Task | None" = None
         # cache: callback_data -> SearchResult para los botones de busqueda
         self._search_cache: dict[str, SearchResult] = {}
         # True mientras el listado de resultados de /buscar sigue en pantalla.
@@ -573,19 +576,53 @@ class YTRemoteBot:
         )
         if is_real_network:
             self._net_offline = True
+            self._detener_polling(context)
             logger.warning("Red del bot caida (%s). Se avisara al volver.", type(error).__name__)
         else:
             logger.error("Error del bot: %r", error)
 
-    async def _net_watch_job(self, context: ContextTypes.DEFAULT_TYPE) -> None:
-        """Vigilante de conexion: al detectar que la red volvio, descarta el
-        backlog acumulado (los comandos enviados sin conexion NO se ejecutan)
-        y avisa al usuario que se perdieron, igual que el aviso de arranque.
+    def _detener_polling(self, context) -> None:
+        """Deja de pedirle updates a Telegram en cuanto se cae la red.
 
-        Mientras esta offline no hace nada (solo sondea); los comandos que
-        llegaron quedan en Telegram hasta que se decide: o se ejecutan o se
-        descartan con aviso. Aqui se descartan SIEMPRE: un /stop viejo no debe
-        cortar la musica minutos despues de la caida.
+        ESTE es el arreglo de la carrera que el usuario vio: el bot le decia
+        "tu comando se perdio, mandalo de nuevo" y un segundo despues aparecian
+        los resultados de ese mismo comando. No era que el aviso mintiera por
+        descuido: DOS partes leian la misma tanda. El polling de Telegram se
+        recupera solo y ejecutaba lo que habia llegado durante la caida, y hasta
+        15 segundos despues el vigilante volvia a leer ESA MISMA tanda (todavia
+        sin confirmar, porque confirmar es un_offset- del proximo_) y la
+        declaraba descartada. Uno ejecutaba y el otro tiraba.
+
+        Por eso el polling se detiene al CAER la red, no al volver. Mientras no
+        hay red no se puede traer nada, asi que darle tiempo de sobra para que
+        el bucle se cierre antes de que vuelva la senal elimina la ventana.
+
+        Va como tarea agendada y no como await: detener el polling desde dentro
+        del handler de errores esperaria al propio bucle que nos esta llamando.
+        """
+        if self._net_stop_task is not None:
+            return
+        updater = getattr(context.application, "updater", None)
+        if updater is None:
+            return
+        self._net_stop_task = asyncio.ensure_future(self._cerrar_polling(updater))
+
+    async def _cerrar_polling(self, updater) -> None:
+        """Cierre real del polling. Aislado para poder esperar por el."""
+        try:
+            await updater.stop()
+        except Exception as exc:  # noqa: BLE001 - no debe tumbar nada
+            logger.warning("No se pudo pausar el polling al caer la red: %s", exc)
+
+    async def _net_watch_job(self, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """Vigilante de conexion: unico lector de lo que se acumulo mientras no
+        habia red.
+
+        Mientras esta offline solo sondea. Al volver, ESPERA a que el polling este
+        realmente cerrado, lee la tanda una sola vez y la descarta. Los comandos
+        se descartan SIEMPRE: un /stop viejo no debe cortar la musica minutos
+        despues de la caida. Como ya no hay otro lector, el aviso que sale
+        despues es cierto.
         """
         if not self._net_offline:
             return
@@ -593,27 +630,34 @@ class YTRemoteBot:
             await context.bot.get_me()
         except Exception:  # noqa: BLE001 - todavia sin conexion
             return
-        # La conexion volvio: la bandera se apaga en la pausa del updater para
-        # que un error a mitad del flush no quede como "offline" para siempre.
+        # La conexion volvio. Primero se ESPERA a que el polling este cerrado:
+        # si el vigilante leyera la tanda antes, el polling todavia podria
+        #.dispatcharla y volveriamos a tener dos lectores. Ese era el defecto.
         updater = getattr(context.application, "updater", None)
-        applied = False
-        if updater is not None:
+        cerrado = False
+        if self._net_stop_task is not None:
             try:
-                await updater.stop()
-                applied = True
-            except Exception as exc:  # noqa: BLE001
-                logger.warning("No se pudo pausar el updater: %s", exc)
+                await asyncio.wait_for(asyncio.shield(self._net_stop_task), timeout=20)
+                cerrado = True
+            except Exception as exc:  # noqa: BLE001 - igual se intenta el cierre
+                logger.warning("El polling no confirmo el cierre a tiempo: %s", exc)
+            self._net_stop_task = None
+        elif updater is not None:
+            await self._cerrar_polling(updater)
+            cerrado = True
         try:
             self._net_offline = False
+            # Unica lectura de la tanda: todavia sin confirmar, asi que esto es
+            # exactamente lo que se va a descartar.
             pending = await context.bot.get_updates(timeout=0)
             try:
-                # offset=-1 descarta TODO el backlog sin ejecutarlo.
+                # offset=-1 confirma y descarta TODO el backlog sin ejecutarlo.
                 await context.bot.get_updates(offset=-1, timeout=0)
             except Exception as exc:  # noqa: BLE001
                 logger.warning("No se pudo descartar el backlog: %s", exc)
             await self._notify_connection_lost(context.bot, pending)
         finally:
-            if applied and updater is not None:
+            if cerrado and updater is not None:
                 try:
                     await updater.start_polling(
                         drop_pending_updates=False,
