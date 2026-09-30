@@ -6,6 +6,80 @@ cambio para poder revertirlo por separado.
 
 ---
 
+## Plan 2 - "11 tareas: que no se rompa, y que no se rompa otra vez" (cerrado 30/sep/2026)
+
+Objetivo: cerrar los huecos que dejo el plan 1, uno por commit, y hacer que el
+codigo dejara de ser un archivo de 3522 lineas. Cada tarea es un commit
+atomico y revertible por separado.
+
+### Completadas
+
+| N | Que | Commit |
+|---|-----|--------|
+| 1/11 | La tarjeta reaparece al arrancar (`_secuencia_arranque`) | `cf90a77` |
+| 2/11 | El listado de `/buscar` se lee en el celular (texto, sin miniaturas) | `67a4576` |
+| 3/11 | La busqueda respeta al artista pedido (por canal, no por titulo) | `9bfe2b4` |
+| 4/11 | Una sola lectura de la tanda de red | `903b607` |
+| 5/11 | El aviso de red vive en el PC, al instante ("Sin conexion") | `1efc17d` |
+| 6/11 | El token del bot deja de volver a la pantalla | `ea204a1` |
+| 7/11 | La lista no se borra en silencio y el token sale del log | `ae4f1bc`, `95b1a46` |
+| 8/11 | Un solo almacenamiento con esquema real (`store.py`) | `8b87e9a`, `31e2fe6`, `484c223` |
+| 9/11 | La tarjeta sale de `bot.py` a `card.CardManager` | `a77aa09` |
+| 10/11 | Constantes, funciones puras y motor fuera de `bot.py` | `5453840`, `6b96d3e`, `b0965f5`, `1959ef6` |
+| 11/11 | E2E, push, docs y release v1.1.3 | `46c1840`, `a9aa3a5`, `f2c3737` |
+
+Estado al cerrar: suite **156/156**, roles **14**, almacen **15**, launcher **5**,
+guardian de sincronizacion **2**. `bot.py` bajo de **3522 a 3122 lineas**. Los 24
+commits quedaron pusheados. Release **v1.1.3** publicado
+(`yt-remote-1.1.3-portable.zip`, 92.1 MB, 3487 entradas).
+
+### Las tres cosas que este plan dejo escritas
+
+**1. Un archivo por entidad no es solo mas archivos: es un archivo mas que se
+puede renombrar por debajo de los pies del otro.** La 8/11 quedo a medias
+(`StateStore` paso a `store.Store`, `RoleManager` no) y el `store` renombraba
+`roles.db` a `.migrado` al migrar. A partir de ahi `register_user` abria un
+`roles.db` nuevo y vacio y reventaba con `no such table: roles`; como se llama
+en `_passive_card_reposition` **antes** de reposicionar, el bot moria ahi y la
+tarjeta no bajaba al escribir cualquier mensaje. Lo encontró la E2E del usuario.
+
+**2. El suite no lo veia porque todas las pruebas aislaban la ruta.** Cada
+prueba parcheaba `roles.DB_PATH` a una carpeta temporal, donde el cruce con la
+migracion nunca ocurre. La garantia que faltaba no era "el rol se guarda" sino
+"el rol sobrevive a la migracion del legacy", y se verifico en ambos sentidos.
+
+**3. Una lista escrita a mano siempre se queda vieja. Dos veces, en un dia.**
+`test_build_sync.py` comparaba contra una lista de modulos y le quedaron fuera
+`store.py` y `card.py`; `release_rules.json` tenia la misma clase de lista y el
+ZIP de 1.1.3 salio **roto**, sin `store.py`, que `persistence` importa. Las dos
+se derivan ahora del arbol. El guardian de sincronizacion daba verde en el
+segundo caso porque compara el arbol contra `dist/`, y esa copia si tenia todo:
+**no veia el ZIP**. Por eso la prueba nueva mira la otra mitad.
+
+### Pendientes
+
+Ninguna. Queda una sola cosa, del usuario y no del codigo: **re-probar en la app
+que la tarjeta baja al escribir un mensaje**. El fix esta verificado por prueba
+en ambos sentidos, pero no por la mano del usuario.
+
+### Lo que este plan NO hizo, y por que
+
+- **No se invirtio la dependencia de `card.CardManager` ni de
+  `playback.PlaybackEngine`.** Ambos reciben el bot entero en vez de colaboradores
+  sueltos. Invertirla no compra nada mientras no haya segundo cliente ni prueba
+  sin Telegram, y las 31 delegaciones son el contrato real. Esta escrito en el
+  docstring de los dos modulos: cuando aparezca un panel web o una prueba sin
+  Telegram, se invierte.
+- **No se unificaron `_normalizar` y `clave_texto`.** Parecen el mismo
+  normalizador y NO lo son: el primero se queda con `[a-z0-9]` y una "ñ"
+  desaparece entera; el segundo usa `isalnum()` y la conserva. Unificarlos seria
+  cambiar comportamiento, no un refactor.
+- **No se bumpeo la version durante el trabajo.** Siguió en 1.1.2 hasta la 11/11,
+  cuando la E2E dio el visto bueno para publicar. v1.1.2 ya estaba publicada, asi
+  que por convencion el release salio como **1.1.3**.
+
+---
+
 ## Plan 1 — "Fase 1: que no se rompa lo que funciona" (cerrado 30/sep/2026)
 
 Objetivo: dejar el bot estable y verificable antes de refactorizar. Cada tarea
