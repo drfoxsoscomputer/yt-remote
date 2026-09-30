@@ -52,20 +52,29 @@ La ventana tiene dos pantallas: Estado y Configuración.
 
 Pantalla Estado:
   - botón de encendido grande en el centro: conecta o detiene el bot
-  - debajo, el estado con su color:
-      Conectando / En línea  -> verde
-      Desconectado / Error   -> rojo
-      Sin sesión             -> gris
-  - el avatar de la esquina superior lleva un punto del mismo color
-  - menú en la esquina superior: Configuración y Cerrar sesión
+- debajo, el estado con su color:
+       Conectando / En línea  -> verde
+       Desconectado / Error   -> rojo
+       Sin conexión           -> gris
+       Sin sesión             -> gris
+   - "Sin conexión" NO es "Desconectado": el proceso sigue vivo y se
+     recupera solo cuando vuelve internet. Los comandos que mande durante
+     la caída se descartan.
+   - el avatar de la esquina superior lleva un punto del mismo color
+   - menú en la esquina superior: Configuración y Cerrar sesión
 
 Pantalla Configuración:
-  - Token del bot  -> el código que le dio @BotFather al crear el bot
-  - ID de admin    -> su ID numérico de Telegram (primer admin)
-  - Expulsar tras horas -> horas de tolerancia para invitados
-                          (0 = desactivado; igual que kick_after_hours)
-  - botón Guardar (la primera vez dice "Conectar"): guarda la
-    configuración en session.enc y arranca el bot
+   - Token del bot  -> el código que le dio @BotFather al crear el bot
+   - ID de admin    -> su ID numérico de Telegram (primer admin)
+   - Expulsar tras horas -> horas de tolerancia para invitados
+                           (0 = desactivado; igual que kick_after_hours)
+   - botón Guardar (la primera vez dice "Conectar"): guarda la
+     configuración en session.enc y arranca el bot
+
+   Los campos del token y del ID salen VACÍOS aunque estén guardados:
+   el token ya no se vuelve a mostrar en pantalla. Si abre Configuración
+   solo para cambiar los tiempos de expulsión, deje esos dos campos
+   vacíos: guardar conserva lo que ya estaba.
 
 Si cierra la ventana con la X, el programa se minimiza al lado del reloj
  sin preguntar (el bot sigue corriendo). Para salir de verdad, haga clic
@@ -100,6 +109,22 @@ misma página de la lista.
 
 Los videos EN VIVO se reproducen con sonido normal y las duraciones
 desconocidas se ven como --:--.
+
+CÓMO SE VE EL LISTADO DE RESULTADOS
+----------------------------------
+El listado es UN SOLO MENSAJE DE TEXTO con el encabezado "Página N" y una
+línea por canción (nombre y duración). Abajo tiene los botones para la
+página anterior, cancelar y la página siguiente.
+
+Antes el bot mandaba una foto por resultado, que en el celular se veía
+diminuta y era difícil de elegir.
+
+Si usted nombra un artista, el listado deja solo las canciones de ESE
+artista (se decide por el canal de quien la subió, no por el título, porque
+una cover pone el nombre del original en el título). Si no entra ninguna, el
+bot lo avisa y muestra todas en vez de esconderlas: entre una versión
+original y una cover el texto es idéntico, así que no se puede distinguirlas
+sin mentir.
 
 
 LA TARJETA DE REPRODUCCIÓN
@@ -225,3 +250,30 @@ PROBLEMAS COMUNES
   del grupo.
 - Si un video no se puede reproducir, puede que esté restringido o
   no esté disponible en su país.
+
+
+DÓNDE QUEDAN TUS DATOS
+----------------------
+En la carpeta data/ que está junto a ytremote.exe:
+
+  session.enc   — su TOKEN y su ID, cifrados con el sistema (DPAPI)
+  settings.enc  — preferencias
+  ytremote.db   — lista de canciones, historial, roles y ajustes (TODO junto)
+
+  bot.log       — el registro; el token NO se escribe ahí
+
+Nada de eso se sube a GitHub.
+
+La primera vez que arranca una versión nueva, el bot trae los datos de las
+versiones anteriores y deja los archivos viejos renombrados con .migrado
+(NO los borra). Si algo no cuadra y quiere volver atrás, alcanza con
+renombrar otra vez.
+
+Si la base no se puede entender (está dañada, o es de una versión más nueva
+que su programa), el bot NO escribe nada encima: deja una copia al lado y lo
+avisa en el log. Es preferible no guardar antes que perder la lista y el
+historial.
+
+El token no aparece en la pantalla: al abrir Configuración los campos salen
+vacíos aunque estén guardados. Si quiere cambiarlo, escriba uno nuevo; si
+deja el campo vacío y guarda, se conserva el que ya tenía.

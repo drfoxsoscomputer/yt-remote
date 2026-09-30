@@ -7,11 +7,20 @@
 Bot de Telegram para controlar la reproducción de videos de YouTube en su PC.
 Búsqueda por chat, tarjeta de control con botones, radio automática por artista.
 
-**Versión actual:** v1.1.2 (launcher de dos pantallas con estado pintado por
-color y conexión portable, badge del avatar sobre el borde del círculo,
-tarjeta de control con botones, calidad elegible,
-playlist con persistencia, directos sincronizados y expulsión automática de
-invitados).
+**Versión actual:** v1.1.3 (una sola base de datos para todo, resultados de
+búsqueda legibles en el celular, aviso de "Sin conexión" en la ventana, y el
+token del bot ya no se vuelve a mostrar en la pantalla).
+
+Lo que cambia respecto de v1.1.2:
+
+| Cambio | Qué es |
+|--------|--------|
+| Resultados en texto | El listado de `/buscar` es un solo mensaje de texto: "Página 1", una fila por canción con su nombre y su duración, y los botones de paginar. Antes mandaba una foto por resultado, que en el celular se veía diminuta |
+| Filtro de artista | Si usted nombra un artista, el listado deja solo canciones **de ese artista** (se decide por el canal, no por el título, porque una cover pone el nombre del original en el título). Si no entra ninguna, el bot lo dice y muestra todas en vez de esconderlas |
+| Aviso de "Sin conexión" | Cuando se cae internet, la **ventana** pone "Sin conexión" al instante. Antes el bot no decía nada hasta mucho después, y los comandos enviados durante la caída se perdían en silencio |
+| El token no se muestra | Al abrir **Configuración** los campos salen vacíos, con la nota de que están guardados. Si deja los campos vacíos y guarda, se conserva lo que ya tenía |
+| Una sola base | Lista, historial, roles y ajustes viven todos en `data/ytremote.db`. Si algo no se puede entender, el bot **no escribe encima** y avisa: sus datos quedan intactos |
+| La lista no se borra sola | Antes, si el estado estaba dañado, el primer guardado lo sobrescribía y la lista y el historial desaparecían sin avisar. Ahora deja una copia y se niega a escribir |
 
 ## Descarga e instalación
 
@@ -43,17 +52,25 @@ centro conecta o detiene el bot, y debajo se muestra el estado con un color:
 |--------|-------|
 | Conectando / En línea | Verde |
 | Desconectado / Error | Rojo |
+| Sin conexión | Gris |
 | Sin sesión | Gris |
+
+**Sin conexión** es distinto de **Desconectado**: el proceso sigue vivo y se
+recupera solo cuando vuelve internet, sin que usted tenga que tocar nada. Los
+comandos que lleguen durante la caída se descartan (el bot no puede responder
+mientras no hay red).
 
 El avatar se muestra en la esquina superior con un punto del mismo color de
 estado. El menú de la esquina superior abre las opciones **Configuración** y
 **Cerrar sesión**.
 
-**Configuración** — el formulario con los datos iniciales:
+**Configuración** — el formulario con los datos iniciales. Los campos salen
+**vacíos**: el token y el ID no se vuelven a mostrar en pantalla, aunque estén
+guardados. Guardar con los campos vacíos **conserva** lo que ya estaba.
 
 | Campo | Qué es |
 |-------|--------|
-| Token del bot | El código que le dio `@BotFather` al crear el bot |
+| Token del bot | El código que le dio `@BotFather` al crear el bot (vacío = se conserva el guardado) |
 | ID de admin | Su ID numérico de Telegram (primer usuario con rol admin) |
 | Expulsar tras horas | Horas de tolerancia para invitados: `0` desactiva la expulsión |
 
@@ -68,6 +85,14 @@ configuración, detiene el bot y vuelve a la pantalla de Configuración.
 
 La configuración queda en `session.enc`, dentro de la carpeta `data/` que
 está junto al ejecutable, y **no se sube a GitHub**.
+
+La lista de canciones, el historial, los roles y los ajustes viven todos en un
+solo archivo: `data/ytremote.db`. La primera vez que arranca, el bot trae los
+datos de las versiones anteriores y deja los archivos viejos renombrados
+`.migrado` (no los borra). Si esa base no se puede entender —porque es de una
+versión más nueva que el programa, o porque está dañada— el bot **no escribe
+nada encima**, deja una copia al lado y lo avisa por el log: es preferible no
+guardar antes que perder lo que tenía.
 
 Solo puede ejecutarse una instancia a la vez: si intenta abrir otra, aparece
 un aviso. La ventana usa el runtime *Microsoft Edge WebView2* que ya viene
@@ -131,10 +156,18 @@ un comando o un mensaje, la tarjeta se desvanece y reaparece abajo, al final
 de la conversación.
 
 Cuando `/buscar` muestra los resultados, la tarjeta **no se mueve**: queda arriba
-y el listado de 5 canciones aparece debajo. Si no le gusta ninguna, toque
-**❌ Cancelar** al final de la lista y esta se desvanecerá, quedando de nuevo la
-tarjeta a la vista. Al elegir una canción, la lista se borra y se muestra la
-tarjeta nueva con su miniatura.
+y el listado aparece debajo. El listado es **un solo mensaje de texto** con el
+encabezado "Página N" y una línea por canción (nombre y duración), porque una
+foto por resultado se veía diminuta en el celular. Abajo están los botones para
+ir a la página anterior, cancelar y ver la siguiente. Si no le gusta ninguna,
+toque **❌ Cancelar** y el listado se desvanece, quedando de nuevo la tarjeta a
+la vista. Al elegir una canción, la lista se borra y la tarjeta muestra la
+nueva.
+
+Si al filtrar por artista no queda ninguna canción de ese artista, el bot **no
+esconde nada**: lo avisa y muestra las que encontró. Entre una versión original
+y una cover el texto es idéntico, así que no hay forma honesta de distinguirlas
+y prometer "lo más parecido" sería mentir.
 
 ## Calidad de video
 
