@@ -302,6 +302,57 @@ class YTRemoteBot:
             self._max_height = None
             set_max_height(1080)
 
+    async def _secuencia_arranque(self, bot) -> None:
+        """Lo que hace el bot en el instante de arrancar (post_init).
+
+        Vive como metodo con nombre, y no como un closure suelto dentro de
+        build(), por una razon concreta: al ser anonimo NO SE PODIA PROBAR. Un
+        bug de arranque (la tarjeta que se borraba y nunca volvia) convivio con
+        la suite entera en verde porque las pruebas arman el estado a mano en
+        vez de arrancar el bot. Con el arranque en un metodo, se puede arrancar
+        de verdad en una prueba.
+
+        Orden a proposito: primero la tarjeta, despues el backlog (que se lee
+        antes de que el polling lo consuma), y al final lo que puede fallar sin
+        tumbar el arranque.
+        """
+        # La tarjeta persistida de una sesion anterior se borra al arrancar: era
+        # la causa de las tarjetas huerfanas apiladas (cada reinicio dejaba una
+        # foto vieja muerta; el bot nuevo la editaba sin saber si era foto o
+        # texto).
+        #
+        # El chat se toma ANTES de borrar: _remove_card() pone _card_chat_id en
+        # None y la condicion siguiente jamas podia ser cierta, asi que la
+        # tarjeta se borraba y NO volvia a existir. Sin tarjeta no hay botones y
+        # el usuario se queda sin forma de reanudar lo que estaba sonando.
+        chat_de_la_card = self._card_chat_id or self.config.allowed_chat_id
+        if self._card_message_id is not None:
+            await self._remove_card()
+            self._persist_dirty()
+        # Si venia una cancion restaurada se crea una tarjeta FRESCA al final
+        # del chat con el aviso de "retoma". No se re-edita la vieja: esta
+        # borrada. _track_status_text() consume el flag _restored, asi que el
+        # aviso de reanudacion aparece UNA sola vez y no se repite despues.
+        if self._restored and chat_de_la_card is not None:
+            await self._send_card(chat_de_la_card)
+        # Aviso de comandos perdidos: se lee el backlog ANTES de que el
+        # polling lo consuma (post_init corre antes del start).
+        await self._notify_pending_dropped(bot)
+        # Reglas del grupo fijadas al arranque (si el kick esta activado):
+        # el mensaje de bienvenida apunta a ellas como referencia ↑.
+        await self._ensure_pinned_rules(bot)
+        # Menú de comandos: al escribir "/" Telegram muestra esta lista.
+        try:
+            await bot.set_my_commands(
+                [
+                    BotCommand("start", "Info del bot"),
+                    BotCommand("buscar", "Buscar artista o link para reproducir (dj+)"),
+                    BotCommand("solicitar", "Pedir acceso de dj al admin"),
+                ]
+            )
+        except Exception as exc:  # noqa: BLE001 - no debe tumbar el arranque
+            logger.warning("No se pudo registrar los comandos: %s", exc)
+
     def _push_to_nav_back(self) -> None:
         """Guarda el item actual en la pila de navegación hacia atrás.
 
@@ -427,37 +478,7 @@ class YTRemoteBot:
                 "BOT ARRANCADO (pid=%s)",
                 os.getpid(),
             )
-            # La tarjeta persistida de una sesion anterior se borra al
-            # arrancar: era la causa de las tarjetas huerfanas apiladas (cada
-            # reinicio dejaba una foto vieja muerta; el bot nuevo la editaba
-            # sin saber si era foto o texto). La proxima _show_card/_send_card
-            # crea una fresca al final del chat.
-            if self._card_message_id is not None:
-                await self._remove_card()
-                self._persist_dirty()
-            # Si se restauro estado previo con una cancion y hay tarjeta
-            # persistida, se re-edita la tarjeta con el texto "retoma"
-            # (la tarjeta queda "viva" al volver al chat).
-            if self._restored and self._card_message_id is not None:
-                await self._render_card(self._track_status_text())
-            # Aviso de comandos perdidos: se lee el backlog ANTES de que el
-            # polling lo consuma (post_init corre antes del start).
-            await self._notify_pending_dropped(_app.bot)
-            # Reglas del grupo fijadas al arranque (si el kick esta activado):
-            # el mensaje de bienvenida apunta a ellas como referencia ↑.
-            await self._ensure_pinned_rules(_app.bot)
-            # Menú de comandos: al escribir "/" Telegram muestra esta lista.
-            bot = _app.bot
-            try:
-                await bot.set_my_commands(
-                    [
-                        BotCommand("start", "Info del bot"),
-                        BotCommand("buscar", "Buscar artista o link para reproducir (dj+)"),
-                        BotCommand("solicitar", "Pedir acceso de dj al admin"),
-                    ]
-                )
-            except Exception as exc:  # noqa: BLE001 - no debe tumbar el arranque
-                logger.warning("No se pudo registrar los comandos: %s", exc)
+            await self._secuencia_arranque(_app.bot)
 
         app.post_init = post_init
 
