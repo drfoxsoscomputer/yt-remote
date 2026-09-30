@@ -124,33 +124,51 @@ async def test_garantia_tarjeta_al_final_tras_un_comando():
 
 
 async def test_garantia_lista_sobrevive_si_el_pick_no_reproduce():
-    """Elegis un resultado de /buscar pero no arranca: la lista de antes, el
-    historial de /prev y el artista de la radio quedan como estaban, y la
-    tarjeta no se borra."""
+    """Elegis un resultado de /buscar pero no arranca: la lista de antes y el
+    artista de la radio quedan como estaban, la tarjeta no se borra, la cancion
+    que sonaba sigue sonando, y /prev todavia te devuelve la anterior."""
     b = make_bot()
     b._card_chat_id = 44
     b._card_message_id = 7
-    b.queue.set_playlist([QueueItem(url="v1", title="Antes 1"), QueueItem(url="v2", title="Antes 2")])
-    b._nav_back.append(QueueItem(url="anterior", title="Anterior"))
+    b.queue.set_playlist(
+        [
+            QueueItem(url="v1", title="Antes 1"),
+            QueueItem(url="v2", title="Antes 2"),
+            QueueItem(url="v3", title="Antes 3"),
+        ]
+    )
+    b.queue.jump_to(2)
     b._radio_artist = "GP Band"
+    b._search_artist = "Otro Artista"
     b._search_cache["pick:0"] = SearchResult(
         url="nuevo", title="Nuevo", duration="3:00", thumbnail=""
     )
 
+    pedidos: list[str] = []
+
     async def play_falla(update, item, **kwargs):
+        pedidos.append(item.url)
         return False
 
+    async def no_se_resuelve(url):
+        return None
+
     b._play_item = play_falla
+    b._stream_for = no_se_resuelve
     await b.on_callback(FakeUpdate("pick:0", message_id=500, chat_id=44), SimpleNamespace(args=[]))
 
     assert b._card_message_id == 7, "la tarjeta no se borra si no se reprodujo"
-    assert [i.url for i in b.queue.all()] == ["v1", "v2"], (
+    assert [i.url for i in b.queue.all()] == ["v1", "v2", "v3"], (
         f"se perdio la lista anterior: {[i.url for i in b.queue.all()]}"
     )
     assert b._radio_artist == "GP Band", f"se perdio el artista de la radio: {b._radio_artist!r}"
-    assert [i.url for i in b._nav_back] == ["anterior"], (
-        f"se perdio el historial de /prev: {[i.url for i in b._nav_back]}"
+    assert b.queue.current is not None and b.queue.current.url == "v2", (
+        "dejo de sonar la cancion que estaba sonando"
     )
+
+    pedidos.clear()
+    await b.cmd_prev(FakeMessageUpdate("/prev"), SimpleNamespace(args=[]))
+    assert pedidos == ["v1"], f"/prev no devolvio la cancion anterior: {pedidos}"
 
 
 async def test_garantia_lista_sobrevive_si_una_playlist_no_reproduce():
@@ -194,6 +212,19 @@ async def test_garantia_lista_sobrevive_si_una_playlist_no_reproduce():
         f"se perdio la lista anterior: {[i.url for i in b.queue.all()]}"
     )
     assert b._radio_artist == "GP Band", f"se perdio el artista de la radio: {b._radio_artist!r}"
+
+
+async def test_garantia_la_radio_sigue_al_artista_de_lo_que_suena():
+    """Buscaste X, luego Y, y con /prev volviste a una de X: la siguiente
+    canción tiene que ser de X. El ancla de la sesión quedó en Y, pero manda
+    el artista del tema que está sonando realmente."""
+    b = make_bot()
+    b._radio_artist = "Y"
+    b.queue.set_current(
+        QueueItem(url="x1", title="X - Cancion A", channel="CanalX", artist="X")
+    )
+    semilla = b._artist_seed(b.queue.current)
+    assert semilla == "X", f"la radio no siguio al tema real: {semilla!r}"
 
 
 def run():

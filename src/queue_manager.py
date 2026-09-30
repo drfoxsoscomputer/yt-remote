@@ -174,6 +174,24 @@ class QueueManager:
             return self._current
         return None
 
+    def snapshot(self) -> dict:
+        """Copia del estado de la cola, para deshacer un arranque fallido.
+
+        La usa el bot cuando reemplaza la lista por una nueva: si el primer
+        tema no arranca, la cola anterior vuelve exacta con restore().
+        """
+        return {
+            "items": list(self._items),
+            "cursor": self._cursor,
+            "current": self._current,
+        }
+
+    def restore(self, snap: dict) -> None:
+        """Vuelve al estado guardado por snapshot()."""
+        self._items = list(snap["items"])
+        self._cursor = snap["cursor"]
+        self._current = snap["current"]
+
     def all(self) -> list[QueueItem]:
         """La playlist completa (siempre todos los items, sin consumir)."""
         return list(self._items)
