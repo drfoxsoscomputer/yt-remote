@@ -130,7 +130,7 @@ def test_el_token_de_telegram_no_se_queda_en_el_log():
 
     import bot_process
 
-    id_falso = "".join(str(n) for n in range(1234567890, 1234567900))
+    id_falso = "1234567890"
     cuerpo_falso = "".join(c * 2 for c in "ABCDEFGHIJ")
     token_falso = f"{id_falso}:{cuerpo_falso}"
     linea = (
