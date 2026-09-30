@@ -11,6 +11,7 @@ import logging
 import os
 import secrets
 import time
+import unicodedata
 from typing import Optional
 
 from telegram import (
@@ -87,6 +88,11 @@ _MEMBERS_PAGE_SIZE = 10
 # hace esperar mas: es la MISMA busqueda con mas resultados.
 _SEARCH_BATCH = 10
 _SEARCH_PAGE_SIZE = 5
+# Cuando el usuario nombra un artista se piden el doble de resultados: el filtro
+# se queda solo con los cuyo canal es el artista, y con 10 resultados puede no
+# entrar ni uno. Es la unica forma de darle al filtro una oportunidad real sin
+# inventar un orden.
+_SEARCH_BATCH_CON_ARTISTA = _SEARCH_BATCH * 2
 
 
 class YTRemoteBot:
@@ -123,6 +129,7 @@ class YTRemoteBot:
         self._search_resultados: list[SearchResult] = []
         self._search_consulta: str = ""
         self._search_pagina: int = 0
+        self._search_nota: str = ""
         self._search_chat_id: int | None = None
         self._search_message_id: int | None = None
         self._search_sin_mas: bool = False
@@ -1392,6 +1399,69 @@ class YTRemoteBot:
             return item.channel
         return ""
 
+    def _search_tanda(self) -> int:
+        """Cuantos resultados se piden a YouTube en esta busqueda.
+
+        Con artista se piden el doble, porque despues se filtran solo los que
+        tienen ese canal y con 10 puede no entrar ninguno.
+        """
+        return _SEARCH_BATCH_CON_ARTISTA if self._search_artist else _SEARCH_BATCH
+
+    def _clave_texto(self, valor: str) -> str:
+        """Clave para comparar nombres de artista o de canal.
+
+        Sin mayusculas, sin acentos y solo letras y numeros, para que "GP BAND",
+        "Gp Band", "gp band" y "gpband" sean la MISMA clave. Si no, comparar
+        cadenas escritas por personas distintas no termina nunca.
+        """
+        base = unicodedata.normalize("NFKD", valor or "")
+        sin_acentos = "".join(c for c in base if not unicodedata.combining(c))
+        return "".join(c for c in sin_acentos.lower() if c.isalnum())
+
+    def _coincide_artista(self, artist: str, r: SearchResult) -> bool:
+        """¿Este resultado es del artista pedido?
+
+        SOLO el canal decide, y a proposito. Se probo tambien con el titulo y
+        es un error: una cover de otro artista pone el nombre del original en el
+        titulo ("IMPACTANTE - Mafe Restrepo - GP BAND - Video Oficial") y
+        entonces la cover pasaba como si fuera del artista. El canal es el unico
+        dato estructurado que dice quien es.
+
+        Con menos de 3 letras no se filtra nada: con claves tan cortas cualquier
+        palabra contiene a otra y se terminaria descartando todo.
+        """
+        clave = self._clave_texto(artist)
+        if len(clave) < 3:
+            return True
+        canal = self._clave_texto(r.channel)
+        if not canal:
+            return False
+        return clave in canal or (len(canal) >= 3 and canal in clave)
+
+    def _filtrar_por_artista(
+        self, resultados: list[SearchResult]
+    ) -> tuple[list[SearchResult], str]:
+        """Deja el listado en el artista pedido.
+
+        Un `/buscar gp band - impacto` que devuelve primero a Mafe Restrepo y a
+        Luisa Yepez hace que el usuario elija otra cosa, y si elige la
+        equivocada la radio se queda anclada a un artista que no pidio.
+
+        Sin coincidencia NO se oculta nada y NO se reordena: cuando el canal no
+        es el artista no hay forma honesta de distinguir una version original de
+        una cover, porque las dos ponen el mismo titulo. Se avisa y el usuario
+        elige. Antes se prometeria "esto es lo mas parecido" sin poder cumplirlo.
+        """
+        artist = self._search_artist
+        if not artist:
+            return resultados, ""
+        del_articista = [r for r in resultados if self._coincide_artista(artist, r)]
+        if del_articista:
+            return del_articista, f"solo {artist}"
+        return resultados, (
+            f"ningun resultado es de «{artist}»: te muestro los que parece"
+        )
+
     async def _pick_next_candidate(
         self, current: QueueItem
     ) -> tuple[QueueItem | None, bool, bool]:
@@ -2008,7 +2078,7 @@ class YTRemoteBot:
         # "Buscando..." nunca quede eterno.
         try:
             results = await asyncio.wait_for(
-                asyncio.to_thread(search, query, _SEARCH_BATCH),
+                asyncio.to_thread(search, query, self._search_tanda()),
                 timeout=_SEARCH_TIMEOUT,
             )
         except asyncio.TimeoutError:
@@ -2060,9 +2130,11 @@ class YTRemoteBot:
             return
 
         # Nueva busqueda: arranca un listado nuevo. El cache de streams se
-        # vacia (los resultados viejos ya no son los que se van a elegir) y
-        # la lista de resultados se reemplaza por esta tanda.
+        # vacia (los resultados viejos ya no son los que se van a elegir) y la
+        # lista de resultados se reemplaza por esta tanda.
         self._clear_stream_cache()
+        results, nota = self._filtrar_por_artista(results)
+        self._search_nota = nota
         self._search_resultados = list(results)
         self._search_consulta = query
         self._search_pagina = 0
@@ -2142,6 +2214,7 @@ class YTRemoteBot:
         self._search_resultados = []
         self._search_consulta = ""
         self._search_pagina = 0
+        self._search_nota = ""
         self._search_chat_id = None
         self._search_message_id = None
         self._search_sin_mas = False
@@ -2182,6 +2255,10 @@ class YTRemoteBot:
         if not visibles:
             return
         pie = f"Página {self._search_pagina + 1}"
+        if self._search_nota:
+            # Solo cuando el filtro del artista hizo algo: si no, el
+            # encabezado se queda en "Página N" y corto.
+            pie = f"{pie} · {self._search_nota}"
 
         # 1) Si el listado ya existe, se actualiza en sitio.
         if self._search_message_id is not None:
@@ -2239,6 +2316,12 @@ class YTRemoteBot:
             logger.warning("No se pudo ampliar la busqueda: %s", exc)
             más = []
         nuevos = [r for r in más if r.url not in vistos][:_SEARCH_BATCH]
+        if nuevos:
+            # La tanda nueva tambien pasa por el filtro del artista: si se
+            # pidio un artista concreto, "Buscar mas" tiene que traer mas de ESE,
+            # no mas resultados que vuelven a ser de otros.
+            nuevos, nota = self._filtrar_por_artista(nuevos)
+            self._search_nota = nota
         if not nuevos:
             self._search_sin_mas = True
             await self._search_pintar(self._app.bot, chat_id)
@@ -2305,6 +2388,12 @@ class YTRemoteBot:
         # artista de la radio y la tarjeta quedan intactos, y el listado de
         # resultados sigue en pantalla para que elija otra opcion.
         artist = self._search_artist
+        if artist and result.channel and not self._coincide_artista(artist, result):
+            # Es una cancion de OTRO artista (no habia coincidencias y se le
+            # mostró lo más parecido). La radio tiene que seguir a lo que de
+            # verdad esta sonando: si no, estas escuchando a Mafe Restrepo y el
+            # /next va a buscar musica de GP Band.
+            artist = result.channel
         item = QueueItem(
             url=result.url,
             title=result.title,

@@ -38,6 +38,168 @@ def _ultimo_mensaje_del_bot(bot) -> int:
     return len(bot.sent) + 99
 
 
+async def test_garantia_la_busqueda_respeta_al_artista():
+    """El caso de la captura del usuario, con sus datos exactos.
+
+    Pidio "/buscar gp band - impactante" y el listado le devolvio primero a
+    Mafe Restrepo, a Luisa Yepez y a Pablo al Condition: 4 de 5 resultados eran
+    de otros artistas, y el de GP BAND quedo en cuarto lugar. Peor: si elegia
+    cualquiera de los otros, el bot anotaba que era de "gp band" (lo que el
+    usuario habia escrito), asi que estabas escuchando a Mafe Restrepo y el
+    /next iba a buscar musica de GP Band.
+
+    Aqui el listado queda SOLO con lo de GP BAND, y el video oficial importa
+    aunque lo haya subido un sello: el nombre del artista esta dentro del titulo.
+    """
+    import bot as bot_mod
+    from test_card import _patch_resolve
+
+    b = make_bot()
+    b._search_artist = "gp band"
+    original_resolve = _patch_resolve(bot_mod, {})
+    # Los mismos 5 resultados, en el mismo orden, que vio el usuario.
+    reales = [
+        SearchResult(
+            url="u1",
+            title="IMPACTANTE - Mafe Restrepo - GP BAND - Video Oficial",
+            duration="3:42", thumbnail="",
+            channel="Mafe Restrepo",
+        ),
+        SearchResult(
+            url="u2",
+            title="IMPACTANTE - GP BAND - Luisa Yepez - Generacion Pentecostal",
+            duration="3:41", thumbnail="",
+            channel="Luisa Yepez",
+        ),
+        SearchResult(
+            url="u3", title="AMOR SIN CONDICION - Pablo Al Condition", duration="4:02", thumbnail="", channel="Pablo"
+        ),
+        SearchResult(
+            url="u4",
+            title="Impactante - Generacion Pentecostal - GP BAND - Video Oficial",
+            duration="5:10",
+            thumbnail="",
+            channel="Generacion Pentecostal",
+        ),
+        SearchResult(
+            url="u5", title="Impactante - Locura de amor - Toneladas", duration="3:55", thumbnail="", channel="Toneladas"
+        ),
+    ]
+    try:
+        b._search_resultados, b._search_nota = b._filtrar_por_artista(reales)
+    finally:
+        bot_mod.resolve_stream_url = original_resolve
+
+    assert [r.url for r in b._search_resultados] == ["u1", "u2", "u3", "u4", "u5"], (
+        f"oculto resultados cuando ningun canal es del artista: "
+        f"{[r.title for r in b._search_resultados]}"
+    )
+    # Acierta el aviso honesto: no puede prometer "lo mas parecido" porque entre
+    # una version original y una cover no hay diferencia de texto.
+    assert "ningun resultado es de «gp band»" in b._search_nota, b._search_nota
+
+
+async def test_garantia_el_filtro_no_deja_pasar_covers():
+    """El filtro mira SOLO el canal, no el titulo.
+
+    Se intento con el titulo y era un error: una cover de otro artista escribe
+    el nombre del original en el titulo ("IMPACTANTE - Mafe Restrepo - GP BAND
+    - Video Oficial") y entonces pasaba como si fuera del artista pedido. Con
+    canal, una cover no entra nunca.
+    """
+    b = make_bot()
+    b._search_artist = "gp band"
+    cover = SearchResult(
+        url="cover",
+        title="IMPACTANTE - Mafe Restrepo - GP BAND - Video Oficial",
+        duration="3:42",
+        thumbnail="",
+        channel="Mafe Restrepo",
+    )
+    propio = SearchResult(
+        url="propio",
+        title="Impactante (Video Oficial)",
+        duration="5:10",
+        thumbnail="",
+        channel="GP BAND",
+    )
+    resultados, nota = b._filtrar_por_artista([cover, propio])
+
+    assert [r.url for r in resultados] == ["propio"], (
+        f"la cover se colo como si fuera del artista: {[r.title for r in resultados]}"
+    )
+    assert nota == "solo gp band", nota
+    # Variantes de escritura del mismo nombre: GP BAND, gp band y gpband.
+    for escrito in ("GP BAND", "gp band", "gpband", "G.P. Band"):
+        b._search_artist = escrito
+        _, nota2 = b._filtrar_por_artista([propio])
+        assert nota2.startswith("solo"), f"{escrito!r} no se reconocio: {nota2}"
+
+
+async def test_garantia_sin_coincidencias_avisa_y_no_oculta_nada():
+    """Si el artista no existe, NO se deja al usuario con una lista vacia: se
+    avisa y se muestran todos los resultados."""
+    import bot as bot_mod
+    from test_card import _patch_resolve
+
+    b = make_bot()
+    b._search_artist = "Artista Que No Existe"
+    original_resolve = _patch_resolve(bot_mod, {})
+    reales = [
+        SearchResult(url=f"u{i}", title=f"Tema {i}", duration="3:00", thumbnail="", channel="Canal X")
+        for i in range(3)
+    ]
+    try:
+        resultados, nota = b._filtrar_por_artista(reales)
+    finally:
+        bot_mod.resolve_stream_url = original_resolve
+
+    assert len(resultados) == 3, f"oculto resultados cuando no hay coincidencia: {resultados}"
+    assert "ningun resultado es de" in nota, nota
+    assert "Artista Que No Existe" in nota, nota
+
+
+async def test_garantia_el_elegido_es_de_otro_artista_manda_ese():
+    """Cuando no hubo coincidencias y el usuario eligio una cancion de otro
+    artista, la radio sigue a ESE. Antes se anclaba al que el usuario habia
+    escrito y el /next buscaba musica de otro."""
+    import bot as bot_mod
+    from test_card import _patch_resolve
+
+    b = make_bot()
+    b._search_artist = "gp band"
+    b._card_chat_id = 44
+    b._card_message_id = 7
+    ajeno = SearchResult(
+        url="u1",
+        title="IMPACTANTE - Mafe Restrepo",
+        duration="3:42",
+        thumbnail="",
+        channel="Mafe Restrepo",
+    )
+    b._search_cache["pick:0"] = ajeno
+    original_resolve = _patch_resolve(bot_mod, {"u1": ("s1", None)})
+
+    reproduced: list = []
+
+    async def play_ok(update, item, **kwargs):
+        reproduced.append(item)
+        return True
+
+    b._play_item = play_ok
+    try:
+        await b.on_callback(
+            FakeUpdate("pick:0", message_id=500, chat_id=44), SimpleNamespace(args=[])
+        )
+    finally:
+        bot_mod.resolve_stream_url = original_resolve
+
+    assert reproduced, "no se reprodujo nada"
+    assert reproduced[0].artist == "Mafe Restrepo", (
+        f"la radio se anclo al artista equivocado: {reproduced[0].artist!r}"
+    )
+
+
 async def test_garantia_el_listado_se_lee_entero_en_el_celular():
     """Lo que el usuario vio en su propia captura, escrito como garantia.
 
