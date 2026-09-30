@@ -414,6 +414,82 @@ def test_los_roles_sobreviven_a_reiniciar_el_bot():
         roles_mod.ROLES_PATH = original_json
 
 
+def test_los_roles_sobreviven_a_la_migracion_del_legacy():
+    """El fallo que solo se ve con un arranque de verdad.
+
+    El `store` renombra el `roles.db` viejo a `.migrado` al migrar. Si
+    `RoleManager` sigue con su propio archivo, a partir de ese momento abre un
+    `roles.db` NUEVO y vacio en cada llamada y el primer SELECT revienta con
+    `no such table: roles`.
+
+    Como `register_user` se llama en el handler que re-coloca la tarjeta, el
+    bot moria AHI: la tarjeta dejaba de re-renderizarse y los roles dejaban de
+    funcionar. En las pruebas anteriores no se veia porque cada una parcheaba
+    `roles.DB_PATH` a una carpeta temporal: nunca se daba el cruce de la
+    migracion.
+
+    Aqui se reproduce el cruce de verdad: base con legacy -> Store migra y
+    renombra -> RoleManager sigue funcionando y NO crea un segundo archivo.
+    """
+    import json
+    import sqlite3
+    import tempfile
+
+    import roles as roles_mod
+    import store as store_mod
+
+    carpeta = Path(tempfile.mkdtemp())
+    # El roles.db legacy, con el admin real del usuario.
+    legado = carpeta / "roles.db"
+    conn = sqlite3.connect(str(legado))
+    conn.execute("CREATE TABLE roles (key TEXT PRIMARY KEY, value TEXT)")
+    conn.execute("CREATE TABLE users (key TEXT PRIMARY KEY, value TEXT)")
+    conn.execute("INSERT INTO roles VALUES ('7', 'admin')")
+    conn.execute(
+        "INSERT INTO users VALUES ('7', ?)", (json.dumps({"name": "Dueño", "joined_at": 1}),)
+    )
+    conn.commit()
+    conn.close()
+    (carpeta / "state.json").write_text(
+        json.dumps({"version": 1, "playlist": [], "history": []}), encoding="utf-8"
+    )
+
+    base = carpeta / "ytremote.db"
+    db_original = roles_mod.DB_PATH
+    roles_path_original = roles_mod.ROLES_PATH
+    try:
+        roles_mod.DB_PATH = base
+        roles_mod.ROLES_PATH = carpeta / "roles.json"
+
+        # 1) El store migra: lee el legacy y lo renombra. Esto es lo que hacia
+        #    el bot al arrancar.
+        store = store_mod.Store(base)
+        assert (carpeta / "roles.db.migrado").is_file(), "el legacy no se renombro"
+
+        # 2) El bot arma su RoleManager DESPUES de esa migracion.
+        rm = roles_mod.RoleManager()
+        assert rm.get_role(7) == "admin", rm.get_role(7)
+        assert rm.get_name(7) == "Dueño", rm.get_name(7)
+
+        # 3) Y lo que reventaba en produccion: registrar un usuario cualquiera.
+        assert rm.register_user(99, "Alguien") is True
+        assert rm.get_name(99) == "Alguien"
+
+        # 4) El fallo de verdad: NO puede haber un segundo archivo de roles.
+        assert not (carpeta / "roles.db").exists(), (
+            "RoleManager volvio a crear su propio roles.db: hay dos bases y la "
+            "migracion las desincroniza"
+        )
+        assert len(list(carpeta.glob("*.db"))) == 1, sorted(p.name for p in carpeta.glob("*.db"))
+
+        # 5) Y el rol sobrevive a un reinicio (se lee de la misma base).
+        assert roles_mod.RoleManager().get_role(7) == "admin"
+        store.cerrar()
+    finally:
+        roles_mod.DB_PATH = db_original
+        roles_mod.ROLES_PATH = roles_path_original
+
+
 def run():
     print("\n=== Tests de modelo de roles ===\n")
     total = run_sync_tests(globals())
