@@ -385,10 +385,16 @@ async def test_garantia_al_arrancar_vuelve_a_existir_la_tarjeta():
         "history": [],
         "radio_artist": "",
         "max_height": None,
-        "card": {"chat_id": 44, "message_id": 500, "is_photo": True},
+"card": {"chat_id": 44, "message_id": 500, "is_photo": True},
     }
     state_file = Path(tempfile.mkdtemp()) / "state.json"
-    state_file.write_text(json.dumps(estado), encoding="utf-8")
+    # El estado ya no vive en un JSON: se siembra la base, que es donde el bot
+    # lo va a leer de verdad. Este primer StateStore es la "sesion anterior".
+    from persistence import StateStore
+
+    sembrador = StateStore(state_file)
+    sembrador.load()
+    sembrador.save(estado)
 
     b = make_bot(state_file=state_file)
     fb = b._app.bot

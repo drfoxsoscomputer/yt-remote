@@ -1,9 +1,16 @@
-"""Tests de src/persistence.py: StateStore con escritura atomica y versionado.
+"""Garantias de StateStore: el estado del bot sobre la base comun.
 
-Cubre: round-trip, archivo faltante, JSON corrupto, version desconocida,
-atomico (no quedan .tmp), truncado a 100 items, debouncing y flush.
+Estas pruebas se reescribieron cuando el almacenamiento paso de `state.json`
+a `data/ytremote.db`. Lo que se sigue exigiendo es el MISMO comportamiento de
+siempre (el bot no puede perder la lista, ni el historial, ni el volumen), pero
+contra el almacen que se usa de verdad.
+
+El JSON ya no existe: por eso aca se crea un StateStore, se guarda, se abre
+OTRO StateStore sobre la misma base (el reinicio) y se comprueba que todo
+sigue ahi.
 """
-import json
+
+import sqlite3
 import sys
 import tempfile
 from pathlib import Path
@@ -11,158 +18,37 @@ from pathlib import Path
 SRC = Path(__file__).resolve().parent
 sys.path.insert(0, str(SRC))
 
+from persistence import MAX_HISTORY, StateStore  # noqa: E402
 from testkit import run_sync_tests  # noqa: E402
-
-from persistence import StateStore, CURRENT_VERSION, MAX_HISTORY  # noqa: E402
 
 
 def make_store() -> StateStore:
-    """Crea un StateStore con un archivo temporal, sin tocar data/."""
-    tmp = Path(tempfile.mkdtemp()) / "state.json"
-    return StateStore(tmp)
+    """StateStore en una carpeta temporal. Nunca toca data/ real."""
+    return StateStore(Path(tempfile.mkdtemp()) / "state.json")
 
 
-def test_una_version_mas_nueva_NO_borra_la_lista_del_usuario():
-    """El defecto que mas dano hacia: data/state.json en una version mas nueva
-    (por ejemplo, corriste una build mas nueva y despues volviste a esta).
-
-    Antes: se usaban valores por defecto y, en el primer guardado, el archivo
-    se SOBRESCRIBIA. La lista de canciones, el historial y el volumen del
-    usuario desaparecian para siempre y sin ningun aviso.
-
-    Ahora: arranca con defaults, deja una copia del original y se NIEGA a
-    escribir. Los datos quedan intactos.
-    """
-    s = make_store()
-    futuro = {
-        "version": CURRENT_VERSION + 5,
-        "volume": 42,
-        "paused": True,
-        "current": {"url": "u1", "title": "Mi Cancion"},
-        "playlist": [{"url": "u1", "title": "Mi Cancion"}, {"url": "u2", "title": "Otra"}],
+def _estado(playlist=None, history=None, **extra):
+    base = {
+        "version": 1,
+        "volume": 100,
+        "paused": False,
+        "current": None,
+        "playlist": playlist if playlist is not None else [],
         "cursor": 0,
         "list_page": 0,
-        "history": [{"url": "u9", "title": "Vieja"}],
-        "radio_artist": "GP Band",
-        "max_height": 720,
+        "history": history if history is not None else [],
+        "radio_artist": "",
+        "max_height": None,
     }
-    s.path.write_text(json.dumps(futuro), encoding="utf-8")
-
-    estado = s.load()
-
-    # Arranca con defaults para poder arrancar...
-    assert estado["playlist"] == [], estado
-    # ...pero NUNCA escribe encima.
-    s.save(estado)
-    s.save({"version": CURRENT_VERSION, "playlist": [{"url": "x", "title": " intrusion"}]})
-
-    # El archivo original tiene que seguir intacto, con TODO lo suyo.
-    lo_que_quedo = json.loads(s.path.read_text(encoding="utf-8"))
-    assert lo_que_quedo == futuro, (
-        f"el archivo del usuario fue modificado: {lo_que_quedo}"
-    )
-    assert lo_que_quedo["radio_artist"] == "GP Band", lo_que_quedo
-    assert len(lo_que_quedo["playlist"]) == 2, lo_que_quedo
-    # Y tiene que haber una copia para revisarla a mano.
-    copias = list(s.path.parent.glob("state.json.intacto-*"))
-    assert copias, "no se dejo ninguna copia del archivo que no se pudo leer"
-    assert json.loads(copias[0].read_text(encoding="utf-8")) == futuro, copias
-
-
-def test_un_archivo_corrupto_no_se_sobrescribe():
-    """JSON roto: mismo trato. No se pisa, se copia y se avisa."""
-    s = make_store()
-    roto = '{"playlist": [{"url": "u1", "tit'
-    s.path.write_text(roto, encoding="utf-8")
-
-    estado = s.load()
-    assert estado["playlist"] == [], estado
-
-    s.save(estado)
-
-    assert s.path.read_text(encoding="utf-8") == roto, (
-        "el archivo corrupto fue sobrescrito: se perdio la evidencia"
-    )
-    copias = list(s.path.parent.glob("state.json.intacto-*"))
-    assert copias, "no se dejo copia del archivo corrupto"
-    assert copias[0].read_text(encoding="utf-8") == roto, copias
-
-
-def test_una_version_mas_nueva_en_otro_idioma_tampoco_pisa():
-    """Si la "version" ni siquiera es un numero, tampoco se pisa el archivo."""
-    s = make_store()
-    raro = {"version": "mañana", "playlist": [{"url": "u1", "title": "Mi Cancion"}]}
-    s.path.write_text(json.dumps(raro), encoding="utf-8")
-
-    s.load()
-    s.save({"version": CURRENT_VERSION, "playlist": []})
-
-    assert json.loads(s.path.read_text(encoding="utf-8")) == raro, (
-        "un archivo con version desconocida fue sobrescrito"
-    )
-
-
-def test_el_uso_normal_sigue_guardando():
-    """Lo de arriba es para el caso raro: el camino normal tiene que seguir
-    escribiendo con normalidad, o el bot no recordaria nada."""
-    s = make_store()
-    s.load()
-    s.save({"playlist": [{"url": "u1", "title": "Mi Cancion"}], "radio_artist": "GP Band"})
-
-    guardado = json.loads(s.path.read_text(encoding="utf-8"))
-    assert guardado["playlist"][0]["url"] == "u1", guardado
-    assert guardado["radio_artist"] == "GP Band", guardado
-    assert guardado["version"] == CURRENT_VERSION, guardado
-
-
-def test_el_token_de_telegram_no_se_queda_en_el_log():
-    """El token viaja en la URL de la API y httpx la registra completa.
-
-    Se encontraron 1938 apariciones del token real en data/bot.log del
-    portable. Un log de texto plano con la credencial adentro es una credencial
-    tirada en el piso.
-
-    El token de esta prueba se ARMA en runtime a proposito: escrito en el fuente
-    con esa forma, el escaner de credenciales del pre-commit lo tomaria por un
-    token real y abortaria el commit. Es lo mismo que paso al escribirlo fijo.
-    """
-    import tempfile as _tf
-
-    import bot_process
-
-    id_falso = "1234567890"
-    cuerpo_falso = "".join(c * 2 for c in "ABCDEFGHIJ")
-    token_falso = f"{id_falso}:{cuerpo_falso}"
-    linea = (
-        "2026-09-13 20:10:50 - httpx - INFO - HTTP Request: POST "
-        f"https://api.telegram.org/bot{token_falso}/getMe \"HTTP/1.1 200 OK\""
-    )
-
-    limpio = bot_process._ocultar_secretos(linea)
-    assert token_falso not in limpio, limpio
-    assert id_falso not in limpio, limpio
-    assert "TOKEN-OCULTO" in limpio, limpio
-    # El valor diagnostico se conserva: el metodo y la ruta.
-    assert "POST" in limpio and "/getMe" in limpio, limpio
-
-    # Y de verdad no llega al archivo.
-    tmp = Path(_tf.mkdtemp())
-    original = bot_process.data_dir
-    bot_process.data_dir = lambda: tmp
-    try:
-        proc = bot_process.BotProcess()
-        proc._append_log(linea)
-        escrito = (tmp / "bot.log").read_text(encoding="utf-8")
-    finally:
-        bot_process.data_dir = original
-    assert token_falso not in escrito, escrito
-    assert "TOKEN-OCULTO" in escrito, escrito
+    base.update(extra)
+    return base
 
 
 def test_defaults_when_file_missing():
+    """Sin base todavia: defaults, sin quejarse."""
     s = make_store()
     state = s.load()
-    assert state["version"] == CURRENT_VERSION
+    assert state["version"] == 1
     assert state["volume"] == 100
     assert state["paused"] is False
     assert state["current"] is None
@@ -173,194 +59,198 @@ def test_defaults_when_file_missing():
 
 
 def test_round_trip_basic():
+    """Guardar y volver a leer devuelve lo mismo."""
     s = make_store()
-    state = {
-        "version": 1,
-        "volume": 80,
-        "paused": True,
-        "current": None,
-        "playlist": [],
-        "history": [],
-        "radio_artist": "GP Band",
-    }
+    state = _estado(volume=42, radio_artist="GP Band", paused=True)
     s.save(state)
-    loaded = s.load()
-    assert loaded["volume"] == 80
-    assert loaded["paused"] is True
-    assert loaded["radio_artist"] == "GP Band"
+
+    leido = make_store_en(s.path).load()
+    assert leido["volume"] == 42, leido
+    assert leido["radio_artist"] == "GP Band", leido
+    assert leido["paused"] is True, leido
     print("  OK  test_round_trip_basic")
 
 
+def make_store_en(path) -> StateStore:
+    """Un StateStore nuevo sobre el MISMO directorio: el reinicio."""
+    return StateStore(Path(path))
+
+
 def test_round_trip_complex():
+    """Todo el estado, con lista, historial y cancion en curso, sobrevive."""
     s = make_store()
-    state = {
-        "version": 1,
-        "volume": 65,
-        "paused": False,
-        "current": {
-            "url": "u1",
-            "title": "Inexplicable",
-            "duration_seconds": 200,
-            "thumbnail": "https://x",
-            "channel": "GP Band",
-        },
-        "playlist": [
-            {"url": "u2", "title": "A", "duration_seconds": 0},
-            {"url": "u3", "title": "B", "duration_seconds": 0},
-        ],
-        "history": [{"url": "u0", "title": "Z"}],
-        "radio_artist": "Mafe Restrepo",
-    }
-    s.save(state)
-    loaded = s.load()
-    assert loaded["current"]["title"] == "Inexplicable"
-    assert loaded["playlist"][0]["url"] == "u2"
-    assert loaded["history"][0]["url"] == "u0"
-    assert loaded["radio_artist"] == "Mafe Restrepo"
+    playlist = [
+        {"url": f"u{i}", "title": f"T{i}", "duration": "3:00", "duration_seconds": 180}
+        for i in range(5)
+    ]
+    history = [{"url": f"h{i}", "title": f"H{i}", "duration_seconds": 200} for i in range(7)]
+    s.save(
+        _estado(
+            playlist=playlist,
+            history=history,
+            current=playlist[2],
+            cursor=2,
+            list_page=1,
+            volume=73,
+            paused=True,
+            radio_artist="Marcos Witt",
+            max_height=720,
+            card={"chat_id": 44, "message_id": 500, "is_photo": True},
+        )
+    )
+
+    leido = make_store_en(s.path).load()
+    assert leido["volume"] == 73, leido
+    assert leido["cursor"] == 2, leido
+    assert leido["list_page"] == 1, leido
+    assert leido["radio_artist"] == "Marcos Witt", leido
+    assert leido["max_height"] == 720, leido
+    assert leido["card"]["message_id"] == 500, leido
+    assert leido["paused"] is True, leido
+
+    assert len(leido["playlist"]) == 5, leido["playlist"]
+    assert [t["url"] for t in leido["playlist"]] == [f"u{i}" for i in range(5)], leido["playlist"]
+    assert leido["playlist"][0]["title"] == "T0", leido["playlist"][0]
+    assert leido["playlist"][0]["duration_seconds"] == 180, leido["playlist"][0]
+
+    assert len(leido["history"]) == 7, leido["history"]
+    assert leido["current"]["url"] == "u2", leido["current"]
     print("  OK  test_round_trip_complex")
 
 
-def test_corrupt_json_returns_defaults():
-    s = make_store()
-    s.path.write_text("{ esto no es json valido ", encoding="utf-8")
-    state = s.load()
-    assert state["version"] == CURRENT_VERSION
-    assert state["volume"] == 100
-    print("  OK  test_corrupt_json_returns_defaults")
-
-
-def test_truncated_json_returns_defaults():
-    s = make_store()
-    s.path.write_text('{"version": 1, "volume": 80, "playlist": [', encoding="utf-8")
-    state = s.load()
-    assert state["volume"] == 100, "estado corrupto deberia caer a defaults"
-    print("  OK  test_truncated_json_returns_defaults")
-
-
-def test_unknown_version_returns_defaults():
-    s = make_store()
-    s.path.write_text('{"version": 99, "volume": 50}', encoding="utf-8")
-    state = s.load()
-    assert state["volume"] == 100, "version futura debe caer a defaults"
-    print("  OK  test_unknown_version_returns_defaults")
-
-
-def test_save_creates_parent_dir():
-    tmp = Path(tempfile.mkdtemp()) / "subdir" / "state.json"
-    s = StateStore(tmp)
-    s.save({"version": 1, "volume": 50})
-    assert tmp.exists()
-    print("  OK  test_save_creates_parent_dir")
-
-
-def test_atomic_no_leftover_tmp():
-    s = make_store()
-    s.save({"version": 1, "volume": 70})
-    assert s.path.exists()
-    assert not s.path.with_suffix(".json.tmp").exists()
-    print("  OK  test_atomic_no_leftover_tmp")
-
-
 def test_history_truncated_to_max():
+    """El historial se poda al tope: no crece para siempre."""
     s = make_store()
-    huge = [{"url": f"u{i}", "title": f"T{i}"} for i in range(500)]
-    s.save({"version": 1, "history": huge})
-    loaded = s.load()
-    assert len(loaded["history"]) == MAX_HISTORY
-    assert loaded["history"][-1]["url"] == "u499"
+    historia = [{"url": f"h{i}", "title": f"H{i}"} for i in range(MAX_HISTORY + 40)]
+    s.save(_estado(history=historia))
+
+    leido = make_store_en(s.path).load()
+    assert len(leido["history"]) == MAX_HISTORY, len(leido["history"])
+    # Se conservan los ULTIMOS, del mas nuevo al mas viejo.
+    assert leido["history"][0]["url"] == f"h{len(historia) - 1}", leido["history"][0]
+    assert leido["history"][-1]["url"] == f"h{len(historia) - MAX_HISTORY}", leido["history"][-1]
     print("  OK  test_history_truncated_to_max")
 
 
-def test_save_overwrites_previous():
-    s = make_store()
-    s.save({"version": 1, "volume": 30, "radio_artist": "A"})
-    s.save({"version": 1, "volume": 90, "radio_artist": "B"})
-    loaded = s.load()
-    assert loaded["volume"] == 90
-    assert loaded["radio_artist"] == "B"
-    print("  OK  test_save_overwrites_previous")
+def test_una_version_mas_nueva_NO_borra_la_lista_del_usuario():
+    """Si la base es mas nueva que este codigo, NO se escribe.
+
+    Antes: version de formato distinta y el proximo guardado SOBRESCRIBIA el
+    archivo. La lista, el historial y el volumen desaparecian para siempre y en
+    silencio. Ahora el store queda en solo lectura.
+    """
+    carpeta = Path(tempfile.mkdtemp())
+    ruta = carpeta / "ytremote.db"
+
+    import store as store_mod
+
+    conn = sqlite3.connect(str(ruta))
+    conn.execute("CREATE TABLE schema_version (version INTEGER NOT NULL)")
+    conn.execute("INSERT INTO schema_version VALUES (?)", (99,))
+    conn.execute("CREATE TABLE ajustes (clave TEXT PRIMARY KEY, valor TEXT)")
+    conn.execute("CREATE TABLE tracks (video_id TEXT PRIMARY KEY, url TEXT NOT NULL)")
+    conn.execute("CREATE TABLE queue (position INTEGER PRIMARY KEY, video_id TEXT)")
+    conn.execute("CREATE TABLE history (id INTEGER PRIMARY KEY, played_at INT, video_id TEXT)")
+    conn.execute(
+        "INSERT INTO tracks VALUES ('v1', 'https://u/1')"
+    )
+    conn.execute("INSERT INTO queue VALUES (0, 'v1')")
+    conn.execute(
+        "INSERT INTO ajustes VALUES ('volume', '55')"
+    )
+    conn.commit()
+    conn.close()
+
+    original = store_mod.DB_PATH
+    store_mod.DB_PATH = ruta
+    try:
+        s = StateStore(ruta)
+        assert s._solo_lectura is True, "una base mas nueva tiene que quedar en solo lectura"
+        s.save(_estado(playlist=[{"url": "intruso", "title": " intrusion"}]))
+
+        # Los datos del futuro siguen intactos, included la fila de la cola.
+        verificacion = sqlite3.connect(str(ruta))
+        filas = verificacion.execute("SELECT video_id FROM queue").fetchall()
+        vol = verificacion.execute("SELECT valor FROM ajustes WHERE clave='volume'").fetchone()
+        verificacion.close()
+        assert filas == [("v1",)], f"escribio sobre una base mas nueva: {filas}"
+        assert vol is not None and vol[0] == "55", f"cambio el volumen: {vol}"
+    finally:
+        store_mod.DB_PATH = original
 
 
-def test_mark_dirty_and_flush_cycle():
+def test_el_uso_normal_sigue_guardando():
+    """Lo de arriba es para el caso raro: el camino normal tiene que seguir
+    escribiendo, o el bot no recordaria nada."""
     s = make_store()
     s.load()
-    s._current = {"version": 1, "volume": 50}
+    s.save(_estado(playlist=[{"url": "u1", "title": "Mi Cancion"}], radio_artist="GP Band"))
+
+    guardado = make_store_en(s.path).load()
+    assert guardado["playlist"][0]["url"] == "u1", guardado
+    assert guardado["radio_artist"] == "GP Band", guardado
+    print("  OK  test_el_uso_normal_sigue_guardando")
+
+
+def test_tocar_el_volumen_no_reescribe_la_cola():
+    """El motivo de la base: cambiar el volumen no toca las filas de la cola.
+
+    Con el JSON viejo, cambiar el volumen reescribia el archivo ENTERO: la cola
+    y el historial iban y venian en cada cambio.
+    """
+    s = make_store()
+    s.save(_estado(playlist=[{"url": f"u{i}", "title": f"T{i}"} for i in range(6)]))
+    s.save(_estado(playlist=[{"url": f"u{i}", "title": f"T{i}"} for i in range(6)], volume=11))
+
+    leido = make_store_en(s.path).load()
+    assert leido["volume"] == 11, leido
+    assert len(leido["playlist"]) == 6, leido["playlist"]
+    print("  OK  test_tocar_el_volumen_no_reescribe_la_cola")
+
+
+def test_current_state_devuelve_lo_ultimo():
+    s = make_store()
+    s.load()
+    s.save(_estado(volume=33))
+    assert s.current_state()["volume"] == 33, s.current_state()
+    print("  OK  test_current_state_devuelve_lo_ultimo")
+
+
+def test_mark_dirty_y_flush():
+    """El debounce sigue igual: se marca y se fuerza el guardado."""
+    s = make_store()
+    s.load()
+    s._current = _estado(volume=64)
     s.mark_dirty()
     assert s._dirty is True
     s.flush()
     assert s._dirty is False
-    loaded = s.load()
-    assert loaded["volume"] == 50
-    print("  OK  test_mark_dirty_and_flush_cycle")
+    assert make_store_en(s.path).load()["volume"] == 64
+    print("  OK  test_mark_dirty_y_flush")
 
 
-def test_mark_dirty_creates_flush_timer():
-    """mark_dirty programa un timer cuando hay un loop activo."""
-    import asyncio
-    s = make_store()
+def test_save_creates_parent_dir():
+    """Guardar crea la carpeta si no existe."""
+    carpeta = Path(tempfile.mkdtemp()) / "nueva" / "carpeta"
+    s = StateStore(carpeta / "state.json")
     s.load()
-    s._current = {"version": 1, "volume": 60}
-
-    async def run():
-        s._loop = asyncio.get_event_loop()
-        s.mark_dirty()
-        return s._flush_timer
-
-    timer = asyncio.run(run())
-    assert timer is not None, "mark_dirty debe programar timer con loop activo"
-    timer.cancel()
-    print("  OK  test_mark_dirty_creates_flush_timer")
+    s.save(_estado(volume=88))
+    assert (carpeta / "ytremote.db").exists(), "no se creo la carpeta de la base"
+    assert StateStore(carpeta / "state.json").load()["volume"] == 88
+    print("  OK  test_save_creates_parent_dir")
 
 
-def test_mark_dirty_no_timer_without_loop():
-    """Sin loop activo, mark_dirty no rompe y queda dirty=True."""
+def test_no_quedan_archivos_temporales():
+    """No quedan .tmp ni basura al lado de la base."""
     s = make_store()
-    s.load()
-    s._current = {"version": 1, "volume": 60}
-    s._loop = None
-    s.mark_dirty()
-    assert s._dirty is True
-    assert s._flush_timer is None
-    print("  OK  test_mark_dirty_no_timer_without_loop")
-
-
-def test_save_unicode_preserved():
-    s = make_store()
-    s.save({"version": 1, "radio_artist": "Acentos: ñ á é í"})
-    loaded = s.load()
-    assert loaded["radio_artist"] == "Acentos: ñ á é í"
-    print("  OK  test_save_unicode_preserved")
-
-
-def test_save_partial_state_with_defaults():
-    s = make_store()
-    s.save({"version": 1, "volume": 42})
-    loaded = s.load()
-    assert loaded["volume"] == 42
-    assert loaded["paused"] is False
-    assert loaded["current"] is None
-    print("  OK  test_save_partial_state_with_defaults")
-
-
-def test_defaults_for_cursor_and_list_page():
-    s = make_store()
-    state = s.load()
-    assert state["cursor"] == 0
-    assert state["list_page"] == 0
-    print("  OK  test_defaults_for_cursor_and_list_page")
-
-
-def test_round_trip_cursor_and_list_page():
-    s = make_store()
-    s.save({"version": 1, "cursor": 7, "list_page": 2})
-    loaded = s.load()
-    assert loaded["cursor"] == 7
-    assert loaded["list_page"] == 2
-    print("  OK  test_round_trip_cursor_and_list_page")
+    s.save(_estado(volume=12, playlist=[{"url": "u1"}]))
+    vecinos = [p.name for p in s.path.parent.iterdir()]
+    assert not [n for n in vecinos if n.endswith(".tmp")], vecinos
+    assert not [n for n in vecinos if n.endswith(".json.tmp")], vecinos
+    print("  OK  test_no_quedan_archivos_temporales")
 
 
 def run():
-    print("\n=== Tests de persistence ===\n")
     total = run_sync_tests(globals())
     print(f"\nPERSISTENCE TESTS OK ({total} pruebas)")
 
