@@ -34,6 +34,7 @@ from telegram.ext import (
 
 import artist_match
 from card import QUALITY_LEVELS, CardManager
+from playback import PlaybackEngine
 from config import Config
 from player import Player
 from persistence import StateStore
@@ -136,7 +137,11 @@ class YTRemoteBot:
         self.roles = RoleManager()
         self.player = Player(config.mpv_path)
         self.player._on_track_ended = self._mpv_track_ended_callback
-        self._queue_advance_needed = False
+        # El motor de reproduccion (playback.PlaybackEngine) es dueno del cache
+        # de streams, del prefetch y de la bandera de fin de cancion. Se crea
+        # PRIMERO: los atributos de mas abajo pasan por las propiedades que
+        # delegan en el.
+        self.playback = PlaybackEngine(self)
         self.queue = QueueManager()
         # Ancla de la radio: el ARTISTA fijado UNA sola vez, en el /buscar
         # (todo lo que va antes del guion). /next y el auto-advance lo reusan
@@ -179,18 +184,6 @@ class YTRemoteBot:
         # /next elige de la lista cacheada en vez de volver a golpear yt-dlp
         # (era el delay real de los botones ⏭/⏮: ~2s de busqueda por salto).
         self._radio_search_cache: dict[str, list] = {}
-        # Prefetch (auto-continuacion): candidato a siguiente + stream resuelto
-        self._prefetch_task: asyncio.Task | None = None
-        self._prefetch_basis: str | None = None
-        self._prefetch_candidate: tuple[QueueItem, bool] | None = None
-        self._prefetch_resolved: tuple[tuple[QueueItem, bool], tuple[str, str | None]] | None = None
-        # Cache de streams (modelo "mesonero"): URL de YouTube -> stream directo
-        # resuelto con yt-dlp. Se llena por adelantado (listado de /buscar,
-        # candidato de /next, historial de /prev) para que cada boton casi no
-        # espere. La resolucion es idempotente y serial (una a la vez, para no
-        # pegarle a YouTube en rafagas y evitar el bloqueo "not a bot").
-        self._stream_cache: dict[str, tuple[str, str | None]] = {}
-        self._resolving: set[str] = set()
         self._anticipate_queue: asyncio.Queue[str] | None = None
         self._anticipate_task: asyncio.Task | None = None
         # Mini reproductor persistente: un solo mensaje editable con botones.
@@ -1024,129 +1017,10 @@ class YTRemoteBot:
         return await self.card.enviar_al_chat(chat_id, text, **kwargs)
 
 
-    def _mpv_track_ended_callback(self) -> None:
-        """Callback invocado por el reader thread cuando mpv detecta end-file.
-
-        Este callback se ejecuta en un hilo separado. Sólo marca una bandera
-        que el bot verificará en el siguiente handler para avanzar la cola.
-        """
-        self._queue_advance_needed = True
-
-    def _check_queue_advance(self) -> bool:
-        """Verifica y limpia la bandera de avance de cola.
-
-        Retorna True si se avanzó la cola, False en caso contrario.
-        """
-        if self._queue_advance_needed:
-            self._queue_advance_needed = False
-            return True
-        return False
-
-    def _cancel_prefetch(self) -> None:
-        """Cancela el prefetch en curso (nuevo /play del usuario)."""
-        if self._prefetch_task is not None:
-            self._prefetch_task.cancel()
-        self._prefetch_task = None
-        self._prefetch_basis = None
-        self._prefetch_candidate = None
-        self._prefetch_resolved = None
-
-    async def _stream_for(self, url: str) -> tuple[str, str | None] | None:
-        """Stream directo para una URL: del cache si ya se resolvio; si no,
-        resuelve en caliente (~1 s) y lo guarda. Idempotente: si otra tarea
-        ya lo esta resolviendo, espera a esa en vez de duplicar el trabajo."""
-        cached = self._stream_cache.get(url)
-        if cached is not None:
-            return cached
-        if url in self._resolving:
-            while url in self._resolving and url not in self._stream_cache:
-                await asyncio.sleep(0.1)
-            return self._stream_cache.get(url)
-        self._resolving.add(url)
-        try:
-            try:
-                resolved = await asyncio.wait_for(
-                    asyncio.to_thread(resolve_stream_url, url),
-                    timeout=_RESOLVE_TIMEOUT,
-                )
-            except asyncio.TimeoutError:
-                logger.warning(
-                    "Resolucion de stream agotada (%ss): %s", _RESOLVE_TIMEOUT, url
-                )
-                resolved = None
-        finally:
-            self._resolving.discard(url)
-        if resolved:
-            self._stream_cache[url] = resolved
-        return resolved
-
-    async def _anticipate_worker(self) -> None:
-        """Consume la cola de anticipacion resolviendo un stream por vez."""
-        queue = self._anticipate_queue
-        if queue is None:
-            return
-        while True:
-            url = await queue.get()
-            if url in self._stream_cache or url in self._resolving:
-                continue
-            try:
-                await self._stream_for(url)
-            except asyncio.CancelledError:
-                return
-            except Exception:  # noqa: BLE001 - un fallo no corta la cadena
-                logger.warning("No se pudo anticipar el stream de %s", url)
-
-    def _anticipate_urls(self, urls: list[str]) -> None:
-        """Encarga la resolucion por adelantado de varias URLs (el mesonero)."""
-        if not urls:
-            return
-        if self._anticipate_queue is None:
-            self._anticipate_queue = asyncio.Queue()
-            self._anticipate_task = asyncio.create_task(self._anticipate_worker())
-        for url in urls:
-            if url not in self._stream_cache and url not in self._resolving:
-                self._anticipate_queue.put_nowait(url)
-
-    def _clear_stream_cache(self) -> None:
-        """Vuelve a vaciar el cache de streams (nueva busqueda o /stop)."""
-        self._stream_cache.clear()
-        self._resolving.clear()
-        # Nuevo /buscar = nuevo catalogo de radio: la lista cacheada del
-        # ancla anterior ya no sirve (puede ser otro artista o el mismo).
-        self._radio_search_cache.clear()
-        if self._anticipate_queue is not None:
-            while not self._anticipate_queue.empty():
-                try:
-                    self._anticipate_queue.get_nowait()
-                except asyncio.QueueEmpty:
-                    break
-
     @staticmethod
     def _normalizar(s: str) -> str:
         """Delegado a artist_match.normalizar (10/11)."""
         return artist_match.normalizar(s)
-
-    def _artist_seed(self, item: QueueItem) -> str:
-        """Semilla de la radio: el artista de lo que esta sonando ahora.
-
-        Cada tema lleva su propio artista (`QueueItem.artist`), asi que la
-        semilla sigue a la cancion REAL: si el usuario busco "Y", eligio una de
-        "Y" y despues se devuelve con /prev a una de "X", la radio sigue con
-        "X". Antes se usaba el ancla de sesion a secas y el programa reproducia
-        del artista equivocado.
-
-        Cadena de respaldo: artista del tema, luego ancla de la sesion, luego
-        el canal de quien subio el video (en playlist/link suele ser el artista
-        o su sello). Nunca se re-deriva desde los titulos. Si no hay nada de
-        eso, la radio se detiene con aviso en vez de improvisar.
-        """
-        if item.artist:
-            return item.artist
-        if self._radio_artist:
-            return self._radio_artist
-        if item.channel:
-            return item.channel
-        return ""
 
     def _marcar_conexion(self, online: bool, motivo: str = "") -> None:
         """Deja en data/conexion.json si hay conexion con Telegram, AL INSTANTE.
@@ -1206,225 +1080,6 @@ class YTRemoteBot:
         El unico estado que necesita es el artista pedido de esta sesion.
         """
         return artist_match.filtrar_por_artista(self._search_artist, resultados)
-
-    async def _pick_next_candidate(
-        self, current: QueueItem
-    ) -> tuple[QueueItem | None, bool, bool]:
-        """Fase A: decide cual es el siguiente a reproducir.
-
-        Prioridad:
-        1. Si la cola (playlist del usuario) tiene items, ese es el siguiente.
-        2. Si no, radio por semilla: busca "una parecida" al track actual.
-
-        Devuelve (candidato, vino_de_la_cola, hubo_error_de_red). El tercer
-        flag distingue "la radio se acabo" (catalogo agotado) de "no pude
-        buscar" (red caida / yt-dlp fallo) para dar un mensaje util al user.
-        """
-        # La playlist se carga a ventanas. Si la reproduccion llega al final de
-        # lo que esta cargado, el peek devolveria un wrap prematuro (la cola
-        # aun no tiene el resto): se pide la tanda siguiente y se espera a que
-        # llegue. Eso es lo que garantiza que el avance automatico nunca se
-        # quede sin tema siguiente. Tope de seguridad: si en _PLAYLIST_ESPERAS
-        # segundos no llega nada, se sigue con lo que hay.
-        _expand_esperas = 0
-        while (
-            self.queue.has_playlist
-            and self.queue._items
-            and self.queue._cursor >= len(self.queue._items) - 1
-            and _expand_esperas < _PLAYLIST_ESPERAS
-        ):
-            if not self._playlist_asegurar_ventana():
-                break
-            _expand_esperas += 1
-            try:
-                await asyncio.sleep(1.0)
-            except asyncio.CancelledError:
-                raise
-        peeked = self.queue.peek(0)
-        if peeked is not None:
-            return peeked, True, False
-
-        # Radio por semilla: buscar por el ARTISTA que el usuario escribió en la
-        # lupa (el ancla de sesion) o, si arranco de un link/playlist, por el
-        # canal del video. Sobre el titulo del candidato NO se parsea nada:
-        # es un filtro estricto, no una derivacion de artista.
-        seed = self._artist_seed(current)
-        if not seed:
-            return None, False, False
-        # La lista de radio se busca UNA vez por ancla de sesion y queda
-        # cacheada: cada saltarse eligirá de aquí sin volver a golpear yt-dlp
-        # (esa segunda busqueda era el delay perceptible de los botones).
-        results = self._radio_search_cache.get(seed)
-        if results is None:
-            # Pedir mas resultados: mas catalogo del artista para poder avanzar
-            # sin repetir (la radio busca 50 y elige entre los no-recientes).
-            try:
-                try:
-                    results = await asyncio.wait_for(
-                        asyncio.to_thread(search, seed, 50),
-                        timeout=_RESOLVE_TIMEOUT,
-                    )
-                except asyncio.TimeoutError:
-                    logging.getLogger(__name__).warning(
-                        "Busqueda de radio '%s' agotada (%ss)", seed, _RESOLVE_TIMEOUT
-                    )
-                    return None, False, True
-            except Exception as exc:
-                logging.getLogger(__name__).warning(
-                    "Error en busqueda de radio '%s': %s", seed, exc
-                )
-                return None, False, True
-            self._radio_search_cache[seed] = results
-
-        def _candidate(r) -> tuple[QueueItem, bool, bool]:
-            return (
-                QueueItem(
-                    url=r.url,
-                    title=r.title,
-                    duration_seconds=r.duration,
-                    thumbnail=r.thumbnail,
-                    channel=r.channel,
-                    artist=seed,
-                ),
-                False,
-                False,
-            )
-
-        # Unica pasada, estricta: el candidato tiene que MENCIONAR al artista
-        # en su titulo (normalizado) o ser del MISMO canal. Todo lo demas
-        # queda fuera, aunque suene parecido (nada de covers importados de
-        # otros artistas: si el usuario escribió "GP Band", nunca entra un
-        # "Denicher Pol - Inexplicable" por suerte).
-        anchor = self._normalizar(seed)
-        if not anchor:
-            return None, False, False
-        for r in results:
-            if r.url == current.url or self.queue.is_recent(r.url):
-                continue
-            # Tambien filtrar items que ya estan en la pila de navegacion
-            # (prev/next) o en los stacks de esta sesion, para que un
-            # next tras un prev no vuelva a algo que ya estaba sonando.
-            nav_urls = {i.url for i in self._nav_back}
-            nav_urls.update(i.url for i in self._nav_forward)
-            if r.url in nav_urls:
-                continue
-            if anchor in self._normalizar(r.title) or anchor in self._normalizar(r.channel):
-                return _candidate(r)
-        return None, False, False
-
-    def _radio_over_message(self, por_error: bool = False) -> str:
-        """Aviso cuando la radio estricta no encuentra mas temas del artista.
-
-        Args:
-            por_error: si es True, el motivo fue un fallo de red y se sugiere
-                usar el boton 📋 en vez de asumir que se acabo el catalogo.
-        """
-        ancla = self._radio_artist
-        if ancla:
-            if por_error:
-                return (
-                    f"No pude buscar la siguiente cancion de {ancla} "
-                    f"(error de red). Usa el boton 📋 de la tarjeta para elegir otro tema."
-                )
-            return f"Se acabo la radio de {ancla}: no hay mas canciones de este artista en YouTube. Usa el boton 📋 de la tarjeta para elegir otro tema."
-        if por_error:
-            return "No pude buscar la siguiente cancion (error de red). Usa el boton 📋 de la tarjeta para elegir otro tema."
-        return "No encontre otra cancion para la radio. Usa el boton 📋 de la tarjeta."
-
-    def _schedule_prefetch(self, current: QueueItem) -> None:
-        """Anticipa el siguiente track (el mesonero no espera).
-
-        Fase A (inmediata): decide el candidato (playlist o radio por semilla).
-        Fase B (inmediata tambien): resuelve el stream del candidato enseguida
-        y lo deja cacheado, para que /next y el auto-advance no esperen nada.
-        Si la URL cacheada vence antes de usarse, se re-resuelve al vuelo.
-        """
-        self._cancel_prefetch()
-        self._prefetch_basis = current.url
-
-        async def _flow() -> None:
-            try:
-                candidate, from_queue, _ = await self._pick_next_candidate(current)
-            except asyncio.CancelledError:
-                return
-            if candidate is None:
-                return
-            # el usuario puede interceptar mientras tanto: solo seguimos
-            # si seguimos reproduciendo el mismo track.
-            if self._prefetch_basis != current.url or self._prefetch_basis is None:
-                return
-            self._prefetch_candidate = (candidate, from_queue)
-            try:
-                resolved = await self._stream_for(candidate.url)
-            except asyncio.CancelledError:
-                return
-            if (
-                self._prefetch_basis != current.url
-                or self.queue.current is not current
-            ):
-                return
-            if resolved:
-                self._prefetch_resolved = ((candidate, from_queue), resolved)
-
-        self._prefetch_task = asyncio.create_task(_flow())
-
-    async def _advance_after_end(self, context) -> None:
-        """Reproduce el siguiente tras end-file.
-
-        Si el prefetch ya resuelto el stream -> reproduce cacheado (cero
-        silencio). Si no (duracion desconocida), reproduce por Fase A/B
-        directo.
-        """
-        if self._prefetch_resolved is not None:
-            (candidate, from_queue), (stream_url, audio_url) = self._prefetch_resolved
-            self._prefetch_resolved = None
-            try:
-                await self.player.start()
-                await self.player.load(stream_url, audio_url)
-                await self.player.play()
-            except RuntimeError as exc:
-                await self._reply(None, f"No se pudo continuar: {exc}")
-                await self._notify_admin(f"Fallo en autoplay: {exc}")
-                return
-            self._push_to_nav_back()
-            # Si venia de la playlist, avanzar el cursor (bucle) para no repetir
-            # el mismo track en el siguiente prefetch.
-            if from_queue:
-                self.queue.next()
-            else:
-                self.queue.set_current(candidate)
-            self._persist_dirty()
-            self._schedule_prefetch(candidate)
-            if self._card_chat_id is not None and self._card_message_id is not None:
-                await self._render_card(self._track_status_text(), self._card_chat_id)
-            return
-
-        # Sin prefetch listo: reusar el candidato ya decidido (Fase A) si sigue
-        # vigente; solo si falla, re-derivar ahora mismo.
-        current_item = self.queue.current
-        if current_item is None:
-            return
-        candidate, from_queue, error = None, False, False
-        if (
-            self._prefetch_candidate is not None
-            and self._prefetch_basis == current_item.url
-        ):
-            candidate, from_queue = self._prefetch_candidate
-        else:
-            candidate, from_queue, error = await self._pick_next_candidate(current_item)
-        if candidate is None:
-            await self._reply(None, self._radio_over_message(por_error=error))
-            return
-        if from_queue:
-            self.queue.next()  # avanza el cursor de la playlist (bucle)
-        started = await self._play_item(None, candidate, preserve_current=from_queue)
-        if started:
-            await self._reply(None, f"▶️ Siguiente: {candidate.title}")
-
-    async def _check_queue_advance_job(self, context) -> None:
-        """Job periódico: si la bandera está puesta, avanzar con el prefetch."""
-        if self._check_queue_advance():
-            await self._advance_after_end(context)
 
     def help_for_role(self, role: str) -> str:
         """Devuelve el listado de comandos permitidos para un rol."""
@@ -2201,6 +1856,123 @@ class YTRemoteBot:
                 await self._send_card(chat.id)
             return
 
+    # --- El motor de reproduccion vive en playback.PlaybackEngine --------
+    # Mismo contrato que la tarjeta: estas 15 lineas delegan, el codigo esta
+    # alla. Los nueve atributos tambien delegan en lectura y escritura porque
+    # el motor es su unico dueño y la sesion los lee desde las pruebas: dos
+    # Proprietarios para un estado es la forma garantizada de que se desincronicen.
+
+    @property
+    def _stream_cache(self):
+        return self.playback.stream_cache
+
+    @_stream_cache.setter
+    def _stream_cache(self, valor):
+        self.playback.stream_cache = valor
+
+    @property
+    def _resolving(self):
+        return self.playback.resolving
+
+    @_resolving.setter
+    def _resolving(self, valor):
+        self.playback.resolving = valor
+
+    @property
+    def _anticipate_queue(self):
+        return self.playback.anticipate_queue
+
+    @_anticipate_queue.setter
+    def _anticipate_queue(self, valor):
+        self.playback.anticipate_queue = valor
+
+    @property
+    def _anticipate_task(self):
+        return self.playback.anticipate_task
+
+    @_anticipate_task.setter
+    def _anticipate_task(self, valor):
+        self.playback.anticipate_task = valor
+
+    @property
+    def _queue_advance_needed(self) -> bool:
+        return self.playback.queue_advance_needed
+
+    @_queue_advance_needed.setter
+    def _queue_advance_needed(self, valor: bool) -> None:
+        self.playback.queue_advance_needed = valor
+
+    @property
+    def _prefetch_task(self):
+        return self.playback.prefetch_task
+
+    @_prefetch_task.setter
+    def _prefetch_task(self, valor):
+        self.playback.prefetch_task = valor
+
+    @property
+    def _prefetch_basis(self):
+        return self.playback.prefetch_basis
+
+    @_prefetch_basis.setter
+    def _prefetch_basis(self, valor):
+        self.playback.prefetch_basis = valor
+
+    @property
+    def _prefetch_candidate(self):
+        return self.playback.prefetch_candidate
+
+    @_prefetch_candidate.setter
+    def _prefetch_candidate(self, valor):
+        self.playback.prefetch_candidate = valor
+
+    @property
+    def _prefetch_resolved(self):
+        return self.playback.prefetch_resolved
+
+    @_prefetch_resolved.setter
+    def _prefetch_resolved(self, valor):
+        self.playback.prefetch_resolved = valor
+
+    def _mpv_track_ended_callback(self) -> None:
+        self.playback.track_ended_callback()
+
+    def _check_queue_advance(self) -> bool:
+        return self.playback.check_queue_advance()
+
+    def _cancel_prefetch(self) -> None:
+        self.playback.cancel_prefetch()
+
+    async def _stream_for(self, url: str):
+        return await self.playback.stream_for(url)
+
+    async def _anticipate_worker(self) -> None:
+        await self.playback.anticipate_worker()
+
+    def _anticipate_urls(self, urls: list[str]) -> None:
+        self.playback.anticipate_urls(urls)
+
+    def _clear_stream_cache(self) -> None:
+        self.playback.clear_stream_cache()
+
+    def _artist_seed(self, item: QueueItem) -> str:
+        return self.playback.artist_seed(item)
+
+    async def _pick_next_candidate(self, current: QueueItem):
+        return await self.playback.pick_next_candidate(current)
+
+    def _radio_over_message(self, por_error: bool = False) -> str:
+        return self.playback.radio_over_message(por_error=por_error)
+
+    def _schedule_prefetch(self, current: QueueItem) -> None:
+        self.playback.schedule_prefetch(current)
+
+    async def _advance_after_end(self, context) -> None:
+        await self.playback.advance_after_end(context)
+
+    async def _check_queue_advance_job(self, context) -> None:
+        await self.playback.check_queue_advance_job(context)
+
     async def _play_item(
         self,
         update: Update,
@@ -2208,92 +1980,10 @@ class YTRemoteBot:
         *,
         preserve_current: bool = False,
     ) -> bool:
-        """Reproduce un video YA, imitando el flujo de YouTube.
-
-        Recibe el QueueItem ya construido (con url, titulo, duracion, thumbnail
-        y channel). Resuelve el stream URL, arranca el player si hace falta,
-        carga y reproduce al instante. 'loadfile replace' corta cualquier cosa
-        que esté sonando (no se encola: el usuario elige y suena en el momento).
-
-        - preserve_current=False (radio / cancion suelta): marca el item como
-          actual (set_current) y programa el prefetch del siguiente.
-        - preserve_current=True (playlist/jump): la cola ya posiciono el item
-          como current; solo reproduce y programa el prefetch.
-        """
-        self._cancel_prefetch()
-
-        # Resolver el stream: del cache del mesonero si ya se anticipo; si no,
-        # resolver en caliente. Si la URL cacheada vencio, mpv la rechaza y se
-        # re-resuelve UNA vez abajo (sin TTL preventivos ni esperas).
-        resolved = await self._stream_for(item.url)
-        if not resolved:
-            motivo = last_resolve_error()
-            if motivo and "resuelto con client" in motivo:
-                # No es un error real: es el testeo interno del client fallback.
-                motivo = "todas las variantes de yt-dlp fallaron"
-            detalle = f"\nMotivo: {motivo}" if motivo else ""
-            await self._reply(update, "No se pudo reproducir. Esto suele ser un bloqueo del proveedor de internet o de YouTube a este equipo." + detalle)
-            await self._notify_admin(
-                f"Fallo de resolucion: {item.title}\n{motivo or 'sin motivo detallado'}"
-            )
-            return False
-        stream_url, audio_url = resolved
-
-        # empezar reproduccion desde cero
-        try:
-            await self.player.start()
-        except RuntimeError as exc:
-            await self._reply(update, f"Problema al iniciar el reproductor: {exc}")
-            await self._notify_admin(f"mpv no arranco: {exc}")
-            return False
-
-        for attempt in range(2):
-            try:
-                await self.player.load(stream_url, audio_url)
-                await self.player.play()
-                self._paused = False
-                if not preserve_current:
-                    # Guardar el item actual en la pila de navegación antes
-                    # de cambiar el cursor (solo en modo radio).
-                    self._push_to_nav_back()
-                    self.queue.set_current(item)
-                    self._persist_dirty()
-                break
-            except RuntimeError as exc:
-                if attempt == 1 or item.url not in self._stream_cache:
-                    await self._reply(update, f"No se pudo reproducir: {exc}")
-                    await self._notify_admin(f"Fallo al reproducir {item.title}: {exc}")
-                    return False
-                # URL cacheada vencida: descartar esa entrada, re-resolver y
-                # reintentar una vez.
-                logger.info("Stream cacheado expirado, re-resolviendo: %s", item.url)
-                self._stream_cache.pop(item.url, None)
-                resolved = await self._stream_for(item.url)
-                if not resolved:
-                    await self._reply(update, f"No se pudo reproducir: {exc}")
-                    return False
-                stream_url, audio_url = resolved
-        self._schedule_prefetch(item)
-        # La tarjeta del mini reproductor refleja el tema nuevo. En acciones
-        # del usuario se crea/edita en su chat; en el auto-advance (update
-        # None) se re-edita la ultima tarjeta con el titulo nuevo.
-        if update is not None:
-            await self._show_card(update.effective_chat.id)
-        elif self._card_chat_id is not None and self._card_message_id is not None:
-            await self._render_card(self._track_status_text(), self._card_chat_id)
-        return True
-
-    async def _load_url(
-        self, update: Update, url: str, caption: str | None = None
-    ) -> None:
-        # Delegamos la lógica core en _play_item y nos quedamos solo
-        # en la respuesta final (el "▶️ Reproduciendo:").
-        item = QueueItem(
-            url=url, title=caption or url, thumbnail=thumbnail_from_url(url)
+        return await self.playback.play_item(
+            update, item, preserve_current=preserve_current
         )
-        started = await self._play_item(update, item)
-        if started:
-            await self._reply(update, f"▶️ Reproduciendo: {caption or url}")
+
 
     async def cmd_pause(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         if self.queue.current is None or not self.player.is_running:

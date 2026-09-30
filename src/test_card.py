@@ -20,6 +20,7 @@ SRC = Path(__file__).resolve().parent
 sys.path.insert(0, str(SRC))
 
 from testkit import run_sync_tests  # noqa: E402
+import playback as playback_mod
 
 # Aislar el registro de roles PARA TODO EL PROCESO: el RoleManager default
 # del bot escribe en data/roles.json REAL (el __init__ registra al dueno y
@@ -449,12 +450,14 @@ def test_radio_gate_strict_excludes_covers():
     try:
         for idx, (results, expected) in enumerate(cases):
             bot_mod.search = lambda q, n, _r=results: _r
+            playback_mod.search = lambda q, n, _r=results: _r
             b._radio_search_cache.clear()  # cada caso es una radio nueva
             candidate, from_queue, _ = asyncio.run(b._pick_next_candidate(current))
             got = candidate.url if candidate else None
             assert got == expected, f"caso {idx}: {got} != {expected}"
     finally:
         bot_mod.search = original
+        playback_mod.search = original
 
 
 async def test_cmd_play_routes():
@@ -515,6 +518,7 @@ def _patch_resolve(bot_mod, mapping):
         return mapping.get(url)
 
     bot_mod.resolve_stream_url = fake
+    playback_mod.resolve_stream_url = fake
     return original
 
 
@@ -530,6 +534,7 @@ async def test_stream_for_caches_and_reuses():
 
     original = _patch_resolve(bot_mod, {})
     bot_mod.resolve_stream_url = fake
+    playback_mod.resolve_stream_url = fake
     try:
         b = make_bot()
         first = await b._stream_for("u1")
@@ -539,10 +544,12 @@ async def test_stream_for_caches_and_reuses():
         assert calls == ["u1"], calls  # resolvio una sola vez
         # una URL sin stream no se cachea
         bot_mod.resolve_stream_url = lambda url: None
+        playback_mod.resolve_stream_url = lambda url: None
         assert await b._stream_for("u2") is None
         assert "u2" not in b._stream_cache
     finally:
         bot_mod.resolve_stream_url = original
+        playback_mod.resolve_stream_url = original
 
 
 async def test_stream_for_dedupes_inflight():
@@ -557,6 +564,7 @@ async def test_stream_for_dedupes_inflight():
 
     original = bot_mod.resolve_stream_url
     bot_mod.resolve_stream_url = fake
+    playback_mod.resolve_stream_url = fake
     try:
         b = make_bot()
         r1, r2 = await asyncio.gather(b._stream_for("u1"), b._stream_for("u1"))
@@ -564,6 +572,7 @@ async def test_stream_for_dedupes_inflight():
         assert calls == ["u1"], calls
     finally:
         bot_mod.resolve_stream_url = original
+        playback_mod.resolve_stream_url = original
 
 
 async def test_anticipate_urls_serial_and_clear():
@@ -578,6 +587,7 @@ async def test_anticipate_urls_serial_and_clear():
 
     original = _patch_resolve(bot_mod, {})
     bot_mod.resolve_stream_url = fake
+    playback_mod.resolve_stream_url = fake
     try:
         b = make_bot()
         b._anticipate_urls(["u1", "u2", "u3"])
@@ -595,6 +605,7 @@ async def test_anticipate_urls_serial_and_clear():
         assert b._resolving == set()
     finally:
         bot_mod.resolve_stream_url = original
+        playback_mod.resolve_stream_url = original
 
 
 async def test_cache_expired_retries_once():
@@ -610,11 +621,13 @@ async def test_cache_expired_retries_once():
 
     original = _patch_resolve(bot_mod, {})
     bot_mod.resolve_stream_url = fake
+    playback_mod.resolve_stream_url = fake
     try:
         async def _no_candidate(current=None):
             return None, False, False
 
         b._pick_next_candidate = _no_candidate  # evita radio/red real
+        b.playback.pick_next_candidate = _no_candidate  # evita radio/red real
         upd = FakeUpdate("ctl:next", chat_id=44)
         started = await b._play_item(upd, QueueItem(url="u1", title="X"))
         assert started
@@ -622,6 +635,7 @@ async def test_cache_expired_retries_once():
         assert b._stream_cache["u1"] == ("stream-fresca", None)
     finally:
         bot_mod.resolve_stream_url = original
+        playback_mod.resolve_stream_url = original
 
 
 def test_singleton_lock_rejects_second_instance():
@@ -730,6 +744,7 @@ async def test_nav_prev_next_cycle_radio():
 
     # Sin red: el mesonero resuelve cualquier URL a un stream fijo.
     bot_mod.resolve_stream_url = lambda url: ("stream-" + url, None)
+    playback_mod.resolve_stream_url = lambda url: ("stream-" + url, None)
     try:
         b = make_bot()
         # Sin ancla de artista ni red: _pick_next_candidate devuelve None, asi
@@ -741,6 +756,7 @@ async def test_nav_prev_next_cycle_radio():
             item, err = next(candidates)
             return item, False, err
         b._pick_next_candidate = fake_pick
+        b.playback.pick_next_candidate = fake_pick
 
         # 1) Suena A (simulamos un /buscar previo que eligió este tema).
         b._clear_nav_stacks()
@@ -768,6 +784,7 @@ async def test_nav_prev_next_cycle_radio():
         assert list(b._nav_forward) == []
     finally:
         bot_mod.resolve_stream_url = lambda url: None
+        playback_mod.resolve_stream_url = lambda url: None
 
 
 async def test_nav_next_chooses_new_candidate_when_forward_empty():
@@ -777,6 +794,7 @@ async def test_nav_next_chooses_new_candidate_when_forward_empty():
     from queue_manager import QueueItem
 
     bot_mod.resolve_stream_url = lambda url: ("stream-" + url, None)
+    playback_mod.resolve_stream_url = lambda url: ("stream-" + url, None)
     try:
         b = make_bot()
         b._radio_artist = ""
@@ -787,6 +805,7 @@ async def test_nav_next_chooses_new_candidate_when_forward_empty():
         async def fake_pick(current: QueueItem) -> tuple[QueueItem | None, bool, bool]:
             return new_pick, False, False
         b._pick_next_candidate = fake_pick
+        b.playback.pick_next_candidate = fake_pick
 
         await b.cmd_next(FakeUpdate("ctl:next"), SimpleNamespace(args=[]))
         assert cast(QueueItem, b.queue.current).url == "B"
@@ -795,6 +814,7 @@ async def test_nav_next_chooses_new_candidate_when_forward_empty():
         assert list(b._nav_forward) == []
     finally:
         bot_mod.resolve_stream_url = lambda url: None
+        playback_mod.resolve_stream_url = lambda url: None
 
 
 async def test_nav_prev_falls_back_to_queue_history():
@@ -805,6 +825,7 @@ async def test_nav_prev_falls_back_to_queue_history():
     from queue_manager import QueueItem
 
     bot_mod.resolve_stream_url = lambda url: ("stream-" + url, None)
+    playback_mod.resolve_stream_url = lambda url: ("stream-" + url, None)
     try:
         b = make_bot()
         b._radio_artist = ""
@@ -816,6 +837,7 @@ async def test_nav_prev_falls_back_to_queue_history():
         assert cast(QueueItem, b.queue.current).url == "Z"
     finally:
         bot_mod.resolve_stream_url = lambda url: None
+        playback_mod.resolve_stream_url = lambda url: None
 
 
 async def test_nav_playlist_unaffected():
@@ -824,6 +846,7 @@ async def test_nav_playlist_unaffected():
     from queue_manager import QueueItem
 
     bot_mod.resolve_stream_url = lambda url: ("stream-" + url, None)
+    playback_mod.resolve_stream_url = lambda url: ("stream-" + url, None)
     try:
         b = make_bot()
         b._clear_nav_stacks()
@@ -838,6 +861,7 @@ async def test_nav_playlist_unaffected():
         async def fake_pick(current: QueueItem) -> tuple[QueueItem | None, bool, bool]:
             return fake_pick_items.pop(0) if fake_pick_items else (None, False, False)
         b._pick_next_candidate = fake_pick
+        b.playback.pick_next_candidate = fake_pick
 
         # next -> B (cursor avanza a 1)
         await b.cmd_next(FakeUpdate("ctl:next"), SimpleNamespace(args=[]))
@@ -847,6 +871,7 @@ async def test_nav_playlist_unaffected():
         assert cast(QueueItem, b.queue.current).url == "A"
     finally:
         bot_mod.resolve_stream_url = lambda url: None
+        playback_mod.resolve_stream_url = lambda url: None
 
 
 async def test_toggle_play_pause_starts_player_when_off():
@@ -856,6 +881,7 @@ async def test_toggle_play_pause_starts_player_when_off():
     from queue_manager import QueueItem
 
     bot_mod.resolve_stream_url = lambda url: ("stream-" + url, None)
+    playback_mod.resolve_stream_url = lambda url: ("stream-" + url, None)
     try:
         b = make_bot()
         fp = cast(Any, b.player)
@@ -870,6 +896,7 @@ async def test_toggle_play_pause_starts_player_when_off():
         assert b._paused is False
     finally:
         bot_mod.resolve_stream_url = lambda url: None
+        playback_mod.resolve_stream_url = lambda url: None
 
 
 async def test_resume_starts_player_when_not_running():
@@ -879,6 +906,7 @@ async def test_resume_starts_player_when_not_running():
     from queue_manager import QueueItem
 
     bot_mod.resolve_stream_url = lambda url: ("stream-" + url, None)
+    playback_mod.resolve_stream_url = lambda url: ("stream-" + url, None)
     try:
         b = make_bot()
         fp = cast(Any, b.player)
@@ -891,6 +919,7 @@ async def test_resume_starts_player_when_not_running():
         assert b.queue.current is not None and b.queue.current.url == "u1"
     finally:
         bot_mod.resolve_stream_url = lambda url: None
+        playback_mod.resolve_stream_url = lambda url: None
 
 
 async def test_toggle_play_pause_keeps_playlist():
@@ -902,6 +931,7 @@ async def test_toggle_play_pause_keeps_playlist():
     from queue_manager import QueueItem
 
     bot_mod.resolve_stream_url = lambda url: ("stream-" + url, None)
+    playback_mod.resolve_stream_url = lambda url: ("stream-" + url, None)
     try:
         b = make_bot()
         fp = cast(Any, b.player)
@@ -922,6 +952,7 @@ async def test_toggle_play_pause_keeps_playlist():
         assert b.queue.current is not None and b.queue.current.url == "A"
     finally:
         bot_mod.resolve_stream_url = lambda url: None
+        playback_mod.resolve_stream_url = lambda url: None
 
 
 async def test_restore_cursor_and_list_page():
@@ -931,6 +962,7 @@ async def test_restore_cursor_and_list_page():
     from queue_manager import QueueItem
 
     bot_mod.resolve_stream_url = lambda url: ("stream-" + url, None)
+    playback_mod.resolve_stream_url = lambda url: ("stream-" + url, None)
     try:
         b = make_bot()
         items = [
@@ -953,6 +985,7 @@ async def test_restore_cursor_and_list_page():
         assert b2._list_page == 2, b2._list_page
     finally:
         bot_mod.resolve_stream_url = lambda url: None
+        playback_mod.resolve_stream_url = lambda url: None
 
 
 async def test_restore_cursor_clamped_to_range():
@@ -962,6 +995,7 @@ async def test_restore_cursor_clamped_to_range():
     from queue_manager import QueueItem
 
     bot_mod.resolve_stream_url = lambda url: ("stream-" + url, None)
+    playback_mod.resolve_stream_url = lambda url: ("stream-" + url, None)
     try:
         b = make_bot()
         loaded = {
@@ -980,6 +1014,7 @@ async def test_restore_cursor_clamped_to_range():
         assert b._list_page == 50, "la pagina se clampa en el render, no al cargar"
     finally:
         bot_mod.resolve_stream_url = lambda url: None
+        playback_mod.resolve_stream_url = lambda url: None
 
 
 async def test_restore_cursor_corrupt_falls_to_zero():
@@ -988,6 +1023,7 @@ async def test_restore_cursor_corrupt_falls_to_zero():
     from queue_manager import QueueItem
 
     bot_mod.resolve_stream_url = lambda url: ("stream-" + url, None)
+    playback_mod.resolve_stream_url = lambda url: ("stream-" + url, None)
     try:
         b = make_bot()
         loaded = {
@@ -1006,6 +1042,7 @@ async def test_restore_cursor_corrupt_falls_to_zero():
         assert b._list_page == 0
     finally:
         bot_mod.resolve_stream_url = lambda url: None
+        playback_mod.resolve_stream_url = lambda url: None
 
 
 async def test_close_list_keeps_page():
@@ -1025,6 +1062,7 @@ async def test_next_prefetch_starts_player():
     from queue_manager import QueueItem
 
     bot_mod.resolve_stream_url = lambda url: ("stream-" + url, None)
+    playback_mod.resolve_stream_url = lambda url: ("stream-" + url, None)
     try:
         b = make_bot()
         fp = cast(Any, b.player)
@@ -1044,6 +1082,7 @@ async def test_next_prefetch_starts_player():
         assert cast(QueueItem, b.queue.current).url == "siguiente"
     finally:
         bot_mod.resolve_stream_url = lambda url: None
+        playback_mod.resolve_stream_url = lambda url: None
 
 
 async def test_autoadvance_refreshes_card_state_and_nav():
@@ -1082,6 +1121,7 @@ async def test_stop_conserves_state_and_rewinds():
     from queue_manager import QueueItem
 
     bot_mod.resolve_stream_url = lambda url: ("stream-" + url, None)
+    playback_mod.resolve_stream_url = lambda url: ("stream-" + url, None)
     try:
         b = make_bot()
         fp = cast(Any, b.player)
@@ -1099,6 +1139,7 @@ async def test_stop_conserves_state_and_rewinds():
         assert b._paused is True, "deja en pausa para reanudar con ▶"
     finally:
         bot_mod.resolve_stream_url = lambda url: None
+        playback_mod.resolve_stream_url = lambda url: None
 
 
 async def test_stop_does_not_clear_queue():
@@ -1108,6 +1149,7 @@ async def test_stop_does_not_clear_queue():
     from queue_manager import QueueItem, QueueManager
 
     bot_mod.resolve_stream_url = lambda url: ("stream-" + url, None)
+    playback_mod.resolve_stream_url = lambda url: ("stream-" + url, None)
     b = make_bot()
     b.queue.set_current(QueueItem(url="u1", title="Tema"))
 
@@ -1180,6 +1222,7 @@ async def test_radio_search_list_cached_per_anchor():
 
     original = bot_mod.search
     bot_mod.search = counting_search
+    playback_mod.search = counting_search
     try:
         c1, _, _ = await b._pick_next_candidate(current)
         c2, _, _ = await b._pick_next_candidate(current)
@@ -1188,6 +1231,7 @@ async def test_radio_search_list_cached_per_anchor():
         assert c1.url == c2.url == "u1"
     finally:
         bot_mod.search = original
+        playback_mod.search = original
 
 
 async def test_next_radio_renders_loading_card_inmediato():
@@ -1199,6 +1243,7 @@ async def test_next_radio_renders_loading_card_inmediato():
     from queue_manager import QueueItem
 
     bot_mod.resolve_stream_url = lambda url: ("stream-" + url, None)
+    playback_mod.resolve_stream_url = lambda url: ("stream-" + url, None)
     try:
         b = make_bot()
         # Tarjeta persistente ya activa (mensaje de texto, sin miniatura).
@@ -1215,6 +1260,7 @@ async def test_next_radio_renders_loading_card_inmediato():
         async def fake_pick(current: QueueItem) -> tuple[QueueItem | None, bool, bool]:
             return new_pick, False, False
         b._pick_next_candidate = fake_pick
+        b.playback.pick_next_candidate = fake_pick
 
         await b.cmd_next(FakeUpdate("ctl:next"), SimpleNamespace(args=[]))
         assert cast(QueueItem, b.queue.current).url == "B"
@@ -1228,6 +1274,7 @@ async def test_next_radio_renders_loading_card_inmediato():
         assert carga, b._app.bot.edited
     finally:
         bot_mod.resolve_stream_url = lambda url: None
+        playback_mod.resolve_stream_url = lambda url: None
 
 
 async def test_next_radio_failed_resolve_keeps_current():
@@ -1238,6 +1285,7 @@ async def test_next_radio_failed_resolve_keeps_current():
     from queue_manager import QueueItem
 
     bot_mod.resolve_stream_url = lambda url: None
+    playback_mod.resolve_stream_url = lambda url: None
     try:
         b = make_bot()
         b._card_chat_id = 44
@@ -1253,6 +1301,7 @@ async def test_next_radio_failed_resolve_keeps_current():
         async def fake_pick(current: QueueItem) -> tuple[QueueItem | None, bool, bool]:
             return new_pick, False, False
         b._pick_next_candidate = fake_pick
+        b.playback.pick_next_candidate = fake_pick
 
         await b.cmd_next(FakeUpdate("ctl:next"), SimpleNamespace(args=[]))
         # El estado no se corrompe con el candidato que nunca sonó.
@@ -1266,6 +1315,7 @@ async def test_next_radio_failed_resolve_keeps_current():
         assert carga, b._app.bot.edited
     finally:
         bot_mod.resolve_stream_url = lambda url: None
+        playback_mod.resolve_stream_url = lambda url: None
 
 
 async def test_stream_for_times_out_hung_resolve():
@@ -1279,7 +1329,13 @@ async def test_stream_for_times_out_hung_resolve():
     original_resolve = bot_mod.resolve_stream_url
     original_timeout = bot_mod._RESOLVE_TIMEOUT
     bot_mod.resolve_stream_url = lambda url: time.sleep(5) or ("stream-" + url, None)
+    playback_mod.resolve_stream_url = lambda url: time.sleep(5) or ("stream-" + url, None)
     bot_mod._RESOLVE_TIMEOUT = 0.3
+    # En playback la constante se llama igual pero SIN el guion bajo: ahi vive
+    # como `from constants import RESOLVE_TIMEOUT`. Parchar `playback._RESOLVE_TIMEOUT`
+    # crearia un atributo nuevo que nadie lee, y la prueba pasaria por el motivo
+    # equivocado (o fallaria sin causa real).
+    playback_mod.RESOLVE_TIMEOUT = 0.3
     try:
         inicio = time.monotonic()
         result = await b._stream_for("X")
@@ -1288,7 +1344,9 @@ async def test_stream_for_times_out_hung_resolve():
         assert transcurrido < 4, f"tardo {transcurrido:.1f}s, el timeout no funciono"
     finally:
         bot_mod.resolve_stream_url = original_resolve
+        playback_mod.resolve_stream_url = original_resolve
         bot_mod._RESOLVE_TIMEOUT = original_timeout
+        playback_mod.RESOLVE_TIMEOUT = original_timeout
 
 
 async def test_control_button_answers_instantly_no_toast():
@@ -1351,7 +1409,9 @@ async def test_pick_removes_orphan_card():
         return ("stream", None)
 
     b._play_item = fake_play
+    b.playback.play_item = fake_play
     b._stream_for = fake_stream
+    b.playback.stream_for = fake_stream
     upd = FakeUpdate("pick:0", message_id=500, chat_id=44)
     await b.on_callback(upd, SimpleNamespace(args=[]))
     assert (44, 7) in [(d[0], d[1]) for d in b._app.bot.deleted], b._app.bot.deleted
@@ -1406,6 +1466,7 @@ async def test_playlist_feedback_renders_in_card():
         return True
 
     b._play_item = fake_play
+    b.playback.play_item = fake_play
 
     orig_pl = bot_mod.is_playlist_url
     orig_quick = bot_mod.quick_playlist
@@ -1540,6 +1601,7 @@ async def test_quality_select_reloads_current_track():
         return ("stream-480", None)
 
     b._stream_for = fake_stream_for
+    b.playback.stream_for = fake_stream_for
     original_height = search_mod.MAX_HEIGHT
     try:
         upd = FakeUpdate("cl:calidad:480", user_id=1, chat_id=44, message_id=7)
@@ -1703,6 +1765,7 @@ async def test_quality_same_level_is_ignored():
         raise AssertionError("no se debe re-resolver si la calidad no cambia")
 
     b._stream_for = fake_stream_for
+    b.playback.stream_for = fake_stream_for
     original_height = search_mod.MAX_HEIGHT
     try:
         search_mod.MAX_HEIGHT = 480
@@ -1910,6 +1973,7 @@ async def test_list_select_plays_and_closes():
         return (f"stream-{url}", None)
 
     b._stream_for = fake_stream_for
+    b.playback.stream_for = fake_stream_for
     await b._on_control(
         FakeUpdate("ctl:lista", user_id=77, chat_id=44),
         SimpleNamespace(args=[]),
@@ -2069,6 +2133,7 @@ async def test_playlist_quick_load_starts_immediately():
         return True
 
     b._play_item = fake_play
+    b.playback.play_item = fake_play
 
     orig_pl = bot_mod.is_playlist_url
     orig_quick = bot_mod.quick_playlist
@@ -2135,6 +2200,7 @@ async def test_playlist_background_expansion_does_not_duplicate():
         return True
 
     b._play_item = fake_play
+    b.playback.play_item = fake_play
     try:
         upd = FakeMessageUpdate("https://youtube.com/playlist?list=XYZ")
         await b._play_link_or_playlist(upd, SimpleNamespace(args=[]), upd.message.text)
@@ -2447,13 +2513,19 @@ async def test_search_keyboard_has_cancel_button():
             SearchResult(url="u1", title="T1", duration="3:00", thumbnail=""),
             SearchResult(url="u2", title="T2", duration="3:00", thumbnail=""),
         ]
+        playback_mod.search = lambda q, n: [
+            SearchResult(url="u1", title="T1", duration="3:00", thumbnail=""),
+            SearchResult(url="u2", title="T2", duration="3:00", thumbnail=""),
+        ]
         upd = FakeMessageUpdate("/buscar")
         await b._run_search(
             upd, SimpleNamespace(args=[], bot=b._app.bot), "artista cancion"
         )
     finally:
         bot_mod.resolve_stream_url = original_resolve
+        playback_mod.resolve_stream_url = original_resolve
         bot_mod.search = original_search
+        playback_mod.search = original_search
         if b._anticipate_task is not None:
             b._anticipate_task.cancel()
     edited = [e for e in b._app.bot.edited if "Página" in str(e[2])]
@@ -2487,6 +2559,7 @@ async def test_search_list_paginates_with_navigation():
     ]
     try:
         bot_mod.search = lambda q, n: tanda
+        playback_mod.search = lambda q, n: tanda
         await b._run_search(
             FakeMessageUpdate("/buscar"),
             SimpleNamespace(args=[], bot=b._app.bot),
@@ -2494,7 +2567,9 @@ async def test_search_list_paginates_with_navigation():
         )
     finally:
         bot_mod.resolve_stream_url = original_resolve
+        playback_mod.resolve_stream_url = original_resolve
         bot_mod.search = original_search
+        playback_mod.search = original_search
         if b._anticipate_task is not None:
             b._anticipate_task.cancel()
 
@@ -2540,6 +2615,7 @@ async def test_pick_cancel_removes_list_and_keeps_card():
         return True
 
     b._play_item = fake_play
+    b.playback.play_item = fake_play
     upd = FakeUpdate("pick:cancel", message_id=500, chat_id=44)
     deleted = []
     msg = SimpleNamespace(message_id=500)
@@ -2581,7 +2657,9 @@ async def test_pick_result_clears_pending_search():
         return ("stream", None)
 
     b._play_item = fake_play
+    b.playback.play_item = fake_play
     b._stream_for = fake_stream
+    b.playback.stream_for = fake_stream
     upd = FakeUpdate("pick:0", message_id=500, chat_id=44)
     await b.on_callback(upd, SimpleNamespace(args=[]))
     assert b._search_list_pending is False
