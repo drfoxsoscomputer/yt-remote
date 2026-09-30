@@ -5,12 +5,30 @@ Extraído de launcher.py para reutilización en launcher_web.py (Flask + pywebvi
 
 import json as _json
 import os
+import re
 import sys
 import subprocess
 import threading
 import time
 from pathlib import Path
 from typing import Optional, Dict, Any
+
+
+# El token viaja en la URL de la API de Telegram (api.telegram.org/bot<TOKEN>/...)
+# y httpx registra la URL COMPLETA de cada peticion en nivel INFO. Sin esto, el
+# token del bot queda escrito en data/bot.log, que es un archivo de texto plano:
+# se encontro con 1938 apariciones en el log del portable. Se tapan en origen.
+_TOKEN_URL = re.compile(r"(bot)\d{6,12}:[A-Za-z0-9_-]{20,}")
+
+
+def _ocultar_secretos(texto: str) -> str:
+    """Reemplaza el token de Telegram por un marcador, sin romper el diagnostico.
+
+    Se deja ver que la peticion fue a /getMe: el valor diagnostico de esa linea
+    es el metodo y la ruta. El secreto no aporta nada y es lo unico que no
+    debe quedar en disco.
+    """
+    return _TOKEN_URL.sub(r"\1<TOKEN-OCULTO>", texto)
 
 
 def data_dir() -> Path:
@@ -100,12 +118,18 @@ class BotProcess:
             return "?"
 
     def _append_log(self, text: str) -> None:
-        """Vuelca stdout+stderr del bot a data/bot.log (era invisible con --windowed)."""
+        """Vuelca stdout+stderr del bot a data/bot.log (era invisible con --windowed).
+
+        Antes de escribir, pasa por `_ocultar_secretos`: el log del bot trae las
+        lineas de httpx con la URL de la API de Telegram, y en esa URL va el
+        token. Un log de texto plano con la credencial del bot adentro es una
+        credencial tirada en el piso.
+        """
         try:
             path = self._log_path()
             path.parent.mkdir(parents=True, exist_ok=True)
             with open(path, "a", encoding="utf-8", errors="replace") as f:
-                f.write(text)
+                f.write(_ocultar_secretos(text))
                 f.write("\n")
         except Exception as exc:  # noqa: BLE001 - el log jamas debe tumbar al launcher
             print(f"Error escribiendo bot.log: {exc}")

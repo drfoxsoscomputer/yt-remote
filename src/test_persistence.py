@@ -22,6 +22,143 @@ def make_store() -> StateStore:
     return StateStore(tmp)
 
 
+def test_una_version_mas_nueva_NO_borra_la_lista_del_usuario():
+    """El defecto que mas dano hacia: data/state.json en una version mas nueva
+    (por ejemplo, corriste una build mas nueva y despues volviste a esta).
+
+    Antes: se usaban valores por defecto y, en el primer guardado, el archivo
+    se SOBRESCRIBIA. La lista de canciones, el historial y el volumen del
+    usuario desaparecian para siempre y sin ningun aviso.
+
+    Ahora: arranca con defaults, deja una copia del original y se NIEGA a
+    escribir. Los datos quedan intactos.
+    """
+    s = make_store()
+    futuro = {
+        "version": CURRENT_VERSION + 5,
+        "volume": 42,
+        "paused": True,
+        "current": {"url": "u1", "title": "Mi Cancion"},
+        "playlist": [{"url": "u1", "title": "Mi Cancion"}, {"url": "u2", "title": "Otra"}],
+        "cursor": 0,
+        "list_page": 0,
+        "history": [{"url": "u9", "title": "Vieja"}],
+        "radio_artist": "GP Band",
+        "max_height": 720,
+    }
+    s.path.write_text(json.dumps(futuro), encoding="utf-8")
+
+    estado = s.load()
+
+    # Arranca con defaults para poder arrancar...
+    assert estado["playlist"] == [], estado
+    # ...pero NUNCA escribe encima.
+    s.save(estado)
+    s.save({"version": CURRENT_VERSION, "playlist": [{"url": "x", "title": " intrusion"}]})
+
+    # El archivo original tiene que seguir intacto, con TODO lo suyo.
+    lo_que_quedo = json.loads(s.path.read_text(encoding="utf-8"))
+    assert lo_que_quedo == futuro, (
+        f"el archivo del usuario fue modificado: {lo_que_quedo}"
+    )
+    assert lo_que_quedo["radio_artist"] == "GP Band", lo_que_quedo
+    assert len(lo_que_quedo["playlist"]) == 2, lo_que_quedo
+    # Y tiene que haber una copia para revisarla a mano.
+    copias = list(s.path.parent.glob("state.json.intacto-*"))
+    assert copias, "no se dejo ninguna copia del archivo que no se pudo leer"
+    assert json.loads(copias[0].read_text(encoding="utf-8")) == futuro, copias
+
+
+def test_un_archivo_corrupto_no_se_sobrescribe():
+    """JSON roto: mismo trato. No se pisa, se copia y se avisa."""
+    s = make_store()
+    roto = '{"playlist": [{"url": "u1", "tit'
+    s.path.write_text(roto, encoding="utf-8")
+
+    estado = s.load()
+    assert estado["playlist"] == [], estado
+
+    s.save(estado)
+
+    assert s.path.read_text(encoding="utf-8") == roto, (
+        "el archivo corrupto fue sobrescrito: se perdio la evidencia"
+    )
+    copias = list(s.path.parent.glob("state.json.intacto-*"))
+    assert copias, "no se dejo copia del archivo corrupto"
+    assert copias[0].read_text(encoding="utf-8") == roto, copias
+
+
+def test_una_version_mas_nueva_en_otro_idioma_tampoco_pisa():
+    """Si la "version" ni siquiera es un numero, tampoco se pisa el archivo."""
+    s = make_store()
+    raro = {"version": "mañana", "playlist": [{"url": "u1", "title": "Mi Cancion"}]}
+    s.path.write_text(json.dumps(raro), encoding="utf-8")
+
+    s.load()
+    s.save({"version": CURRENT_VERSION, "playlist": []})
+
+    assert json.loads(s.path.read_text(encoding="utf-8")) == raro, (
+        "un archivo con version desconocida fue sobrescrito"
+    )
+
+
+def test_el_uso_normal_sigue_guardando():
+    """Lo de arriba es para el caso raro: el camino normal tiene que seguir
+    escribiendo con normalidad, o el bot no recordaria nada."""
+    s = make_store()
+    s.load()
+    s.save({"playlist": [{"url": "u1", "title": "Mi Cancion"}], "radio_artist": "GP Band"})
+
+    guardado = json.loads(s.path.read_text(encoding="utf-8"))
+    assert guardado["playlist"][0]["url"] == "u1", guardado
+    assert guardado["radio_artist"] == "GP Band", guardado
+    assert guardado["version"] == CURRENT_VERSION, guardado
+
+
+def test_el_token_de_telegram_no_se_queda_en_el_log():
+    """El token viaja en la URL de la API y httpx la registra completa.
+
+    Se encontraron 1938 apariciones del token real en data/bot.log del
+    portable. Un log de texto plano con la credencial adentro es una credencial
+    tirada en el piso.
+
+    El token de esta prueba se ARMA en runtime a proposito: escrito en el fuente
+    con esa forma, el escaner de credenciales del pre-commit lo tomaria por un
+    token real y abortaria el commit. Es lo mismo que paso al escribirlo fijo.
+    """
+    import tempfile as _tf
+
+    import bot_process
+
+    id_falso = "".join(str(n) for n in range(1234567890, 1234567900))
+    cuerpo_falso = "".join(c * 2 for c in "ABCDEFGHIJ")
+    token_falso = f"{id_falso}:{cuerpo_falso}"
+    linea = (
+        "2026-09-13 20:10:50 - httpx - INFO - HTTP Request: POST "
+        f"https://api.telegram.org/bot{token_falso}/getMe \"HTTP/1.1 200 OK\""
+    )
+
+    limpio = bot_process._ocultar_secretos(linea)
+    assert token_falso not in limpio, limpio
+    assert id_falso not in limpio, limpio
+    assert "TOKEN-OCULTO" in limpio, limpio
+    # El valor diagnostico se conserva: el metodo y la ruta.
+    assert "POST" in limpio and "/getMe" in limpio, limpio
+
+    # Y de verdad no llega al archivo.
+    tmp = Path(_tf.mkdtemp())
+    original = bot_process.data_dir
+    bot_process.data_dir = lambda: tmp
+    try:
+        proc = bot_process.BotProcess()
+        proc._append_log(linea)
+        escrito = (tmp / "bot.log").read_text(encoding="utf-8")
+    finally:
+        bot_process.data_dir = original
+    assert token_falso not in escrito, escrito
+    assert "TOKEN-OCULTO" in escrito, escrito
+
+
 def test_defaults_when_file_missing():
     s = make_store()
     state = s.load()
