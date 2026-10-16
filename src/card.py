@@ -86,7 +86,7 @@ class CardManager:
     def control_keyboard(self) -> InlineKeyboardMarkup:
         """Teclado del mini reproductor persistente.
 
-        Fila 1: ⏮ anterior | ▶/⏸ alternar play-pause | ⏭ siguiente | ⏹ detener
+        Fila 1: ⏮ anterior | ⏪10 atras | ▶/⏸ alternar | ⏩10 adelante | ⏭ siguiente | ⏹ detener
         Fila 2: 🔊−10 | <volumen actual> | 🔊+10 | 📋 lista
         Fila 3: ⚙️ Calidad: Np | 👥 Usuarios (solo admin puede usarlas)
         """
@@ -94,7 +94,9 @@ class CardManager:
         keyboard = [
             [
                 InlineKeyboardButton("⏮", callback_data="ctl:prev"),
+                InlineKeyboardButton("⏪10", callback_data="ctl:seek-10"),
                 InlineKeyboardButton(play_pause, callback_data="ctl:pp"),
+                InlineKeyboardButton("⏩10", callback_data="ctl:seek+10"),
                 InlineKeyboardButton("⏭", callback_data="ctl:next"),
                 InlineKeyboardButton("⏹", callback_data="ctl:stop"),
             ],

@@ -596,6 +596,15 @@ class Player:
         await self.command("set", "pause", "yes")
         await self.command("seek", "0", "absolute")
 
+    async def seek(self, delta: int) -> None:
+        """Salta `delta` segundos desde la posicion actual (negativo = atras).
+
+        Es el seek de la tarjeta (⏪10/⏩10): a diferencia de rewind(), no
+        toca la pausa ni la posicion absoluta, solo mueve el cursor dentro
+        del stream cargado.
+        """
+        await self.command("seek", str(int(delta)), "relative")
+
     async def set_volume(self, volume: int) -> None:
         volume = max(0, min(100, volume))
         await self.command("set", "volume", str(volume))

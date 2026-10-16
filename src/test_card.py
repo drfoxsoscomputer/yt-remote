@@ -136,6 +136,7 @@ class FakePlayer:
         self.loaded = []
         self.starts = 0
         self.rewinds = 0
+        self.seeks = []
 
     @property
     def is_running(self):
@@ -165,6 +166,9 @@ class FakePlayer:
 
     async def rewind(self):
         self.rewinds += 1
+
+    async def seek(self, delta):
+        self.seeks.append(delta)
 
 
 class FakeApp:
@@ -253,15 +257,16 @@ def test_control_keyboard_and_status():
     b = make_bot()
     kb = b._control_keyboard()
     rows = kb.inline_keyboard
-    # Fila 1: 4 botones de control (sin lupa); fila 2: vol-10, estado, vol+10, lista
+    # Fila 1: ⏮, seek atras, play/pause, seek adelante, ⏭, ⏹;
+    # fila 2: vol-10, estado, vol+10, lista
     labels1 = [btn.text for btn in rows[0]]
     labels2 = [btn.text for btn in rows[1]]
-    assert labels1 == ["⏮", "⏸️", "⏭", "⏹"], labels1
+    assert labels1 == ["⏮", "⏪10", "⏸️", "⏩10", "⏭", "⏹"], labels1
     assert labels2 == ["🔊−10", "🔊 100", "🔊+10", "📋"], labels2
-    # En pausa el botón central (indice 1, sin lupa) debe ser ▶️
+    # En pausa el botón central (indice 2) debe ser ▶️
     b._paused = True
     kb = b._control_keyboard()
-    assert [btn.text for btn in kb.inline_keyboard[0]][1] == "▶️"
+    assert [btn.text for btn in kb.inline_keyboard[0]][2] == "▶️"
 
     # Estado: sin track
     assert "No hay ninguna cancion sonando." in b._track_status_text()
@@ -323,6 +328,45 @@ async def test_dispatch_vol():
     for _ in range(20):
         await b._on_control(FakeUpdate("ctl:vol+10"), SimpleNamespace(args=[]), "vol+10")
     assert b._volume == 100
+
+
+async def test_dispatch_seek():
+    """⏪10/⏩10 de la tarjeta: simetricos (10 s en cada sentido), mudos si
+    no hay mpv corriendo (no hay posicion que mover) y con permiso dj."""
+    b = make_bot()
+    await b._on_control(FakeUpdate("ctl:seek-10"), SimpleNamespace(args=[]), "seek-10")
+    await b._on_control(FakeUpdate("ctl:seek+10"), SimpleNamespace(args=[]), "seek+10")
+    assert b.player.seeks == [-10, 10], b.player.seeks
+    # Sin mpv corriendo no se busca: no hay stream cargado que mover.
+    b.player.running = False
+    await b._on_control(FakeUpdate("ctl:seek+10"), SimpleNamespace(args=[]), "seek+10")
+    assert b.player.seeks == [-10, 10], "sin mpv no debe buscar"
+    # Permiso: un user sin rol dj no puede hacer seek.
+    upd = FakeUpdate("ctl:seek+10", user_id=99)
+    b.player.running = True
+    await b._on_control(upd, SimpleNamespace(args=[]), "seek+10")
+    assert upd.answered == ("No tiene permiso para eso.",), upd.answered
+    assert b.player.seeks == [-10, 10], "el seek denegado no debe llegar al player"
+
+
+async def test_player_seek_emite_comando_mpv():
+    """El seek de la tarjeta se traduce en el comando mpv correcto:
+    seek N relative (negativo = atras), sin tocar pausa ni posicion."""
+    import json as _json
+
+    from player import Player
+
+    p = object.__new__(Player)  # sin arrancar mpv: solo probamos el wire
+    enviados = []
+
+    async def _fake_send(data):
+        enviados.append(data)
+
+    p._send_raw = _fake_send
+    await p.seek(-10)
+    await p.seek(10)
+    assert _json.loads(enviados[0])["command"] == ["seek", "-10", "relative"]
+    assert _json.loads(enviados[1])["command"] == ["seek", "10", "relative"]
 
 
 async def test_dispatch_unknown_action():

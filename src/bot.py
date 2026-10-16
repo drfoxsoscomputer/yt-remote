@@ -2057,7 +2057,10 @@ class YTRemoteBot:
         user_id = user.id if user else None
         role = self.roles.get_role(user_id) if user_id else "user"
 
-        CONTROL_ACTIONS = {"pp", "prev", "next", "stop", "vol-10", "vol+10", "vol-info"}
+        CONTROL_ACTIONS = {
+            "pp", "prev", "next", "stop", "vol-10", "vol+10", "vol-info",
+            "seek-10", "seek+10",
+        }
         if action in CONTROL_ACTIONS and user_id is not None and not self.roles.has_role(user_id, "dj"):
             await query.answer("No tiene permiso para eso.", show_alert=True)
             return
@@ -2097,6 +2100,14 @@ class YTRemoteBot:
                     await self.cmd_next(update, context)
                 elif action == "stop":
                     await self.cmd_stop(update, context)
+                elif action in ("seek-10", "seek+10"):
+                    if not self.player.is_running:
+                        # Sin mpv no hay posicion que mover: aviso y ya.
+                        await query.answer("No hay ninguna cancion sonando.")
+                        reflect_status = False
+                        return
+                    await self.player.seek(-10 if action == "seek-10" else 10)
+                    reflect_status = False  # la tarjeta no cambia de estado
                 elif action in ("vol-10", "vol+10"):
                     delta = -10 if action == "vol-10" else 10
                     self._volume = max(0, min(100, self._volume + delta))
