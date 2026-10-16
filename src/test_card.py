@@ -1851,19 +1851,21 @@ async def test_list_button_opens_separate_message():
     assert text.startswith("Lista:"), text
     kb = b._app.bot.sent[0][2]["reply_markup"]
     rows = kb.inline_keyboard
-    # dj: un boton de tema por fila (posicion global + titulo completo) y la
-    # nav [· ❌ ·] (una sola pagina).
+    # dj: un boton de tema por fila (posicion global + titulo completo), el
+    # boton 🕘 Historial y la nav [· ❌ ·] (una sola pagina).
     assert [btn.text for btn in rows[0]] == ["▶️ 1. Tema 0"]
     assert [btn.text for btn in rows[1]] == ["2. Tema 1"]
     assert [btn.text for btn in rows[2]] == ["3. Tema 2"]
-    assert [btn.text for btn in rows[3]] == ["·", "❌", "·"], rows[3]
+    assert [btn.text for btn in rows[3]] == ["🕘 Historial"], rows[3]
+    assert [btn.text for btn in rows[4]] == ["·", "❌", "·"], rows[4]
     # La card no se edita ni se desvanece.
     assert b._app.bot.edited == []
     assert b._app.bot.deleted == []
 
 
 async def test_list_open_for_user_no_track_buttons():
-    """Un user ve la lista pero NO recibe botones de tema: solo navegacion."""
+    """Un user ve la lista pero NO recibe botones de tema: solo 🕘 historial
+    y navegacion."""
     from queue_manager import QueueItem
 
     b = make_bot()
@@ -1879,8 +1881,9 @@ async def test_list_open_for_user_no_track_buttons():
     assert b._list_can_select is False
     kb = b._app.bot.sent[0][2]["reply_markup"]
     rows = kb.inline_keyboard
-    assert len(rows) == 1, "user: sin botones de tema, solo navegacion"
-    assert [btn.text for btn in rows[0]] == ["·", "❌", "·"]
+    assert len(rows) == 2, "user: sin botones de tema, solo 🕘 + navegacion"
+    assert [btn.text for btn in rows[0]] == ["🕘 Historial"]
+    assert [btn.text for btn in rows[1]] == ["·", "❌", "·"]
 
 
 async def test_list_radio_shows_current():
@@ -1902,7 +1905,7 @@ async def test_list_radio_shows_current():
     rows = kb.inline_keyboard
     assert rows[0][0].text == "▶️ Tema Sonando", rows
     assert rows[0][0].callback_data == "lst:close", rows
-    assert [btn.text for btn in rows[1]] == ["·", "❌", "·"]
+    assert [btn.text for btn in rows[2]] == ["·", "❌", "·"]
 
     list_id = b._list_message_id
     await b._on_list_callback(
@@ -1929,10 +1932,10 @@ async def test_list_paginates_with_arrows():
     )
     kb = b._app.bot.sent[0][2]["reply_markup"]
     rows = kb.inline_keyboard
-    assert len(rows) == 11, "pagina 1: 10 temas + navegacion"
+    assert len(rows) == 12, "pagina 1: 10 temas + 🕘 historial + navegacion"
     assert rows[0][0].text == "▶️ 1. Tema 0"
     assert rows[9][0].text == "10. Tema 9"
-    assert [btn.text for btn in rows[10]] == ["·", "❌", "▶"]
+    assert [btn.text for btn in rows[11]] == ["·", "❌", "▶"]
     # El texto del mensaje es SOLO el header: pagina actual y total.
     text1 = b._app.bot.sent[0][1]
     assert text1 == "Lista (pag 1/3):", text1
@@ -1946,7 +1949,7 @@ async def test_list_paginates_with_arrows():
     rows2 = kb2.inline_keyboard
     assert rows2[0][0].text == "11. Tema 10"
     assert rows2[9][0].text == "20. Tema 19"
-    assert [btn.text for btn in rows2[10]] == ["◀", "❌", "▶"]
+    assert [btn.text for btn in rows2[11]] == ["◀", "❌", "▶"]
     # El texto editado es SOLO el header de la pagina 2.
     assert b._app.bot.edited[-1][2] == "Lista (pag 2/3):"
 
@@ -1961,7 +1964,7 @@ async def test_list_paginates_with_arrows():
     # La ultima pagina no avanza: ▶ desaparece de la nav.
     b._list_page = 2
     kb4 = b._list_keyboard()
-    assert len(kb4.inline_keyboard) == 2, "pagina 3: 1 solo tema + nav"
+    assert len(kb4.inline_keyboard) == 3, "pagina 3: 1 solo tema + 🕘 + nav"
     assert kb4.inline_keyboard[0][0].text == "21. Tema 20"
     assert [btn.text for btn in kb4.inline_keyboard[-1]] == ["◀", "❌", "·"]
     # El header de la pagina 3 anuncia la pagina final (caso del usuario).
@@ -2133,6 +2136,125 @@ async def test_list_select_out_of_range_keeps_open():
     assert "Numero fuera de rango" in upd.answered_kwargs.get("text", "")
     assert b._list_message_id == list_id
     assert b._app.bot.deleted == []
+
+
+async def test_list_hub_historial_view():
+    """El 📋 es un hub de contexto: la cola gana un boton 🕘 Historial que
+    convierte el MISMO mensaje en el historial (🔄 con titulo completo,
+    🔗 enlace, 🗑 borrar) y 🔙 Cola vuelve a la cola."""
+    from queue_manager import QueueItem
+
+    b = make_bot()
+    b.queue.set_playlist([QueueItem(url=f"u{i}", title=f"Tema {i}") for i in range(3)])
+    b.queue._history_items.append(QueueItem(url="uv", title="Vieja Cancion"))
+    await b._on_control(
+        FakeUpdate("ctl:lista", user_id=77, chat_id=44), SimpleNamespace(args=[]), "lista"
+    )
+    cola_markup = b._app.bot.sent[-1][2]["reply_markup"]
+    cola_labels = [btn.text for fila in cola_markup.inline_keyboard for btn in fila]
+    assert "🕘 Historial" in cola_labels, cola_labels
+
+    upd = FakeUpdate("lst:historial", user_id=77, chat_id=44)
+    await b._on_list_callback(upd, SimpleNamespace(args=[]))
+    assert b._list_view == "historial", "el 🕘 cambia la vista del MISMO mensaje"
+    texto = b._app.bot.edited[-1][2]
+    markup = b._app.bot.edited[-1][3]["reply_markup"]
+    assert "Historial" in texto, texto
+    labels = [btn.text for fila in markup.inline_keyboard for btn in fila]
+    assert "🔄 1. Vieja Cancion" in labels, labels
+    assert "🔙 Cola" in labels, labels
+
+    upd2 = FakeUpdate("lst:cola", user_id=77, chat_id=44)
+    await b._on_list_callback(upd2, SimpleNamespace(args=[]))
+    assert b._list_view == "cola", "🔙 Cola vuelve a la cola"
+    assert "Lista" in b._app.bot.edited[-1][2]
+
+
+async def test_list_historial_abre_directo_si_cola_vacia():
+    """Cola vacia pero con historial: el 📋 abre DIRECTO en el historial (es
+    el unico lugar donde vive); solo toast cuando no hay nada en ninguna."""
+    from queue_manager import QueueItem
+
+    b = make_bot()
+    b.queue._history_items.append(QueueItem(url="uv", title="Vieja"))
+    upd = FakeUpdate("ctl:lista", user_id=77, chat_id=44)
+    await b._on_control(upd, SimpleNamespace(args=[]), "lista")
+    assert b._list_view == "historial", "debe abrir directo en el historial"
+    assert b._list_message_id is not None, "se envia el mensaje del historial"
+    assert "Historial" in b._app.bot.sent[-1][1]
+
+
+async def test_list_historial_rep_link_del():
+    """Acciones del historial: 🔄 repite (dj: resuelve stream y suena, la
+    lista se cierra), 🔗 manda el enlace al chat (cualquiera) sin cerrar y
+    🗑 borra la entrada (dj) re-renderizando."""
+    from queue_manager import QueueItem
+
+    b = make_bot()
+    b.queue._history_items.append(QueueItem(url="ua", title="Cancion A"))
+    b.queue._history_items.append(QueueItem(url="ub", title="Cancion B"))
+
+    async def fake_stream_for(url):
+        return (f"stream-{url}", None)
+
+    b._stream_for = fake_stream_for
+    b.playback.stream_for = fake_stream_for
+    await b._on_control(
+        FakeUpdate("ctl:lista", user_id=77, chat_id=44), SimpleNamespace(args=[]), "lista"
+    )
+    list_id = b._list_message_id
+    assert b._list_view == "historial"
+
+    # 🔄 repetir: resuelve y suena; la lista se cierra con desvanecimiento.
+    upd = FakeUpdate("lst:rep:0", user_id=77, chat_id=44)
+    await b._on_list_callback(upd, SimpleNamespace(args=[]))
+    assert b.player.loaded and b.player.loaded[-1] == ("stream-ua", None), b.player.loaded
+    assert b._list_message_id is None, "repetir cierra la lista"
+    assert (44, list_id) in b._app.bot.deleted
+
+    # 🔗 enlace: cualquiera lo pide; el bot manda el URL al chat y la lista
+    # sigue abierta.
+    await b._on_control(
+        FakeUpdate("ctl:lista", user_id=77, chat_id=44), SimpleNamespace(args=[]), "lista"
+    )
+    enviados_antes = len(b._app.bot.sent)
+    upd = FakeUpdate("lst:link:1", user_id=50, chat_id=44)
+    await b._on_list_callback(upd, SimpleNamespace(args=[]))
+    assert b._app.bot.sent[enviados_antes][1] == "ub", b._app.bot.sent
+    assert b._list_message_id is not None, "copiar el enlace no cierra"
+
+    # 🗑 borrar: quita la entrada del historial y re-renderiza la vista.
+    upd = FakeUpdate("lst:del:1", user_id=77, chat_id=44)
+    await b._on_list_callback(upd, SimpleNamespace(args=[]))
+    assert [i.url for i in b.queue._history_items] == ["ua"], b.queue._history_items
+    etiquetas = [
+        btn.text
+        for fila in b._app.bot.edited[-1][3]["reply_markup"].inline_keyboard
+        for btn in fila
+    ]
+    assert any("Cancion A" in t for t in etiquetas), etiquetas
+    assert not any("Cancion B" in t for t in etiquetas), "la entrada borrada desaparece"
+
+
+async def test_list_historial_permisos():
+    """Ver el historial es de cualquiera; 🔄 y 🗑 son del dj (alerta si no)."""
+    from queue_manager import QueueItem
+
+    b = make_bot()
+    b.roles.set_role(50, "user")
+    b.queue._history_items.append(QueueItem(url="ua", title="Cancion A"))
+    await b._on_control(
+        FakeUpdate("ctl:lista", user_id=50, chat_id=44), SimpleNamespace(args=[]), "lista"
+    )
+    assert b._list_view == "historial"
+    upd = FakeUpdate("lst:rep:0", user_id=50, chat_id=44)
+    await b._on_list_callback(upd, SimpleNamespace(args=[]))
+    assert upd.answered_kwargs.get("show_alert") is True
+    assert b.player.loaded == [], "el user no reproduce"
+    upd = FakeUpdate("lst:del:0", user_id=50, chat_id=44)
+    await b._on_list_callback(upd, SimpleNamespace(args=[]))
+    assert upd.answered_kwargs.get("show_alert") is True
+    assert len(b.queue._history_items) == 1, "el user no borra"
 
 
 async def test_playlist_expand_times_out():

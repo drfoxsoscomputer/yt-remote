@@ -43,6 +43,11 @@ PLAYLIST_ESPERAS = 15
 # Mensaje de lista (boton de lista): temas visibles por pagina.
 LIST_PAGE_SIZE = 10
 
+# Historial (boton 🕘 del hub del 📋): entradas visibles por pagina. Mas
+# corto que la cola a proposito: cada fila lleva tres botones (repetir,
+# enlace y borrar) ademas del titulo completo.
+HISTORY_PAGE_SIZE = 5
+
 # Editor de usuarios (boton de usuarios): usuarios conocidos visibles por pagina.
 MEMBERS_PAGE_SIZE = 10
 

@@ -98,6 +98,7 @@ _SEARCH_BATCH_CON_ARTISTA = _SEARCH_BATCH * 2
 # nombres para no cambiar las 40 referencias internas ni las pruebas.
 from constants import (  # noqa: E402
     EXPAND_TIMEOUT,
+    HISTORY_PAGE_SIZE,
     LIST_PAGE_SIZE,
     MAX_PLAYLIST,
     MEMBERS_PAGE_SIZE,
@@ -121,6 +122,7 @@ _EXPAND_TIMEOUT = EXPAND_TIMEOUT
 _PLAYLIST_WINDOW = PLAYLIST_WINDOW
 _PLAYLIST_ESPERAS = PLAYLIST_ESPERAS
 _LIST_PAGE_SIZE = LIST_PAGE_SIZE
+_HISTORY_PAGE_SIZE = HISTORY_PAGE_SIZE
 _MEMBERS_PAGE_SIZE = MEMBERS_PAGE_SIZE
 _SEARCH_BATCH = SEARCH_BATCH
 _SEARCH_PAGE_SIZE = SEARCH_PAGE_SIZE
@@ -206,6 +208,12 @@ class YTRemoteBot:
         # (True si lo abrio un admin/dj). Fijo durante la vida del mensaje:
         # al paginar no cambia aunque lo pages un user.
         self._list_can_select: bool = False
+        # Vista del mensaje-lista: "cola" (por defecto) o "historial". El 📋
+        # es un hub de contexto: la cola gana un boton 🕘 que convierte el
+        # MISMO mensaje en el historial, y 🔙 Cola vuelve. Ephemero como el
+        # mensaje mismo: un reinicio reabre en la cola.
+        self._list_view: str = "cola"
+        self._history_page: int = 0
         # Editor de usuarios (boton 👥): la lista vive en el chat PRIVADO del
         # admin. Los cambios quedan "staged" (sin persistir en roles.json)
         # hasta el boton ❌ (commit); tocar un usuario dos veces lo revierte.
@@ -2660,7 +2668,8 @@ class YTRemoteBot:
         `_list_can_select` decide si hay botones de tema: al paginar no
         cambia aunque lo pages un user. La fila de navegacion mantiene 3
         slots para que el ❌ quede centrado; el slot vacio usa "·" (callback
-        inerte `lst:noop`).
+        inerte `lst:noop`). Al pie, un boton � Historial convierte el MISMO
+        mensaje en el historial (el hub de contexto del 📋).
         """
         items = self.queue.all()
         current = self.queue.current
@@ -2704,6 +2713,67 @@ class YTRemoteBot:
             if pages > 1 and page < pages - 1
             else InlineKeyboardButton("·", callback_data="lst:noop")
         )
+        rows.append(
+            [InlineKeyboardButton("🕘 Historial", callback_data="lst:historial")]
+        )
+        rows.append([prev, close, next_])
+        return InlineKeyboardMarkup(rows)
+
+    def _history_text(self, page: int = 0) -> str | None:
+        """Encabezado del historial del hub; None si no hay nada registrado."""
+        items = list(self.queue._history_items)
+        if not items:
+            return None
+        pages = max(1, (len(items) + _HISTORY_PAGE_SIZE - 1) // _HISTORY_PAGE_SIZE)
+        if pages <= 1:
+            return "🕘 Historial:"
+        page = max(0, min(page, pages - 1))
+        return f"🕘 Historial (pag {page + 1}/{pages}):"
+
+    def _history_keyboard(self) -> InlineKeyboardMarkup:
+        """Teclado del historial: una fila por cancion con repetir (🔄 con el
+        titulo COMPLETO, igual que la cola), copiar enlace (🔗) y borrar (🗑);
+        al pie [🔙 Cola] y la navegacion habitual."""
+        items = list(self.queue._history_items)
+        pages = max(1, (len(items) + _HISTORY_PAGE_SIZE - 1) // _HISTORY_PAGE_SIZE)
+        page = max(0, min(self._history_page, pages - 1))
+        start = page * _HISTORY_PAGE_SIZE
+
+        rows: list[list[InlineKeyboardButton]] = []
+        for idx, it in enumerate(
+            items[start : start + _HISTORY_PAGE_SIZE], start=start
+        ):
+            rows.append(
+                [
+                    InlineKeyboardButton(
+                        f"🔄 {idx + 1}. {it.title.strip()}",
+                        callback_data=f"lst:rep:{idx}",
+                    ),
+                    InlineKeyboardButton("🔗", callback_data=f"lst:link:{idx}"),
+                    InlineKeyboardButton("🗑", callback_data=f"lst:del:{idx}"),
+                ]
+            )
+        if not rows:
+            rows.append(
+                [
+                    InlineKeyboardButton(
+                        "El historial esta vacio.", callback_data="lst:noop"
+                    )
+                ]
+            )
+        rows.append([InlineKeyboardButton("🔙 Cola", callback_data="lst:cola")])
+
+        prev = (
+            InlineKeyboardButton("◀", callback_data="lst:prev")
+            if pages > 1 and page > 0
+            else InlineKeyboardButton("·", callback_data="lst:noop")
+        )
+        close = InlineKeyboardButton("❌", callback_data="lst:close")
+        next_ = (
+            InlineKeyboardButton("▶", callback_data="lst:next")
+            if pages > 1 and page < pages - 1
+            else InlineKeyboardButton("·", callback_data="lst:noop")
+        )
         rows.append([prev, close, next_])
         return InlineKeyboardMarkup(rows)
 
@@ -2728,16 +2798,26 @@ class YTRemoteBot:
     async def _open_queue_list(
         self, query, user_id: int | None, chat_id: int
     ) -> None:
-        """Boton 📋 de la card: abre la lista como MENSAJE aparte.
+        """Boton 📋 de la card: abre el mensaje-lista como MENSAJE aparte.
+
+        Es un hub de contexto: por defecto muestra la COLA (pagina actual) con
+        un boton 🕘 Historial que convierte el MISMO mensaje en el historial;
+        si la cola esta vacia pero hay historial, abre DIRECTO en el
+        historial (es el unico lugar donde vive). Solo responde el toast
+        cuando no hay nada que mostrar en ninguna de las dos vistas.
 
         La card nunca se pisa: se envia un mensaje nuevo en el chat con la
         pagina ACTUAL (texto + botones paginados al unisono; el render clampa
         la pagina al rango valido). Si ya habia una lista abierta, se borra la
         anterior (con su desvanecimiento) y se manda una fresca (decision del
-        usuario: nunca editar una lista existente). Cola vacia: solo responde
-        el toast, no envia nada.
+        usuario: nunca editar una lista existente).
         """
+        self._list_view = "cola"
+        self._history_page = 0
         text = self._queue_list_text()
+        if text is None and self.queue._history_items:
+            text = self._history_text()
+            self._list_view = "historial"
         if text is None:
             try:
                 await query.answer("La lista esta vacia.")
@@ -2746,9 +2826,14 @@ class YTRemoteBot:
             return
         await self._close_list_message()
         self._list_can_select = user_id is not None and self.roles.has_role(user_id, "dj")
+        keyboard = (
+            self._history_keyboard()
+            if self._list_view == "historial"
+            else self._list_keyboard()
+        )
         try:
             msg = await self._app.bot.send_message(
-                chat_id, text, reply_markup=self._list_keyboard()
+                chat_id, text, reply_markup=keyboard
             )
         except Exception as exc:  # noqa: BLE001 - no romper la card
             logger.warning("No se pudo enviar el mensaje de la lista: %s", exc)
@@ -2759,10 +2844,16 @@ class YTRemoteBot:
     async def _edit_list_message(self) -> None:
         """Pagina el mensaje de la lista abierto (◀ ▶): edita TEXTO + botones
         de la pagina nueva (la misma pagina en ambos, se sincronizan). El
-        mensaje no se recrea; el flag de seleccion no cambia con la pagina."""
+        mensaje no se recrea; el flag de seleccion no cambia con la pagina.
+        Segun la vista (_list_view) pagina la cola o el historial."""
         if self._list_chat_id is None or self._list_message_id is None:
             return
-        text = self._queue_list_text(self._list_page)
+        if self._list_view == "historial":
+            text = self._history_text(self._history_page)
+            keyboard = self._history_keyboard()
+        else:
+            text = self._queue_list_text(self._list_page)
+            keyboard = self._list_keyboard()
         if text is None:
             return
         try:
@@ -2770,7 +2861,7 @@ class YTRemoteBot:
                 text,
                 chat_id=self._list_chat_id,
                 message_id=self._list_message_id,
-                reply_markup=self._list_keyboard(),
+                reply_markup=keyboard,
             )
         except Exception as exc:  # noqa: BLE001 - no romper el flujo
             logger.warning("No se pudo paginar la lista: %s", exc)
@@ -2788,14 +2879,17 @@ class YTRemoteBot:
     async def _on_list_callback(
         self, update: Update, context: ContextTypes.DEFAULT_TYPE
     ) -> None:
-        """Botones del mensaje de la lista (callback `lst:*`).
+        """Botones del mensaje-lista (callback `lst:*`), el hub del 📋.
 
         - `lst:close`: CUALQUIER usuario cierra: borra el mensaje de la lista
           (con su desvanecimiento).
-        - `lst:prev`/`lst:next`: cualquiera pagina (se edita TEXTO + botones
-          del mensaje abierto; ambos muestran la misma pagina).
+        - `lst:prev`/`lst:next`: cualquiera pagina la vista abierta (cola o
+          historial); se edita TEXTO + botones al unisono.
+        - `lst:historial`/`lst:cola`: cambia la vista sobre el MISMO mensaje.
         - `lst:N`: solo admin/dj (alerta si no): salta a la cancion N de la
           cola y la reproduce de inmediato; la lista se borra al salir.
+        - `lst:rep:N` (dj) repite la cancion N del historial; `lst:link:N`
+          (cualquiera) manda su enlace al chat; `lst:del:N` (dj) la borra.
         - `lst:noop`: placeholder inerte, se responde mudo.
 
         Cada callback se responde UNA sola vez (un answer por query).
@@ -2809,8 +2903,27 @@ class YTRemoteBot:
             await self._list_answer(query)
             return
 
+        if action == "historial":
+            if not self.queue._history_items:
+                await self._list_answer(query, "El historial esta vacio.")
+                return
+            self._list_view = "historial"
+            self._history_page = 0
+            await self._edit_list_message()
+            await self._list_answer(query)
+            return
+
+        if action == "cola":
+            self._list_view = "cola"
+            await self._edit_list_message()
+            await self._list_answer(query)
+            return
+
         if action in ("prev", "next"):
-            self._list_page += -1 if action == "prev" else 1
+            if self._list_view == "historial":
+                self._history_page += -1 if action == "prev" else 1
+            else:
+                self._list_page += -1 if action == "prev" else 1
             await self._edit_list_message()
             await self._list_answer(query)
             return
@@ -2818,6 +2931,10 @@ class YTRemoteBot:
         if action == "close":
             await self._list_answer(query)
             await self._close_list_message()
+            return
+
+        if action.startswith(("rep:", "link:", "del:")):
+            await self._historial_accion(query, update, user_id, action)
             return
 
         try:
@@ -2846,6 +2963,68 @@ class YTRemoteBot:
                     # movio el cursor y la posicion 1 es el item actual).
                     await self._list_answer(query, f"Ya esta sonando: {item.title}")
                     return
+                await self._list_answer(query)
+                await self._close_list_message()
+                await self._play_item(update, item, preserve_current=True)
+            finally:
+                self._from_card = False
+
+    async def _historial_accion(
+        self, query, update, user_id: int | None, action: str
+    ) -> None:
+        """Acciones del historial del hub: rep:N (dj, repite), link:N
+        (cualquiera, manda el enlace al chat) y del:N (dj, borra la entrada).
+
+        El historial se relee de memoria en cada accion: los indices del
+        teclado son posiciones vivas, y si el historial cambio entre el
+        render y el toque se responde "fuera de rango" en vez de tocar la
+        cancion equivocada.
+        """
+        kind, _, raw = action.partition(":")
+        try:
+            idx = int(raw)
+        except ValueError:
+            await self._list_answer(query)
+            return
+        historial = list(self.queue._history_items)
+        if idx < 0 or idx >= len(historial):
+            await self._list_answer(query, "Numero fuera de rango.")
+            return
+        item = historial[idx]
+
+        if kind == "link":
+            if self._list_chat_id is None:
+                return
+            try:
+                await self._app.bot.send_message(self._list_chat_id, item.url)
+            except Exception as exc:  # noqa: BLE001 - no romper el hub
+                logger.warning("No se pudo enviar el enlace del historial: %s", exc)
+                await self._list_answer(query, "No se pudo enviar el enlace.")
+                return
+            await self._list_answer(query, "Enlace enviado ✓")
+            return
+
+        if user_id is None or not self.roles.has_role(user_id, "dj"):
+            await self._list_answer(
+                query, "Solo el admin o un dj pueden hacer eso.", show_alert=True
+            )
+            return
+
+        if kind == "del":
+            if self.queue.borrar_historial_en(idx) is None:
+                await self._list_answer(query, "Numero fuera de rango.")
+                return
+            self._persist_dirty()
+            await self._edit_list_message()
+            await self._list_answer(query, "Borrado del historial ✓")
+            return
+
+        # rep: repetir la cancion del historial con las MISMAS garantias que
+        # elegir de la cola: resolver el stream primero y, si falla, no se
+        # toca lista, historial ni tarjeta.
+        async with self._control_lock:
+            self._from_card = True
+            try:
                 await self._list_answer(query)
                 await self._close_list_message()
                 await self._play_item(update, item, preserve_current=True)

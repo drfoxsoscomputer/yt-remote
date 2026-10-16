@@ -150,6 +150,21 @@ class QueueManager:
             return self._history_items.pop()
         return None
 
+    def borrar_historial_en(self, indice: int) -> QueueItem | None:
+        """Borra la entrada `indice` (0-based) del historial y la devuelve.
+
+        El deque no admite acceso por indice: se reconstruye sin esa entrada.
+        La base se re-sincroniza sola en el proximo guardado (el historial se
+        persiste entero desde la memoria).
+        """
+        if indice < 0 or indice >= len(self._history_items):
+            return None
+        items = list(self._history_items)
+        borrado = items.pop(indice)
+        self._history_items.clear()
+        self._history_items.extend(items)
+        return borrado
+
     def peek(self, index: int = 0) -> QueueItem | None:
         """El item que sigue al actual a partir de `index` saltos (con wrap)."""
         if not self._items:
