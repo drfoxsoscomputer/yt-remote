@@ -19,7 +19,6 @@
     "yt-remote-v0.5.0-portable.zip",
     ".env.example",
     ".env",
-    "launcher.spec",
     "pytest.ini",
     "gitleaks.toml"
   ],
