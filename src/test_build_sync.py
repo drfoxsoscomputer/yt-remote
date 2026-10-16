@@ -22,7 +22,6 @@ DIST_SRC = SRC.parent / "dist" / "ytremote" / "src"
 # helper post-build no copie tiene que romper ESTA prueba, no el bot del usuario.
 NO_SE_EMPAQUETAN = {
     "demo_roles.py",  # demo en terminal, no es parte de la app
-    "launcher.py",    # GUI vieja: la app usa launcher_web (main_launcher.py)
 }
 
 
