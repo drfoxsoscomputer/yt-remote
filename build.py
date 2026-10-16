@@ -21,6 +21,7 @@ import os
 import shutil
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 
 from release_zip import load_rules, make_release_zip
@@ -61,9 +62,37 @@ EXCLUDES = [
 ]
 
 
+def _resguardar_data_local() -> Path | None:
+    """Rescata dist\\ytremote\\data ANTES de limpiar dist (16/oct: un build
+    sobre una instalación en uso BORRO la data real del usuario: session.enc
+    y ytremote.db vivían ahí). El ZIP excluye data/ por diseño, pero el
+    rmtree de PyInstaller no distingue: esta guardia hace lo que el nombre
+    prometía — conservar la data local."""
+    data = DIST_DIR / "data"
+    if not data.exists() or not any(p.is_file() for p in data.rglob("*")):
+        return None
+    backup = Path(tempfile.mkdtemp(prefix="ytremote_data_backup_"))
+    shutil.copytree(data, backup, dirs_exist_ok=True)
+    print(f"[GUARDIA] data\\ local respaldada en {backup} antes de limpiar dist.")
+    return backup
+
+
+def _restaurar_data_local(backup: Path | None) -> None:
+    """Devuelve la data local a dist\\ytremote\\data tras la limpieza."""
+    if backup is None:
+        return
+    destino = DIST_DIR / "data"
+    destino.mkdir(parents=True, exist_ok=True)
+    shutil.copytree(backup, destino, dirs_exist_ok=True)
+    shutil.rmtree(backup, ignore_errors=True)
+    print(f"[GUARDIA] data\\ local restaurada en {destino}.")
+
+
 def run_pyinstaller():
     """Corre PyInstaller onedir para main_launcher.py -> dist/ytremote/ytremote.exe."""
-    # Limpiar builds anteriores
+    # Limpiar builds anteriores (la data local se rescata y se devuelve:
+    # dist\ytremote puede ser una instalación EN USO, no solo un artefacto).
+    data_backup = _resguardar_data_local()
     for d in (DIST_DIR, BUILD_DIR):
         if d.exists():
             shutil.rmtree(d)
@@ -116,6 +145,7 @@ def run_pyinstaller():
         raise SystemExit(f"ERROR: No se generó {exe}")
 
     print(f"\n[OK] Ejecutable generado: {exe} ({exe.stat().st_size / 1024 / 1024:.1f} MB)")
+    _restaurar_data_local(data_backup)
     return exe
 
 
