@@ -7,9 +7,19 @@
 Bot de Telegram para controlar la reproducción de videos de YouTube en su PC.
 Búsqueda por chat, tarjeta de control con botones, radio automática por artista.
 
-**Versión actual:** v1.1.3 (una sola base de datos para todo, resultados de
-búsqueda legibles en el celular, aviso de "Sin conexión" en la ventana, y el
-token del bot ya no se vuelve a mostrar en la pantalla).
+**Versión actual:** v1.1.4 (arreglos del reproductor: el video ya arranca en
+todas las PCs, `/next` no se rinde con un enlace viejo de YouTube, y los
+fallos muestran el motivo real).
+
+Lo que cambia respecto de v1.1.3:
+
+| Cambio | Qué es |
+|--------|--------|
+| Video que no arrancaba | En Windows, el programa descartaba por error el comando que le mandaba el video a mpv: el reproductor abría la ventana y se quedaba sin nada, y el bot respondía "mpv no confirmó la carga". Arreglado |
+| `/next` se rendía | Cuando YouTube rechazaba un enlace viejo (error 403), el bot esperaba hasta 15 segundos con el reproductor muerto y después fallaba. Ahora descarta ese enlace, busca uno nuevo al instante y el siguiente tema suena igual |
+| Motivo real de los fallos | Si mpv rechaza un video, el aviso dice el motivo real (por ejemplo "HTTP 403") en vez de un error genérico. Si YouTube devuelve el video sin formatos, también lo explica |
+| El proceso no salía | Al detener el bot, el proceso quedaba vivo por un hilo bloqueado. Ahora cierra limpio |
+| Log del reproductor | mpv escribe su propio registro en `data/mpv.log`, así que cualquier fallo se puede diagnosticar a la distancia |
 
 Lo que cambia respecto de v1.1.2:
 
