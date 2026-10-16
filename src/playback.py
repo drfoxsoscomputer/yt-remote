@@ -360,11 +360,14 @@ class PlaybackEngine:
             self.prefetch_resolved = None
             try:
                 await self._app.player.start()
-                await self._app.player.load(stream_url, audio_url)
-                await self._app.player.play()
             except RuntimeError as exc:
                 await self._app._reply(None, f"No se pudo continuar: {exc}")
                 await self._app._notify_admin(f"Fallo en autoplay: {exc}")
+                return
+            fallo = await self.load_with_retry(candidate.url, stream_url, audio_url)
+            if fallo is not None:
+                await self._app._reply(None, f"No se pudo continuar: {fallo}")
+                await self._app._notify_admin(f"Fallo en autoplay: {fallo}")
                 return
             self._app._push_to_nav_back()
             # Si venia de la playlist, avanzar el cursor (bucle) para no repetir
@@ -409,6 +412,39 @@ class PlaybackEngine:
             await self.advance_after_end(context)
 
     # --- Reproducir --------------------------------------------------------
+
+    async def load_with_retry(
+        self, candidate_url: str, stream_url: str, audio_url: str | None
+    ) -> str | None:
+        """Carga y reproduce; si mpv rechaza la URL cacheada (ej: 403 de
+        YouTube sobre una firma ya vencida), la descarta, re-resuelve fresca
+        UNA vez y reintenta. Devuelve None si arranco, o el motivo real del
+        ultimo fallo para que el bot lo muestre.
+
+        Un solo camino de reintento para TODOS los flujos (pick, /next,
+        auto-advance): antes cada flujo decidia por su cuenta y los que no
+        reintentaban dejaban al usuario sin musica por una URL vencida.
+        """
+        try:
+            await self._app.player.load(stream_url, audio_url)
+            await self._app.player.play()
+            return None
+        except RuntimeError as exc:
+            ultimo = str(exc)
+        if candidate_url not in self.stream_cache:
+            return ultimo
+        logger.info("Stream cacheado rechazado, re-resolviendo: %s", candidate_url)
+        self.stream_cache.pop(candidate_url, None)
+        fresco = await self.stream_for(candidate_url)
+        if fresco is None:
+            return ultimo
+        stream_url, audio_url = fresco
+        try:
+            await self._app.player.load(stream_url, audio_url)
+            await self._app.player.play()
+            return None
+        except RuntimeError as exc:
+            return str(exc)
 
     async def play_item(
         self,
@@ -456,34 +492,20 @@ class PlaybackEngine:
             await self._app._notify_admin(f"mpv no arranco: {exc}")
             return False
 
-        for attempt in range(2):
-            try:
-                await self._app.player.load(stream_url, audio_url)
-                await self._app.player.play()
-                self._app._paused = False
-                if not preserve_current:
-                    # Guardar el item actual en la pila de navegación antes
-                    # de cambiar el cursor (solo en modo radio).
-                    self._app._push_to_nav_back()
-                    self._app.queue.set_current(item)
-                    self._app._persist_dirty()
-                break
-            except RuntimeError as exc:
-                if attempt == 1 or item.url not in self.stream_cache:
-                    await self._app._reply(update, f"No se pudo reproducir: {exc}")
-                    await self._app._notify_admin(
-                        f"Fallo al reproducir {item.title}: {exc}"
-                    )
-                    return False
-                # URL cacheada vencida: descartar esa entrada, re-resolver y
-                # reintentar una vez.
-                logger.info("Stream cacheado expirado, re-resolviendo: %s", item.url)
-                self.stream_cache.pop(item.url, None)
-                resolved = await self.stream_for(item.url)
-                if not resolved:
-                    await self._app._reply(update, f"No se pudo reproducir: {exc}")
-                    return False
-                stream_url, audio_url = resolved
+        fallo = await self.load_with_retry(item.url, stream_url, audio_url)
+        if fallo is not None:
+            await self._app._reply(update, f"No se pudo reproducir: {fallo}")
+            await self._app._notify_admin(
+                f"Fallo al reproducir {item.title}: {fallo}"
+            )
+            return False
+        self._app._paused = False
+        if not preserve_current:
+            # Guardar el item actual en la pila de navegación antes
+            # de cambiar el cursor (solo en modo radio).
+            self._app._push_to_nav_back()
+            self._app.queue.set_current(item)
+            self._app._persist_dirty()
         self.schedule_prefetch(item)
         # La tarjeta del mini reproductor refleja el tema nuevo. En acciones
         # del usuario se crea/edita en su chat; en el auto-advance (update

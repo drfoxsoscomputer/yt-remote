@@ -99,6 +99,16 @@ class Player:
         # llega mientras el video se esta cargando, mpv descarta la pista de
         # audio al completar file-loaded => video sin sonido.
         self._file_loaded_event = threading.Event()
+        # Se dispara cuando mpv RECHAZA el stream (end-file reason=error,
+        # ej: HTTP 403 de YouTube sobre una firma vencida). load() falla al
+        # instante con el motivo real en vez de esperar el timeout creyendo
+        # que el stream solo estaba lento.
+        self._load_failed_event = threading.Event()
+        self._load_error: str | None = None
+        # Senal unica de load(): la levantan el file-loaded (exito) y el
+        # end-file de error (rechazo). load() espera UNA vez esta senal y
+        # luego mira cual de los dos fue.
+        self._load_signal = threading.Event()
         # Se marca cuando el reader thread abrio el pipe, se suscribio a
         # eof-reached y entro en bucle de lectura. start() espera este evento
         # antes de retornar para no descartar los primeros comandos.
@@ -231,6 +241,13 @@ class Player:
             "--input-ipc-server=" + MPV_PIPE,
             "--terminal=no",
             "--really-quiet",
+            # mpv NO resuelve videos por su cuenta: el bot le pasa streams ya
+            # resueltos por yt-dlp. Con el ytdl hook activo, un stream
+            # rechazado (403) hacia que mpv re-consultara a yt-dlp (10-15 s)
+            # antes de rendirse; sin el hook, mpv rechaza al instante y el
+            # bot puede re-resolver fresco y reintentar sin el usuario
+            # quedado viendo una tarjeta muerta.
+            "--ytdl=no",
             "--idle=yes",
             # Un master .m3u8 LOCAL (directos HLS) se apertura con el
             # demuxer lavf, que por defecto restringe los protocolos a
@@ -311,49 +328,7 @@ class Player:
                             continue
                         if getattr(self, "_debug_events", None) is not None:
                             self._debug_events.append(ev)
-                        # Respuesta a un comando con request_id (ver _request):
-                        # capturar el 'data' y despertar al que espera.
-                        if isinstance(ev, dict) and ev.get("request_id") is not None:
-                            rid = ev["request_id"]
-                            ev_obj = self._request_events.get(rid)
-                            if ev_obj is not None:
-                                self._request_results[rid] = ev.get("data")
-                                ev_obj.set()
-                                self._request_events.pop(rid, None)
-                        if isinstance(ev, dict) and ev.get("event") == "file-loaded":
-                            # mpv termino de cargar el track: load() lo espera
-                            # antes de mandar el audio-add (ver _file_loaded_event).
-                            self._file_loaded_event.set()
-                        # mpv emits 'end-file' when the current track finishes.
-                        if isinstance(ev, dict) and ev.get("event") == "end-file":
-                            # El track termino: el player deja de estar activo,
-                            # permitiendo al auto-advance reproducir el siguiente.
-                            self._track_active = False
-                            # Solo un fin NATURAL (eof) dispara el avance.
-                            # 'stop' (comando /stop) o 'replace' (cambio de
-                            # tema) NO deben encadenar el siguiente tema.
-                            if ev.get("reason") == "eof":
-                                try:
-                                    if self._on_track_ended:
-                                        self._on_track_ended()
-                                except Exception:
-                                    pass
-                            # only one end-file per track, continue listening
-                        # Con keep-open mpv NO descarga el archivo al terminar,
-                        # asi que end-file no llega; en su lugar la propiedad
-                        # eof-reached pasa a true (property-change).
-                        if (
-                            isinstance(ev, dict)
-                            and ev.get("event") == "property-change"
-                            and ev.get("name") == "eof-reached"
-                            and ev.get("data") is True
-                        ):
-                            self._track_active = False
-                            try:
-                                if self._on_track_ended:
-                                    self._on_track_ended()
-                            except Exception:
-                                pass
+                        self._on_mpv_event(ev)
             except FileNotFoundError:
                 # pipe gone (mpv stopped); ignore and exit thread
                 pass
@@ -365,6 +340,67 @@ class Player:
 
         thread = threading.Thread(target=_reader_loop, daemon=True)
         thread.start()
+
+    def _on_mpv_event(self, ev: object) -> None:
+        """Procesa un evento JSON que mpv manda por el IPC.
+
+        Vive separado del loop del reader para poder probarlo sin named
+        pipe: los tests disparan los mismos eventos que mpv (file-loaded,
+        end-file, property-change) y verifican lo que el bot haria.
+        """
+        if not isinstance(ev, dict):
+            return
+        # Respuesta a un comando con request_id (ver _request): capturar el
+        # 'data' y despertar al que espera.
+        if ev.get("request_id") is not None:
+            rid = ev["request_id"]
+            ev_obj = self._request_events.get(rid)
+            if ev_obj is not None:
+                self._request_results[rid] = ev.get("data")
+                ev_obj.set()
+                self._request_events.pop(rid, None)
+        if ev.get("event") == "file-loaded":
+            # mpv termino de cargar el track: load() lo espera antes de
+            # mandar el audio-add (ver _file_loaded_event).
+            self._file_loaded_event.set()
+            self._load_signal.set()
+        # mpv emits 'end-file' when the current track finishes.
+        if ev.get("event") == "end-file":
+            # El track termino: el player deja de estar activo,
+            # permitiendo al auto-advance reproducir el siguiente.
+            self._track_active = False
+            if ev.get("reason") == "error":
+                # mpv RECHAZO el stream (ej: HTTP 403 de YouTube sobre una
+                # firma vencida). load() tiene que enterarse YA y fallar
+                # con el motivo real: sin esto el load se quedaba los 15 s
+                # del timeout creyendo que el stream solo estaba lento.
+                self._load_error = ev.get("error") or ""
+                self._load_failed_event.set()
+                self._load_signal.set()
+            # Solo un fin NATURAL (eof) dispara el avance.
+            # 'stop' (comando /stop) o 'replace' (cambio de
+            # tema) NO deben encadenar el siguiente tema.
+            if ev.get("reason") == "eof":
+                try:
+                    if self._on_track_ended:
+                        self._on_track_ended()
+                except Exception:
+                    pass
+            # only one end-file per track, continue listening
+        # Con keep-open mpv NO descarga el archivo al terminar,
+        # asi que end-file no llega; en su lugar la propiedad
+        # eof-reached pasa a true (property-change).
+        if (
+            ev.get("event") == "property-change"
+            and ev.get("name") == "eof-reached"
+            and ev.get("data") is True
+        ):
+            self._track_active = False
+            try:
+                if self._on_track_ended:
+                    self._on_track_ended()
+            except Exception:
+                pass
 
     def _terminate(self) -> None:
         if self._proc is not None and self._proc.poll() is None:
@@ -476,8 +512,14 @@ class Player:
         Si mpv NO confirma el file-loaded dentro del timeout, el load fallo
         (mpv quedo en idle): se lanza RuntimeError para que el bot muestre un
         error real en vez de una tarjeta "Sonando" sin miniatura ni sonido.
+        Si mpv RECHAZA el stream (end-file reason=error, ej: HTTP 403), el
+        RuntimeError sale AL INSTANTE con el motivo real de mpv, sin esperar
+        el timeout: el caller puede re-resolver y reintentar ya.
         """
         self._file_loaded_event.clear()
+        self._load_failed_event.clear()
+        self._load_signal.clear()
+        self._load_error = None
         self._loaded.append((url, audio_url))
         if audio_url and _is_hls_url(url) and _is_hls_url(audio_url):
             # Directo HLS: master local que une video + audio en un solo
@@ -495,13 +537,22 @@ class Player:
                 audio_url = None
         await self.command("loadfile", url, "replace")
         # Event.wait(timeout) devuelve False al vencer (no usar wait_for +
-        # to_thread: un thread bloqueado en Event.wait no se cancela y colgaria).
+        # to_thread: un thread bloqueado en Event.wait no se cancela y
+        # colgaria). La senal la levantan el file-loaded (exito) y el
+        # end-file de error (mpv rechazo el stream): cualquiera de los dos
+        # despierta a load() sin esperar el timeout entero.
         if not await asyncio.to_thread(
-            self._file_loaded_event.wait, _PIPE_WAIT_TIMEOUT
+            self._load_signal.wait, _PIPE_WAIT_TIMEOUT
         ):
-            # Sin file-loaded no hubo track: mpv quedo en idle. No mentir en
+            # Sin senal no hubo track: mpv quedo en idle. No mentir en
             # la tarjeta: el bot convierte esto en un error visible.
             raise RuntimeError("mpv no confirmo la carga del stream (timeout).")
+        if not self._file_loaded_event.is_set():
+            # end-file con reason=error: mpv rechazo el stream de una
+            # (ej: HTTP 403). El motivo real viaja al aviso del bot y el
+            # caller puede re-resolver fresco y reintentar ya.
+            detalle = f": {self._load_error}" if self._load_error else ""
+            raise RuntimeError(f"mpv rechazo el stream{detalle}")
         if audio_url:
             # DASH: el video ya cargo; agregar el audio separado ahora.
             for attempt in range(2):

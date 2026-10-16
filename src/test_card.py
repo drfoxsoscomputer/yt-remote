@@ -2456,7 +2456,7 @@ async def test_load_master_espera_file_loaded_y_marca_activo():
         p = player_mod.Player()
         tarea = asyncio.create_task(p.load(video, audio))
         await asyncio.sleep(0.2)
-        p._file_loaded_event.set()
+        p._on_mpv_event({"event": "file-loaded"})
         await asyncio.wait_for(tarea, timeout=1.0)
         with open(tmp, encoding="utf-8") as fh:
             escrito = fh.read()
@@ -2493,6 +2493,82 @@ async def test_load_sin_file_loaded_lanza_error_real():
     finally:
         player_mod.MPV_PIPE = original_pipe
         player_mod._PIPE_WAIT_TIMEOUT = original_timeout
+
+
+async def test_load_falla_rapido_con_el_motivo_real_de_mpv():
+    """Directo (fix /next 403, 16/oct): si mpv RECHAZA el stream (end-file
+    reason=error, ej: HTTP 403 sobre una firma vencida), load() falla AL
+    INSTANTE con el motivo real de mpv en vez de esperar los 15 s del
+    timeout creyendo que el stream estaba lento. Asi el caller puede
+    re-resolver fresco y reintentar sin el usuario quedado sin musica."""
+    import player as player_mod
+
+    original_pipe = player_mod.MPV_PIPE
+    original_timeout = player_mod._PIPE_WAIT_TIMEOUT
+    tmp = os.path.join(tempfile.gettempdir(), "mpv_pipe_error_endfile.json")
+    open(tmp, "w", encoding="utf-8").close()
+    player_mod.MPV_PIPE = tmp
+    player_mod._PIPE_WAIT_TIMEOUT = 5.0  # si no falla rapido, el test lo ve
+    try:
+        p = player_mod.Player()
+        tarea = asyncio.create_task(p.load("https://x/video.mp4"))
+        await asyncio.sleep(0.2)  # el load quedo esperando la senal
+        inicio = time.monotonic()
+        p._on_mpv_event(
+            {"event": "end-file", "reason": "error", "error": "HTTP error 403"}
+        )
+        try:
+            await asyncio.wait_for(tarea, timeout=2.0)
+        except RuntimeError as exc:
+            assert "403" in str(exc), f"se perdio el motivo real: {exc}"
+        else:
+            raise AssertionError("debia lanzar RuntimeError con el motivo real")
+        assert time.monotonic() - inicio < 1.0, (
+            "no fue rapido: espero el timeout entero en vez del rechazo"
+        )
+        assert p._track_active is False
+    finally:
+        player_mod.MPV_PIPE = original_pipe
+        player_mod._PIPE_WAIT_TIMEOUT = original_timeout
+        if os.path.exists(tmp):
+            os.remove(tmp)
+
+
+async def test_load_con_rechazo_no_encadena_un_segundo_load():
+    """Directo (fix /next 403): un rechazo que llega DESPUES de una carga
+    buena (mid-play) queda registrado para ese track muerto, pero el
+    SIGUIENTE load arranca limpio: el rechazo viejo no contamina la carga
+    nueva con un error fantasma."""
+    import player as player_mod
+
+    original_pipe = player_mod.MPV_PIPE
+    tmp = os.path.join(tempfile.gettempdir(), "mpv_pipe_post_load.json")
+    open(tmp, "w", encoding="utf-8").close()
+    player_mod.MPV_PIPE = tmp
+    try:
+        p = player_mod.Player()
+        tarea = asyncio.create_task(p.load("https://x/a.mp4"))
+        await asyncio.sleep(0.2)
+        p._on_mpv_event({"event": "file-loaded"})
+        await asyncio.wait_for(tarea, timeout=1.0)
+        # Rechazo mid-play del track que ya cargo.
+        p._on_mpv_event(
+            {"event": "end-file", "reason": "error", "error": "HTTP error 403"}
+        )
+        assert p._load_failed_event.is_set(), "el rechazo si debe registrarse"
+        # El siguiente load arranca limpio (lo limpia load() al empezar).
+        tarea2 = asyncio.create_task(p.load("https://x/b.mp4"))
+        await asyncio.sleep(0.2)
+        assert p._load_error is None and not p._load_failed_event.is_set(), (
+            "el rechazo viejo contamino la carga nueva"
+        )
+        p._on_mpv_event({"event": "file-loaded"})
+        await asyncio.wait_for(tarea2, timeout=1.0)
+        assert p._track_active is True
+    finally:
+        player_mod.MPV_PIPE = original_pipe
+        if os.path.exists(tmp):
+            os.remove(tmp)
 
 
 async def test_garantia_comando_al_pipe_con_exists_mintiendo():
@@ -2549,6 +2625,30 @@ def test_launch_mpv_deja_su_log_en_data():
     log_args = [a for a in captured["args"] if a.startswith("--log-file=")]
     assert log_args, captured["args"]
     assert log_args[0].endswith("mpv.log"), log_args
+
+
+def test_launch_mpv_desactiva_su_propio_ytdl():
+    """Directo (fix /next 403, 16/oct): con el ytdl hook de mpv activo, un
+    stream rechazado (403) hacia que mpv re-consultara a yt-dlp por su
+    cuenta (10-15 s) antes de rendirse. El bot resuelve los streams el
+    mismo: mpv tiene que rechazar AL INSTANTE para que el bot pueda
+    re-resolver fresco y reintentar sin el usuario quedado sin musica."""
+    import player as player_mod
+
+    captured = {}
+
+    class FakePopen:
+        def __init__(self, args, **kwargs):  # noqa: ARG002
+            captured["args"] = args
+
+    original = player_mod.subprocess.Popen
+    player_mod.subprocess.Popen = FakePopen
+    try:
+        player_mod.Player()._launch_mpv()
+    finally:
+        player_mod.subprocess.Popen = original
+
+    assert "--ytdl=no" in captured["args"], captured["args"]
 
 
 def test_resolve_explica_video_sin_formatos():

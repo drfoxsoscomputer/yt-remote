@@ -645,6 +645,39 @@ async def test_garantia_la_radio_sigue_al_artista_de_lo_que_suena():
     assert semilla == "X", f"la radio no siguio al tema real: {semilla!r}"
 
 
+async def test_garantia_next_reintenta_si_youtube_rechaza_el_stream():
+    """Garantia (fix /next 403, 16/oct): YouTube rechaza con 403 la URL
+    cacheada del prefetch (firma vencida). El /next NO se rinde: descarta
+    la URL muerta, re-resuelve fresca y el siguiente tema suena igual."""
+    b = make_bot(fail_loads=1)  # el primer load muere como mpv rechazando
+    b.queue.set_current(QueueItem(url="v8", title="Sonando"))
+    siguiente = QueueItem(url="v9", title="Siguiente")
+    b.playback.stream_cache["v9"] = ("stream-viejo", None)
+    b._prefetch_resolved = ((siguiente, False), ("stream-viejo", None))
+    b.playback.schedule_prefetch = lambda item: None
+
+    async def resuelve_fresco(url):
+        assert url == "v9", f"re-resolvio otra cosa: {url}"
+        b.playback.stream_cache[url] = ("stream-fresco", None)
+        return ("stream-fresco", None)
+
+    b.playback.stream_for = resuelve_fresco
+
+    await b.cmd_next(FakeMessageUpdate("/next"), SimpleNamespace(args=[]))
+
+    cargado = [u for u, _ in b.player.loaded]
+    assert cargado == ["stream-viejo", "stream-fresco"], (
+        f"no re-resolvio tras el rechazo: {cargado}"
+    )
+    assert b.player.resumed >= 1, "el siguiente tema no quedo sonando"
+    assert b.playback.stream_cache.get("v9") == ("stream-fresco", None), (
+        "la URL muerta seguia en el cache"
+    )
+    assert b.queue.current is not None and b.queue.current.url == "v9", (
+        "el cursor no quedo en el siguiente"
+    )
+
+
 def run():
     total = run_sync_tests(globals())
     print(f"GARANTIAS TESTS OK ({total} pruebas)")

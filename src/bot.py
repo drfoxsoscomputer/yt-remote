@@ -2267,12 +2267,16 @@ class YTRemoteBot:
                 self._cancel_prefetch()
                 try:
                     await self.player.start()
-                    await self.player.load(stream_url, audio_url)
-                    await self.player.play()
-                    self._paused = False
                 except RuntimeError as exc:
                     await self._reply(update, f"No se pudo saltar: {exc}")
                     return
+                fallo = await self.playback.load_with_retry(
+                    candidate.url, stream_url, audio_url
+                )
+                if fallo is not None:
+                    await self._reply(update, f"No se pudo saltar: {fallo}")
+                    return
+                self._paused = False
                 if from_queue:
                     self.queue.next()
                 else:
@@ -2330,28 +2334,17 @@ class YTRemoteBot:
                 await self._reply(update, f"Problema al iniciar el reproductor: {exc}")
                 await self._notify_admin(f"mpv no arranco en /next: {exc}")
                 return
-            for attempt in range(2):
-                try:
-                    await self.player.load(stream_url, audio_url)
-                    await self.player.play()
-                    self._paused = False
-                    self.queue._current = item
-                    self.queue._items = []
-                    self.queue._cursor = 0
-                    break
-                except RuntimeError as exc:
-                    if attempt == 1 or item.url not in self._stream_cache:
-                        await self._reply(update, f"No se pudo reproducir: {exc}")
-                        await self._notify_admin(f"Fallo al reproducir {item.title}: {exc}")
-                        return
-                    logger.info("Stream cacheado expirado, re-resolviendo: %s", item.url)
-                    self._stream_cache.pop(item.url, None)
-                    resolved = await self._stream_for(item.url)
-                    if not resolved:
-                        await self._reply(update, f"No se pudo reproducir: {exc}")
-                        await self._notify_admin(f"Fallo al re-resolver {item.title}: {exc}")
-                        return
-                    stream_url, audio_url = resolved
+            fallo = await self.playback.load_with_retry(
+                item.url, stream_url, audio_url
+            )
+            if fallo is not None:
+                await self._reply(update, f"No se pudo reproducir: {fallo}")
+                await self._notify_admin(f"Fallo al reproducir {item.title}: {fallo}")
+                return
+            self._paused = False
+            self.queue._current = item
+            self.queue._items = []
+            self.queue._cursor = 0
             self._schedule_prefetch(item)
             if update is not None:
                 await self._show_card(update.effective_chat.id)
@@ -2369,13 +2362,18 @@ class YTRemoteBot:
             self._cancel_prefetch()
             try:
                 await self.player.start()
-                await self.player.load(stream_url, audio_url)
-                await self.player.play()
-                self._paused = False
             except RuntimeError as exc:
                 await self._reply(update, f"No se pudo saltar: {exc}")
                 await self._notify_admin(f"Fallo al saltar en /next: {exc}")
                 return
+            fallo = await self.playback.load_with_retry(
+                candidate.url, stream_url, audio_url
+            )
+            if fallo is not None:
+                await self._reply(update, f"No se pudo saltar: {fallo}")
+                await self._notify_admin(f"Fallo al saltar en /next: {fallo}")
+                return
+            self._paused = False
             # En radio, from_queue siempre es False. Navegacion pura: seteamos
             # _current directo para no duplicar el push al stack (ya lo hicimos).
             self.queue._current = candidate
