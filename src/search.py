@@ -347,6 +347,13 @@ def resolve_stream_url(youtube_url: str) -> tuple[str, str | None] | None:
         stream = _stream_from_info(info)
         if stream is not None:
             return stream
+        # La extraccion respondio pero SIN formatos ni URL: bloqueo parcial
+        # tipico de YouTube (metadata completa, formatos retenidos). Sin
+        # esto el usuario veia "sin motivo detallado", que no diagnostica
+        # nada y parecia un bug del bot.
+        _RESOLVE_LAST_ERROR = (
+            "YouTube devolvio el video sin formatos (bloqueo parcial a este equipo)"
+        )
     return None
 
 

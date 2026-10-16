@@ -59,6 +59,8 @@ def _build_master_playlist(
 _PIPE_WAIT_TIMEOUT = 15.0
 # Timeout para cada escritura en el pipe (evita colgar el bot para siempre).
 _SEND_TIMEOUT = 10.0
+# Timeout para la respuesta de un comando con request_id (track-list, etc.).
+_REQUEST_TIMEOUT = 3.0
 
 
 def _mpv_env() -> dict[str, str]:
@@ -139,8 +141,22 @@ class Player:
         return self._loaded
 
     def _pipe_ready(self) -> bool:
-        """True si el named pipe de mpv ya existe en el sistema."""
-        return os.path.exists(MPV_PIPE)
+        """True si el named pipe de mpv esta vivo y acepta escritura.
+
+        OJO: aqui NO se usa os.path.exists(). En Windows, hacer stat() a un
+        named pipe OCUPADO devuelve Access Denied y os.path.exists() traga
+        ese error como False: el pipe podia estar perfectamente vivo (con el
+        reader conectado) y la puerta juraba que no existia. _send_raw usaba
+        esa mentira como filtro y TIRABA EL COMANDO A LA BASURA en silencio:
+        mpv quedaba en idle mostrando "Drop files to play here" y el bot
+        despues de 15 s gritaba "mpv no confirmo la carga del stream
+        (timeout)". Se comprueba abriendo el pipe de verdad.
+        """
+        try:
+            with open(MPV_PIPE, "w", encoding="utf-8"):
+                return True
+        except (OSError, ValueError):
+            return False
 
     async def start(self) -> None:
         """Garantiza un proceso mpv vivo con IPC y lector de eventos.
@@ -153,13 +169,12 @@ class Player:
         if self._proc is not None and self._proc.poll() is None:
             self._start_reader()
             if not self._pipe_ready_event.is_set():
-                try:
-                    await asyncio.wait_for(
-                        asyncio.to_thread(self._pipe_ready_event.wait),
-                        timeout=_PIPE_WAIT_TIMEOUT,
-                    )
-                except asyncio.TimeoutError:
-                    pass
+                # wait(timeout) acotado ADENTRO del to_thread: cancelar un
+                # to_thread no mata el hilo, deja un zombie que cuelga el
+                # cierre del proceso (asyncio espera a todos sus workers).
+                await asyncio.to_thread(
+                    self._pipe_ready_event.wait, _PIPE_WAIT_TIMEOUT
+                )
             return
 
         await asyncio.to_thread(self._launch_mpv)
@@ -186,38 +201,56 @@ class Player:
 
         # Esperar a que el reader thread abra el pipe y este listo para
         # recibir comandos (evita descartar load/play por _pipe None).
-        try:
-            await asyncio.wait_for(
-                asyncio.to_thread(self._pipe_ready_event.wait),
-                timeout=_PIPE_WAIT_TIMEOUT,
-            )
-        except asyncio.TimeoutError:
+        listo = await asyncio.to_thread(
+            self._pipe_ready_event.wait, _PIPE_WAIT_TIMEOUT
+        )
+        if not listo:
             await asyncio.to_thread(self._terminate)
             self._proc = None
             raise RuntimeError("mpv no abrio el pipe IPC a tiempo.")
 
+    def _mpv_log_path(self) -> str | None:
+        """Archivo de log propio de mpv (data/mpv.log), si se puede crear.
+
+        Sin su log, mpv corre a ciegas: su salida va a DEVNULL y cada fallo
+        remoto termina en "mpv no confirmo la carga" sin poder diagnosticar
+        el motivo real desde la PC del usuario.
+        """
+        try:
+            from bot_process import data_dir
+
+            carpeta = data_dir()
+            carpeta.mkdir(parents=True, exist_ok=True)
+            return str(carpeta / "mpv.log")
+        except OSError:
+            return None
+
     def _launch_mpv(self) -> None:
+        args = [
+            self.mpv_path,
+            "--input-ipc-server=" + MPV_PIPE,
+            "--terminal=no",
+            "--really-quiet",
+            "--idle=yes",
+            # Un master .m3u8 LOCAL (directos HLS) se apertura con el
+            # demuxer lavf, que por defecto restringe los protocolos a
+            # 'file,crypto,data': los childs https quedarian bloqueados.
+            # Se amplia el whitelist para que el demuxer pueda bajarlos.
+            "--demuxer-lavf-o=protocol_whitelist=[file,http,https,tcp,tls,crypto,data]",
+            # La ventana NO se cierra al terminar la cancion:
+            # keep-open pausa en el ultimo frame (no emite end-file),
+            # force-window mantiene la ventana base siempre visible.
+            "--keep-open=yes",
+            "--force-window=yes",
+            # Siempre arranca en pantalla completa (desde Telegram).
+            # Si el usuario en la PC la cambia, no se fuerza de vuelta.
+            "--fullscreen=yes",
+        ]
+        log = self._mpv_log_path()
+        if log:
+            args.append("--log-file=" + log)
         self._proc = subprocess.Popen(
-            [
-                self.mpv_path,
-                "--input-ipc-server=" + MPV_PIPE,
-                "--terminal=no",
-                "--really-quiet",
-                "--idle=yes",
-                # Un master .m3u8 LOCAL (directos HLS) se apertura con el
-                # demuxer lavf, que por defecto restringe los protocolos a
-                # 'file,crypto,data': los childs https quedarian bloqueados.
-                # Se amplia el whitelist para que el demuxer pueda bajarlos.
-                "--demuxer-lavf-o=protocol_whitelist=[file,http,https,tcp,tls,crypto,data]",
-                # La ventana NO se cierra al terminar la cancion:
-                # keep-open pausa en el ultimo frame (no emite end-file),
-                # force-window mantiene la ventana base siempre visible.
-                "--keep-open=yes",
-                "--force-window=yes",
-                # Siempre arranca en pantalla completa (desde Telegram).
-                # Si el usuario en la PC la cambia, no se fuerza de vuelta.
-                "--fullscreen=yes",
-            ],
+            args,
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
             env=_mpv_env(),
@@ -357,24 +390,25 @@ class Player:
         eof-reached). Los comandos van por un handle EFIMERO aparte: en
         Windows escribir y leer por el mismo handle de un named pipe hace que
         la lectura se cuelgue, asi que cada comando abre y cierra su conexion.
+
+        Las excepciones se propagan a proposito: aqui NO se tragan, o el
+        comando vuelve a desaparecer en silencio. Quien decide que significa
+        cada fallo es _send_raw.
         """
-        try:
-            with open(MPV_PIPE, "w", encoding="utf-8") as pipe:
-                pipe.write(data + "\n")
-                pipe.flush()
-        except (ValueError, OSError, FileNotFoundError):
-            # Pipe cerrado (mpv termino): no hay nada que escribir.
-            pass
+        with open(MPV_PIPE, "w", encoding="utf-8") as pipe:
+            pipe.write(data + "\n")
+            pipe.flush()
 
     async def _send_raw(self, data: str) -> None:
         """Escribe una linea de comando JSON en el pipe de mpv.
 
         El I/O del pipe se ejecuta en un thread para no bloquear el
         event loop de Telegram, con un timeout para que nunca se cuelgue.
+
+        Sin puerta de os.path.exists() antes de escribir: se intenta la
+        escritura de verdad y listo (el por que esta en _pipe_ready).
         """
         async with self._lock:
-            if not self._pipe_ready():
-                return
             try:
                 await asyncio.wait_for(
                     asyncio.to_thread(self._write_sync, data),
@@ -384,6 +418,10 @@ class Player:
                 raise RuntimeError(
                     "MPV no responde (timeout escribiendo al pipe)."
                 )
+            except (OSError, ValueError):
+                # Pipe inexistente o cerrado (mpv no esta corriendo o acabo
+                # de salir): nada que escribir, como siempre.
+                return
 
     async def _request(self, command: list) -> object | None:
         """Envia un comando con request_id y espera la respuesta del reader.
@@ -402,9 +440,12 @@ class Player:
         except RuntimeError:
             self._request_events.pop(rid, None)
             return None
-        try:
-            await asyncio.wait_for(asyncio.to_thread(ev.wait), timeout=3.0)
-        except asyncio.TimeoutError:
+        # El timeout va ADENTRO de Event.wait: un wait_for que cancela un
+        # to_thread NO mata el hilo, deja un zombie bloqueado para siempre
+        # (fuga de hilos en el bot y hang al cerrar el proceso, porque
+        # asyncio espera a todos sus workers). wait(timeout) se libera solo.
+        responded = await asyncio.to_thread(ev.wait, _REQUEST_TIMEOUT)
+        if not responded:
             self._request_events.pop(rid, None)
             self._request_results.pop(rid, None)
             return None

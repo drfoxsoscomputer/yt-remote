@@ -2495,6 +2495,78 @@ async def test_load_sin_file_loaded_lanza_error_real():
         player_mod._PIPE_WAIT_TIMEOUT = original_timeout
 
 
+async def test_garantia_comando_al_pipe_con_exists_mintiendo():
+    """Garantia (bug de la laptop y de la PC, 15/oct): en Windows,
+    os.path.exists() devuelve False para un named pipe OCUPADO (stat da
+    Access Denied y exists() lo traga). _send_raw usaba eso como puerta y
+    TIRABA EL LOADFILE A LA BASURA sin error: mpv quedaba en idle mostrando
+    "Drop files to play here" y el bot, tras 15 s, gritaba "mpv no confirmo
+    la carga del stream (timeout)". El comando tiene que salir aunque
+    exists() jure que el pipe no esta."""
+    import player as player_mod
+
+    original_pipe = player_mod.MPV_PIPE
+    tmp = os.path.join(tempfile.gettempdir(), "mpv_pipe_exists_miente.json")
+    open(tmp, "w", encoding="utf-8").close()
+    player_mod.MPV_PIPE = tmp
+    original_exists = os.path.exists
+    os.path.exists = lambda *a, **k: False  # simula el pipe ocupado
+    try:
+        p = player_mod.Player()
+        await asyncio.wait_for(p.command("ping"), timeout=1.0)
+        with open(tmp, encoding="utf-8") as fh:
+            escrito = fh.read()
+        assert "ping" in escrito, (
+            "el comando se tiro a la basura: exists() mintio con False y "
+            "_send_raw no escribio nada al pipe de mpv"
+        )
+    finally:
+        os.path.exists = original_exists
+        player_mod.MPV_PIPE = original_pipe
+        if os.path.exists(tmp):
+            os.remove(tmp)
+
+
+def test_launch_mpv_deja_su_log_en_data():
+    """Diagnostico remoto: mpv corre con la salida a DEVNULL, asi que sin su
+    propio log cada fallo en la PC del usuario era indescifrable. La entrega
+    tiene que arrancar mpv con --log-file apuntando a data/mpv.log."""
+    import player as player_mod
+
+    captured = {}
+
+    class FakePopen:
+        def __init__(self, args, **kwargs):  # noqa: ARG002
+            captured["args"] = args
+
+    original = player_mod.subprocess.Popen
+    player_mod.subprocess.Popen = FakePopen
+    try:
+        player_mod.Player()._launch_mpv()
+    finally:
+        player_mod.subprocess.Popen = original
+
+    log_args = [a for a in captured["args"] if a.startswith("--log-file=")]
+    assert log_args, captured["args"]
+    assert log_args[0].endswith("mpv.log"), log_args
+
+
+def test_resolve_explica_video_sin_formatos():
+    """YouTube a veces devuelve el video SIN formatos (bloqueo parcial): el
+    usuario veia 'sin motivo detallado', que no diagnostica nada. El motivo
+    real tiene que llegar al aviso de fallo de resolucion."""
+    import search as search_mod
+
+    original = search_mod._extract_info
+    search_mod._extract_info = lambda *a, **k: {"title": "x"}
+    try:
+        r = search_mod.resolve_stream_url("https://www.youtube.com/watch?v=abc")
+        assert r is None
+        assert "sin formatos" in search_mod.last_resolve_error()
+    finally:
+        search_mod._extract_info = original
+
+
 async def test_search_keyboard_has_cancel_button():
     """El listado de /buscar muestra 5 canciones por pagina, cada una con su
     nombre y su duracion, y termina con la fila [◀ ❌ ▶]: en la primera pagina el
