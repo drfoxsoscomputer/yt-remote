@@ -51,6 +51,14 @@ HISTORY_PAGE_SIZE = 5
 # Editor de usuarios (boton de usuarios): usuarios conocidos visibles por pagina.
 MEMBERS_PAGE_SIZE = 10
 
+# /actualizar: de donde baja el yt-dlp nuevo y cuanto esperar. El portable
+# no trae pip, asi que el comando pide la metadata de PyPI, verifica el
+# sha256 publicado del wheel y reemplaza la carpeta yt_dlp/ del
+# site-packages que corre el bot.
+PYPI_YTDLP_JSON = "https://pypi.org/pypi/yt-dlp/json"
+PYPI_META_TIMEOUT = 30.0
+PYPI_WHEEL_TIMEOUT = 60.0
+
 # Listado de resultados de /buscar: cuantos resultados se traen por tanda y
 # cuantos se ven por pagina. El listado se pagina, asi que traer 10 de una no
 # hace esperar mas: es la MISMA busqueda con mas resultados.

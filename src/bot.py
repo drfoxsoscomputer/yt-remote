@@ -7,12 +7,15 @@ Los comandos se enrutan por roles (admin > dj > user).
 from collections import deque
 
 import asyncio
+import hashlib
 import json
 import logging
 import os
+import re
 import secrets
 import time
 import unicodedata
+from pathlib import Path
 from typing import Optional
 
 from telegram import (
@@ -104,6 +107,9 @@ from constants import (  # noqa: E402
     MEMBERS_PAGE_SIZE,
     PLAYLIST_ESPERAS,
     PLAYLIST_WINDOW,
+    PYPI_META_TIMEOUT,
+    PYPI_WHEEL_TIMEOUT,
+    PYPI_YTDLP_JSON,
     QUICK_TIMEOUT,
     QUICK_TRACKS,
     RESOLVE_TIMEOUT,
@@ -129,6 +135,126 @@ _SEARCH_PAGE_SIZE = SEARCH_PAGE_SIZE
 _SEARCH_BATCH_CON_ARTISTA = SEARCH_BATCH_CON_ARTISTA
 
 
+class ActualizacionError(Exception):
+    """Motivo honesto por el que /actualizar no pudo renovar yt-dlp."""
+
+
+def _version_num(version: str) -> tuple[int, ...]:
+    """2026.08.19 y 2026.8.19 son la MISMA version: la comparacion es por
+    numeros, no por texto (PyPI publica sin el cero a la izquierda)."""
+    partes: list[int] = []
+    for pedazo in version.split("."):
+        m = re.match(r"\d+", pedazo)
+        if m is None:
+            break
+        partes.append(int(m.group()))
+    return tuple(partes) or (0,)
+
+
+def _verificar_sha256(datos: bytes, esperado: str) -> None:
+    """El wheel recien bajado tiene que ser EXACTAMENTE el archivo publicado."""
+    if hashlib.sha256(datos).hexdigest() != esperado.lower():
+        raise ActualizacionError("el archivo bajado no coincide con el sha256 publicado")
+
+
+def _leer_version_paquete(destino: Path) -> str | None:
+    """__version__ del version.py del paquete EN DISCO.
+
+    Es la verdad post-instalacion: el yt_dlp ya importado en memoria sigue
+    siendo el viejo hasta que el bot se reinicie.
+    """
+    try:
+        texto = (destino / "version.py").read_text(encoding="utf-8")
+    except OSError:
+        return None
+    m = re.search(r'__version__\s*=\s*["\']([^"\']+)["\']', texto)
+    return m.group(1) if m else None
+
+
+def _instalar_wheel_ytdlp(wheel: bytes, destino: Path) -> None:
+    """Reemplaza la carpeta yt_dlp/ instalada (`destino`) por la del wheel,
+    con rollback: si algo falla a mitad, la carpeta vieja vuelve a su lugar.
+
+    Solo se cambia EL PAQUETE (lo que importa search.py). El dist-info se
+    ignora a proposito: el portable no lleva pip y la version de verdad
+    vive en yt_dlp/version.py. La temporal se crea DENTRO del mismo
+    site-packages para que el swap sea un rename del mismo disco.
+    """
+    import io
+    import shutil
+    import tempfile
+    import zipfile
+
+    destino = destino.resolve()
+    if destino.name != "yt_dlp":
+        raise ActualizacionError(f"destino inesperado: {destino}")
+    raiz = destino.parent
+    with tempfile.TemporaryDirectory(prefix="ytdlp-", dir=str(raiz)) as tmp:
+        try:
+            with zipfile.ZipFile(io.BytesIO(wheel)) as zf:
+                zf.extractall(tmp)
+        except zipfile.BadZipFile as exc:
+            raise ActualizacionError(
+                f"el archivo descargado no es un wheel valido ({exc})"
+            ) from exc
+        nuevo = Path(tmp) / "yt_dlp"
+        if not (nuevo / "__init__.py").is_file() or not (nuevo / "version.py").is_file():
+            raise ActualizacionError("el wheel no trae una carpeta yt_dlp/ valida")
+        viejo = raiz / "yt_dlp.viejo"
+        shutil.rmtree(viejo, ignore_errors=True)
+        if destino.exists():
+            destino.rename(viejo)
+        try:
+            nuevo.rename(destino)
+        except OSError:
+            if viejo.exists() and not destino.exists():
+                viejo.rename(destino)
+            raise
+        shutil.rmtree(viejo, ignore_errors=True)
+
+
+async def _pedir_meta_ytdlp() -> tuple[str, str, str]:
+    """(version, url_del_wheel, sha256) de la ultima version en PyPI."""
+    import httpx
+
+    try:
+        async with httpx.AsyncClient(
+            timeout=PYPI_META_TIMEOUT, follow_redirects=True
+        ) as cli:
+            r = await cli.get(PYPI_YTDLP_JSON)
+            r.raise_for_status()
+            datos = r.json()
+    except Exception as exc:  # noqa: BLE001 - el motivo honesto va al admin
+        raise ActualizacionError(f"PyPI no responde ({exc})") from exc
+    version = (datos.get("info") or {}).get("version")
+    wheel = next(
+        (
+            u
+            for u in datos.get("urls", [])
+            if str(u.get("filename", "")).endswith("-py3-none-any.whl")
+        ),
+        None,
+    )
+    if not version or wheel is None:
+        raise ActualizacionError("PyPI no devolvio version o wheel de yt-dlp")
+    return str(version), wheel["url"], wheel["digests"]["sha256"]
+
+
+async def _bajar_wheel_ytdlp(url: str, sha256: str) -> bytes:
+    """Baja el wheel y exige que su sha256 sea el publicado."""
+    import httpx
+
+    try:
+        async with httpx.AsyncClient(
+            timeout=PYPI_WHEEL_TIMEOUT, follow_redirects=True
+        ) as cli:
+            r = await cli.get(url)
+            r.raise_for_status()
+    except Exception as exc:  # noqa: BLE001
+        raise ActualizacionError(f"no se pudo bajar el wheel ({exc})") from exc
+    datos = r.content
+    _verificar_sha256(datos, sha256)
+    return datos
 
 
 class YTRemoteBot:
@@ -513,6 +639,12 @@ class YTRemoteBot:
             CommandHandler(
                 "mezclar",
                 self._with_card_reposition(self._require_chat(self._require("dj", self.cmd_mezclar))),
+            )
+        )
+        app.add_handler(
+            CommandHandler(
+                "actualizar",
+                self._with_card_reposition(self._require_chat(self._require("admin", self.cmd_actualizar))),
             )
         )
         # Editor de usuarios (boton 👥): los callbacks mem:* viven en el chat
@@ -913,6 +1045,55 @@ class YTRemoteBot:
                 lineas.append(f"✅ disco: {libres:.0f} GB libres")
 
         await self._reply(update, "\n".join(lineas))
+
+    async def cmd_actualizar(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """Admin: renueva el yt-dlp empaquetado (la carpeta yt_dlp/ que
+        importa search.py) con el ultimo wheel de PyPI.
+
+        El portable no trae pip, asi que no hay `pip install`: se pide la
+        metadata de PyPI, se verifica el sha256 publicado y se reemplaza
+        el paquete con rollback. La version NUEVA la carga el proximo
+        reinicio del bot (el modulo ya importado sigue vivo en memoria);
+        por eso el aviso lo dice.
+        """
+        try:
+            actual, nueva = await self._actualizar_ytdlp()
+        except ActualizacionError as exc:
+            await self._reply(update, f"⚠️ No se pudo actualizar yt-dlp: {exc}")
+            return
+        if nueva is None:
+            await self._reply(update, f"✅ yt-dlp ya está en la última versión ({actual}).")
+            return
+        await self._reply(
+            update,
+            f"✅ yt-dlp actualizado: {actual} → {nueva}.\n"
+            "Reinicia el bot para que cargue la nueva versión.",
+        )
+
+    async def _actualizar_ytdlp(self) -> tuple[str, str | None]:
+        """(version actual, version nueva o None si ya estaba al dia).
+
+        Metodo de la instancia a proposito: las pruebas lo stubbean y no
+        hay red. Lanza ActualizacionError con el motivo honesto.
+        """
+        try:
+            import yt_dlp.version
+
+            actual = yt_dlp.version.__version__
+            destino = Path(yt_dlp.__file__).resolve().parent
+        except Exception as exc:  # noqa: BLE001
+            raise ActualizacionError(
+                f"no se pudo leer el yt-dlp instalado ({exc})"
+            ) from exc
+        nueva, url, sha256 = await _pedir_meta_ytdlp()
+        if _version_num(actual) >= _version_num(nueva):
+            return actual, None
+        wheel = await _bajar_wheel_ytdlp(url, sha256)
+        _instalar_wheel_ytdlp(wheel, destino)
+        leido = _leer_version_paquete(destino)
+        if leido is None:
+            raise ActualizacionError("el paquete quedo sin version legible")
+        return actual, leido
 
     async def _dm_or_group(self, target_user_id: int, text: str) -> None:
         """Envia un mensaje privado a un usuario; si falla (nunca inicio un

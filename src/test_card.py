@@ -1459,6 +1459,140 @@ async def test_mezclar_revuelve_solo_los_proximos():
     assert any("No hay cola que mezclar" in t for t, _ in upd2.sent), upd2.sent
 
 
+async def test_actualizar_solo_admin():
+    """/actualizar es de admin (mismo envoltorio que /salud): el resto ni
+    entra, y sin permiso no se dispara la actualizacion."""
+    b = make_bot()
+    llamado = []
+
+    async def trampa():
+        llamado.append(True)
+        return "1", None
+
+    b._actualizar_ytdlp = trampa
+    h = b._require("admin", b.cmd_actualizar)
+
+    upd_user = FakeMessageUpdate("/actualizar", user_id=50)
+    await h(upd_user, SimpleNamespace(args=[]))
+    assert any("denegado" in t for t, _ in upd_user.sent), upd_user.sent
+    assert llamado == [], "el user no debe disparar la actualizacion"
+
+
+async def test_actualizar_reporta_antes_y_despues():
+    """El exito nombra las DOS versiones y dice que el nuevo modulo entra
+    con el proximo reinicio (el importado en memoria sigue siendo el viejo)."""
+    b = make_bot()
+
+    async def ok():
+        return "2026.08.19", "2026.10.01"
+
+    b._actualizar_ytdlp = ok
+    upd = FakeMessageUpdate("/actualizar")
+    await b.cmd_actualizar(upd, SimpleNamespace(args=[]))
+    assert len(upd.sent) == 1, upd.sent
+    texto = upd.sent[0][0]
+    assert "2026.08.19 → 2026.10.01" in texto, texto
+    assert "Reinicia el bot" in texto, texto
+
+
+async def test_actualizar_ya_ultimo():
+    """Si PyPI no trae nada nuevo (nueva=None) el aviso es de al dia, sin
+    flecha ni error."""
+    b = make_bot()
+
+    async def al_dia():
+        return "2026.08.19", None
+
+    b._actualizar_ytdlp = al_dia
+    upd = FakeMessageUpdate("/actualizar")
+    await b.cmd_actualizar(upd, SimpleNamespace(args=[]))
+    texto = upd.sent[0][0]
+    assert "ya está en la última versión" in texto and "2026.08.19" in texto, texto
+    assert "⚠️" not in texto, texto
+
+
+async def test_actualizar_fallo_honesto():
+    """Cualquier motivo (PyPI caido, sha raro) llega tal cual al admin, en
+    un solo mensaje, sin reventar el handler."""
+    import bot as bot_mod
+
+    b = make_bot()
+
+    async def raya():
+        raise bot_mod.ActualizacionError("PyPI no responde (timeout)")
+
+    b._actualizar_ytdlp = raya
+    upd = FakeMessageUpdate("/actualizar")
+    await b.cmd_actualizar(upd, SimpleNamespace(args=[]))
+    texto = upd.sent[0][0]
+    assert texto.startswith("⚠️ No se pudo actualizar yt-dlp:"), texto
+    assert "PyPI no responde" in texto, texto
+
+
+def test_actualizar_versiones_y_sha():
+    """2026.08.19 y 2026.8.19 son la MISMA version (PyPI publica sin el
+    cero): si no, /actualizar "renovaria" a la misma; y el sha256 muerde."""
+    import hashlib
+
+    import bot as bot_mod
+
+    assert bot_mod._version_num("2026.08.19") == bot_mod._version_num("2026.8.19")
+    assert bot_mod._version_num("2026.10.01") > bot_mod._version_num("2026.8.19")
+    assert bot_mod._version_num("rc1") == (0,)
+
+    bueno = hashlib.sha256(b"peso real").hexdigest()
+    bot_mod._verificar_sha256(b"peso real", bueno)  # no debe fallar
+    try:
+        bot_mod._verificar_sha256(b"otra cosa", bueno)
+    except bot_mod.ActualizacionError:
+        pass
+    else:
+        raise AssertionError("el sha256 debia morder si el archivo no es el publicado")
+
+
+def test_instalar_wheel_reemplaza_el_paquete():
+    """El swap REAL: el wheel nuevo reemplaza yt_dlp/ entera, la vieja no
+    queda, y un wheel basura NO toca lo instalado."""
+    import io as io_mod
+    import zipfile as zipfile_mod
+    from tempfile import TemporaryDirectory
+
+    import bot as bot_mod
+
+    def wheel_bueno(version: str) -> bytes:
+        buf = io_mod.BytesIO()
+        with zipfile_mod.ZipFile(buf, "w") as zf:
+            zf.writestr("yt_dlp/__init__.py", "")
+            zf.writestr("yt_dlp/version.py", f'__version__ = "{version}"\n')
+            zf.writestr("yt_dlp-9.9.dist-info/METADATA", "Name: yt-dlp\n")
+        return buf.getvalue()
+
+    with TemporaryDirectory() as tmp:
+        raiz = Path(tmp)
+        destino = raiz / "yt_dlp"
+        destino.mkdir()
+        (destino / "__init__.py").write_text("viejo", encoding="utf-8")
+        (destino / "version.py").write_text('__version__ = "2026.08.19"', encoding="utf-8")
+
+        bot_mod._instalar_wheel_ytdlp(wheel_bueno("2099.1.1"), destino)
+
+        leido = (destino / "version.py").read_text(encoding="utf-8")
+        assert leido == '__version__ = "2099.1.1"\n', leido
+        assert not (raiz / "yt_dlp.viejo").exists(), "la carpeta vieja no debe quedar"
+        assert bot_mod._leer_version_paquete(destino) == "2099.1.1"
+
+        # Wheel basura: error honesto y el paquete instalado queda INTACTO.
+        try:
+            bot_mod._instalar_wheel_ytdlp(b"esto no es un zip", destino)
+        except bot_mod.ActualizacionError as exc:
+            assert "wheel" in str(exc), str(exc)
+        else:
+            raise AssertionError("un wheel basura debia fallar")
+        assert (
+            bot_mod._leer_version_paquete(destino) == "2099.1.1"
+        ), "un fallo no debe tocar lo instalado"
+
+
 async def test_notify_admin_sends_to_owner():
     """Fase 4: _notify_admin copia el error al chat del dueno (log del admin)."""
     b = make_bot()
