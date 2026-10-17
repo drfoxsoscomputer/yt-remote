@@ -500,6 +500,12 @@ class PlaybackEngine:
             )
             return False
         self._app._paused = False
+        # Un tema DISTINTO al guardado consume el stop de /continuar: no
+        # debe resucitar la posicion de un tema que ya no es el actual. (El
+        # mismo tema, p. ej. un cambio de calidad, conserva el guardado.)
+        guardado = self._app._continuar
+        if guardado and (guardado.get("item") or {}).get("url") != item.url:
+            self._app._continuar = None
         if not preserve_current:
             # Guardar el item actual en la pila de navegación antes
             # de cambiar el cursor (solo en modo radio).

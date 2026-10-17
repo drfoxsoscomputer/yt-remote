@@ -218,6 +218,10 @@ class YTRemoteBot:
         # lo dispara. Vive SOLO en la sesion: un reinicio lo borra.
         self._sleep_minutes: int | None = None
         self._sleep_task: asyncio.Task | None = None
+        # Ultimo stop guardado para /continuar: {"item": item.to_dict(),
+        # "pos": segundos}. Lo escribe cmd_stop (y el ⏻ del temporizador)
+        # antes de rebobinar; se persiste con el estado comun.
+        self._continuar: dict | None = None
         # Editor de usuarios (boton 👥): la lista vive en el chat PRIVADO del
         # admin. Los cambios quedan "staged" (sin persistir en roles.json)
         # hasta el boton ❌ (commit); tocar un usuario dos veces lo revierte.
@@ -275,6 +279,7 @@ class YTRemoteBot:
                 "message_id": self._card_message_id,
                 "is_photo": self._card_is_photo,
             },
+            "continuar": self._continuar,
         }
         self._state.mark_dirty()
 
@@ -293,6 +298,7 @@ class YTRemoteBot:
         loaded = self._state.load()
         self._volume = loaded.get("volume", 100)
         self._radio_artist = loaded.get("radio_artist", "")
+        self._continuar = loaded.get("continuar") or None
         has_current = bool(loaded.get("current"))
         self._restored = has_current
         # Si se restauro una cancion, arranca en PAUSA aunque el estado
@@ -495,6 +501,18 @@ class YTRemoteBot:
             CommandHandler(
                 "salud",
                 self._with_card_reposition(self._require_chat(self._require("admin", self.cmd_salud))),
+            )
+        )
+        app.add_handler(
+            CommandHandler(
+                "continuar",
+                self._with_card_reposition(self._require_chat(self._require("dj", self.cmd_continuar))),
+            )
+        )
+        app.add_handler(
+            CommandHandler(
+                "mezclar",
+                self._with_card_reposition(self._require_chat(self._require("dj", self.cmd_mezclar))),
             )
         )
         # Editor de usuarios (boton 👥): los callbacks mem:* viven en el chat
@@ -2669,6 +2687,8 @@ class YTRemoteBot:
     async def cmd_stop(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         # Detener y rebobinar a 0:00 SIN borrar historial, cola, radio ni
         # navegacion: conserva todo para que ▶ reanude el video desde el inicio.
+        # Antes de rebobinar se guarda el instante para /continuar.
+        await self._guardar_posicion_actual()
         if self.player.is_running:
             await self.player.rewind()
         self._queue_advance_needed = False
@@ -2676,6 +2696,89 @@ class YTRemoteBot:
         self._persist_dirty()
         await self._render_card(self._track_status_text())
         await self._reply(update, "⏹️ Detenido. Usa ▶ para reanudar desde el inicio.")
+
+    async def _guardar_posicion_actual(self) -> None:
+        """Guarda el instante de la cancion actual antes de parar (⏹ / ⏻).
+
+        Es lo que /continuar usa para retomar ahi en vez de volver a 0:00.
+        Sin mpv corriendo o sin tiempo consultable no hay nada nuevo que
+        guardar: se conserva el ultimo guardado.
+        """
+        if self.queue.current is None or not self.player.is_running:
+            return
+        pos = await self.player.get_time_pos()
+        if pos is None:
+            return
+        self._continuar = {"item": self.queue.current.to_dict(), "pos": int(pos)}
+
+    async def cmd_continuar(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """Dj: retoma la ultima cancion GUARDADA en la posicion donde se paro.
+
+        cmd_stop (⏹ y el ⏻ del temporizador) guarda el instante antes de
+        rebobinar; este comando retoma ahi en vez de volver a 0:00. Solo
+        aplica si el guardado sigue siendo el tema actual: si se eligio otro
+        tema, se descarta (los temas viejos viven en el historial del hub).
+        Con mpv vivo solo busca y reanuda; con mpv muerto re-resuelve el
+        stream y busca. El guardado se consume: el proximo stop guarda su
+        propio instante.
+        """
+        guardado = self._continuar
+        if not guardado or not guardado.get("item"):
+            await self._reply(update, "No hay ninguna cancion guardada para continuar.")
+            return
+        try:
+            item = QueueItem.from_dict(guardado["item"])
+        except Exception:  # noqa: BLE001 - estado guardado corrupto
+            self._continuar = None
+            await self._reply(update, "No hay ninguna cancion guardada para continuar.")
+            return
+        pos = max(0, int(guardado.get("pos", 0)))
+        mmss = f"{pos // 60}:{pos % 60:02d}"
+
+        actual = self.queue.current
+        if actual is None or actual.url != item.url:
+            # El guardado dejo de ser el actual (se eligio otro tema): no hay
+            # nada que continuar; no se revive una posicion vieja.
+            self._continuar = None
+            self._persist_dirty()
+            await self._reply(update, "No hay ninguna cancion guardada para continuar.")
+            return
+        if self.player.is_running:
+            await self.player.seek_to(pos)
+            if self._paused:
+                await self.player.play()
+                self._paused = False
+            # Se consume: el proximo stop vuelve a guardar su instante.
+            self._continuar = None
+            self._persist_dirty()
+            await self._render_card(self._track_status_text())
+            await self._reply(update, f"▶️ Continuando desde {mmss}")
+            return
+        # mpv no esta corriendo: re-resuelve el MISMO tema actual (mismas
+        # garantias que un pick), lo carga y recien ahi busca a pos.
+        started = await self._play_item(update, item, preserve_current=True)
+        if not started:
+            return  # el fallo ya se aviso: el guardado queda para reintentar
+        await self.player.seek_to(pos)
+        self._continuar = None
+        self._persist_dirty()
+        await self._reply(update, f"▶️ Continuando desde {mmss}")
+
+    async def cmd_mezclar(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """Dj: revuelve el orden de los temas PROXIMOS de la cola.
+
+        El actual y los ya reproducidos quedan donde estan: mezclar solo
+        cambia lo que falta por sonar (y se persiste el nuevo orden). En
+        modo radio (sin playlist) no hay cola que revolver.
+        """
+        barajados = self.queue.shuffle()
+        if not barajados:
+            await self._reply(update, "No hay cola que mezclar.")
+            return
+        self._persist_dirty()
+        await self._reply(
+            update, f"🔀 Cola mezclada: {barajados} temas por venir en otro orden."
+        )
 
     async def cmd_volume(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         if not context.args:
@@ -2965,6 +3068,9 @@ class YTRemoteBot:
         avisa al chat de la tarjeta."""
         self._sleep_task = None
         self._sleep_minutes = None
+        # Como ⏹: guarda el instante antes de rebobinar por si luego se
+        # quiere retomar con /continuar.
+        await self._guardar_posicion_actual()
         if self.player.is_running:
             await self.player.rewind()
         self._queue_advance_needed = False

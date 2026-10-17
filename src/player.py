@@ -605,6 +605,22 @@ class Player:
         """
         await self.command("seek", str(int(delta)), "relative")
 
+    async def seek_to(self, seconds: int) -> None:
+        """Salta a una posicion ABSOLUTA en segundos (retomar /continuar)."""
+        await self.command("seek", str(int(seconds)), "absolute")
+
+    async def get_time_pos(self) -> float | None:
+        """Posicion actual en segundos dentro del stream cargado.
+
+        None si mpv no responde (sin stream, pipe muerto o error de mpv):
+        el caller decide, nunca se inventa una posicion.
+        """
+        pos = await self._request(["get_property", "time-pos"])
+        try:
+            return float(pos) if pos is not None else None
+        except (TypeError, ValueError):
+            return None
+
     async def set_volume(self, volume: int) -> None:
         volume = max(0, min(100, volume))
         await self.command("set", "volume", str(volume))

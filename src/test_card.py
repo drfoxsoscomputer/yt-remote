@@ -137,6 +137,8 @@ class FakePlayer:
         self.starts = 0
         self.rewinds = 0
         self.seeks = []
+        self.seek_tos = []
+        self.time_pos = None
 
     @property
     def is_running(self):
@@ -169,6 +171,12 @@ class FakePlayer:
 
     async def seek(self, delta):
         self.seeks.append(delta)
+
+    async def seek_to(self, seconds):
+        self.seek_tos.append(seconds)
+
+    async def get_time_pos(self):
+        return self.time_pos
 
 
 class FakeApp:
@@ -1324,6 +1332,131 @@ async def test_stop_does_not_clear_queue():
 
     finally:
         QueueManager.clear = original_clear
+
+
+async def test_stop_guarda_posicion_y_continuar_reanuda():
+    """⏹ guarda el instante antes de rebobinar y /continuar retoma AHÍ (seek
+    absoluto + play) sin re-resolver nada: el guardado es el actual."""
+    from queue_manager import QueueItem
+
+    b = make_bot()
+    fp = cast(Any, b.player)
+    fp.time_pos = 125.0
+    b.queue.set_current(QueueItem(url="u1", title="Tema"))
+    b._paused = False
+
+    await b.cmd_stop(FakeUpdate("ctl:stop"), SimpleNamespace(args=[]))
+    assert fp.rewinds == 1, "sigue rebobinando a 0:00"
+    assert b._continuar == {"item": b.queue.current.to_dict(), "pos": 125}
+    assert b._state._current["continuar"]["pos"] == 125, "debe persistirse"
+
+    upd = FakeMessageUpdate("/continuar")
+    await b.cmd_continuar(upd, SimpleNamespace(args=[]))
+    assert fp.seek_tos == [125], fp.seek_tos
+    assert fp.resumed == 1, "debe reanudar la pausa que dejo el stop"
+    assert b._paused is False
+    assert b._continuar is None, "el guardado se consume al retomarlo"
+    assert any("2:05" in t for t, _ in upd.sent), upd.sent
+
+
+async def test_continuar_sin_nada_guardado_avisa():
+    """Sin stop previo (o con el guardado corrupto) solo avisa, sin tocar mpv."""
+    b = make_bot()
+    fp = cast(Any, b.player)
+
+    upd = FakeMessageUpdate("/continuar")
+    await b.cmd_continuar(upd, SimpleNamespace(args=[]))
+    assert any("No hay ninguna cancion guardada" in t for t, _ in upd.sent), upd.sent
+    assert fp.seek_tos == [] and fp.loaded == [], "no debe tocar el player"
+
+    # Estado corrupto (item ilegible): se descarta y vuelve al mismo aviso.
+    b2 = make_bot()
+    b2._continuar = {"item": "roto", "pos": 9}
+    upd2 = FakeMessageUpdate("/continuar")
+    await b2.cmd_continuar(upd2, SimpleNamespace(args=[]))
+    assert any("No hay ninguna cancion guardada" in t for t, _ in upd2.sent), upd2.sent
+    assert b2._continuar is None, "el guardado corrupto se descarta"
+
+
+async def test_continuar_guardado_divergente_se_descarta():
+    """Si se eligio OTRO tema despues del stop, /continuar no revive la
+    posicion vieja: avisa, descarta el guardado y no carga nada."""
+    from queue_manager import QueueItem
+
+    b = make_bot()
+    fp = cast(Any, b.player)
+    b.queue.set_current(QueueItem(url="u1", title="Ahora"))
+    b._continuar = {"item": {"url": "u2", "title": "Guardada"}, "pos": 42}
+
+    upd = FakeMessageUpdate("/continuar")
+    await b.cmd_continuar(upd, SimpleNamespace(args=[]))
+    assert any("No hay ninguna cancion guardada" in t for t, _ in upd.sent), upd.sent
+    assert b._continuar is None, "el guardado divergente se descarta"
+    assert b._state._current["continuar"] is None, "y se persiste el descarte"
+    assert fp.loaded == [] and fp.seek_tos == [], "no debe tocar el player"
+
+
+async def test_continuar_con_mpv_muerto_re_resuelve_y_busca():
+    """Sin mpv corriendo, /continuar re-resuelve el MISMO tema actual (las
+    garantias de un pick), lo carga y recien ahi busca a la posicion."""
+    import bot as bot_mod
+    from queue_manager import QueueItem
+
+    bot_mod.resolve_stream_url = lambda url: ("stream-" + url, None)
+    playback_mod.resolve_stream_url = lambda url: ("stream-" + url, None)
+    try:
+        b = make_bot()
+        fp = cast(Any, b.player)
+        b.queue.set_current(QueueItem(url="u1", title="Tema"))
+        fp.running = False
+        b._continuar = {"item": {"url": "u1", "title": "Tema"}, "pos": 42}
+        b._paused = True
+
+        upd = FakeMessageUpdate("/continuar")
+        await b.cmd_continuar(upd, SimpleNamespace(args=[]))
+        assert fp.loaded == [("stream-u1", None)], fp.loaded
+        assert fp.seek_tos == [42], fp.seek_tos
+        assert cast(QueueItem, b.queue.current).url == "u1", "el actual no cambia"
+        assert b._paused is False, "queda sonando, no en pausa"
+        assert b._continuar is None, "el guardado consumido se borra"
+        assert any("0:42" in t for t, _ in upd.sent), upd.sent
+    finally:
+        bot_mod.resolve_stream_url = lambda url: None
+        playback_mod.resolve_stream_url = lambda url: None
+
+
+async def test_mezclar_revuelve_solo_los_proximos():
+    """/mezclar baraja SOLO los temas que faltan: el actual queda intacto, el
+    orden nuevo se persiste, y en modo radio (sin playlist) no hay cola."""
+    import queue_manager as qm_mod
+    from queue_manager import QueueItem
+
+    b = make_bot()
+    items = [QueueItem(url=f"u{i}", title=f"T{i}") for i in range(6)]
+    b.queue.set_playlist(items)
+    # Cursor en 0: el actual es u0 y los proximos son u1..u5.
+
+    # Shuffle determinista: invertir el tramo barajado.
+    original = qm_mod.random.shuffle
+    qm_mod.random.shuffle = lambda lista: lista.reverse()
+    try:
+        upd = FakeMessageUpdate("/mezclar")
+        await b.cmd_mezclar(upd, SimpleNamespace(args=[]))
+    finally:
+        qm_mod.random.shuffle = original
+
+    urls = [i.url for i in b.queue.all()]
+    assert urls == ["u0", "u5", "u4", "u3", "u2", "u1"], urls
+    assert b.queue._cursor == 0, "el actual no se mueve"
+    assert [d["url"] for d in b._state._current["playlist"]] == urls, "se persiste"
+    assert any("5 temas" in t for t, _ in upd.sent), upd.sent
+
+    # Sin playlist (modo radio): no hay cola que mezclar.
+    b2 = make_bot()
+    b2.queue.set_current(QueueItem(url="r1", title="Radio"))
+    upd2 = FakeMessageUpdate("/mezclar")
+    await b2.cmd_mezclar(upd2, SimpleNamespace(args=[]))
+    assert any("No hay cola que mezclar" in t for t, _ in upd2.sent), upd2.sent
 
 
 async def test_notify_admin_sends_to_owner():
