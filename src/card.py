@@ -36,6 +36,10 @@ logger = logging.getLogger(__name__)
 # "Calidad" de la tarjeta; `bot.py` lo reexporta para no romper sus imports.
 QUALITY_LEVELS = (144, 240, 360, 480, 720, 1080)
 
+# Presets del apagado programado (boton ⏻): minutos fijos, sin campo libre
+# que en el cel sea tedioso de escribir.
+SLEEP_PRESETS = (15, 30, 45, 60)
+
 
 class CardManager:
     """Dibuja, refresca y re-coloca la tarjeta del mini reproductor.
@@ -88,7 +92,9 @@ class CardManager:
 
         Fila 1: ⏮ anterior | ⏪10 atras | ▶/⏸ alternar | ⏩10 adelante | ⏭ siguiente | ⏹ detener
         Fila 2: 🔊−10 | <volumen actual> | 🔊+10 | 📋 lista
-        Fila 3: ⚙️ Calidad: Np | 👥 Usuarios (solo admin puede usarlas)
+        Fila 3: ⚙️ Calidad: Np | 👥 Usuarios | ⏻ apagado programado
+        (calidad y usuarios solo admin; ⏻ es de dj y se marca ⏰ mientras
+        haya temporizador armado)
         """
         play_pause = "▶️" if self._app._paused else "⏸️"
         keyboard = [
@@ -112,6 +118,10 @@ class CardManager:
                     callback_data="ctl:calidad",
                 ),
                 InlineKeyboardButton("👥 Usuarios", callback_data="ctl:usuarios"),
+                InlineKeyboardButton(
+                    "⏻⏰" if self._app._sleep_minutes else "⏻",
+                    callback_data="ctl:apagar",
+                ),
             ],
         ]
         return InlineKeyboardMarkup(keyboard)
@@ -134,6 +144,41 @@ class CardManager:
         rows.append(
             [InlineKeyboardButton("❌", callback_data="cl:calidad:cerrar")]
         )
+        return InlineKeyboardMarkup(rows)
+
+    def sleep_keyboard(self) -> InlineKeyboardMarkup:
+        """Menu del apagado programado (boton ⏻): presets fijos y apagador.
+
+        Se abre SOLO cambiando el teclado, el mismo patron que la grilla de
+        calidad: texto y miniatura de la card no se tocan. Con un
+        temporizador armado, arriba sale cuanto falta y al pie el boton
+        para apagarlo.
+        """
+        rows: list[list[InlineKeyboardButton]] = []
+        if self._app._sleep_minutes:
+            rows.append(
+                [
+                    InlineKeyboardButton(
+                        f"⏰ Para en {self._app._sleep_minutes} min",
+                        callback_data="ap:noop",
+                    )
+                ]
+            )
+        rows.append(
+            [
+                InlineKeyboardButton(f"{m} min", callback_data=f"ap:{m}")
+                for m in SLEEP_PRESETS
+            ]
+        )
+        if self._app._sleep_minutes:
+            rows.append(
+                [
+                    InlineKeyboardButton(
+                        "⏹ Apagar temporizador", callback_data="ap:off"
+                    )
+                ]
+            )
+        rows.append([InlineKeyboardButton("❌", callback_data="ap:cerrar")])
         return InlineKeyboardMarkup(rows)
 
     # --- Dibujar ---------------------------------------------------------

@@ -33,7 +33,7 @@ from telegram.ext import (
 )
 
 import artist_match
-from card import QUALITY_LEVELS, CardManager
+from card import QUALITY_LEVELS, SLEEP_PRESETS, CardManager
 from playback import PlaybackEngine
 from config import Config
 from player import Player
@@ -214,6 +214,10 @@ class YTRemoteBot:
         # mensaje mismo: un reinicio reabre en la cola.
         self._list_view: str = "cola"
         self._history_page: int = 0
+        # Apagado programado (boton ⏻): minutos restantes y tarea asyncio que
+        # lo dispara. Vive SOLO en la sesion: un reinicio lo borra.
+        self._sleep_minutes: int | None = None
+        self._sleep_task: asyncio.Task | None = None
         # Editor de usuarios (boton 👥): la lista vive en el chat PRIVADO del
         # admin. Los cambios quedan "staged" (sin persistir en roles.json)
         # hasta el boton ❌ (commit); tocar un usuario dos veces lo revierte.
@@ -485,6 +489,12 @@ class YTRemoteBot:
             CommandHandler(
                 "reglas",
                 self._with_card_reposition(self._require_chat(self._require("admin", self.cmd_reglas))),
+            )
+        )
+        app.add_handler(
+            CommandHandler(
+                "salud",
+                self._with_card_reposition(self._require_chat(self._require("admin", self.cmd_salud))),
             )
         )
         # Editor de usuarios (boton 👥): los callbacks mem:* viven en el chat
@@ -847,6 +857,45 @@ class YTRemoteBot:
                 "No pude fijar las reglas. El bot debe ser admin del grupo con permiso de fijar mensajes.",
             )
 
+    async def cmd_salud(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """Admin: mpv, yt-dlp, red y disco en una pantalla.
+
+        Nada se consulta afuera: es lo que el propio proceso ve. La linea de
+        red es honesta a proposito — si este mensaje te llego, hay conexion;
+        un ping extra solo podria mentir.
+        """
+        import shutil
+
+        from persistence import STATE_PATH
+
+        lineas = ["🩺 Salud del sistema:"]
+
+        if self.player.is_running:
+            lineas.append("✅ mpv: corriendo")
+        else:
+            lineas.append("⚠️ mpv: apagado (arranca al reproducir)")
+
+        try:
+            import yt_dlp
+
+            lineas.append(f"✅ yt-dlp: {yt_dlp.version.__version__}")
+        except Exception as exc:  # noqa: BLE001 - el detalle va al reporte
+            lineas.append(f"❌ yt-dlp: no se pudo leer ({exc})")
+
+        lineas.append("✅ red: conectado (si ves esto, responde)")
+
+        try:
+            libres = shutil.disk_usage(str(STATE_PATH.parent)).free / (1024 ** 3)
+        except Exception as exc:  # noqa: BLE001
+            lineas.append(f"❌ disco: no se pudo leer ({exc})")
+        else:
+            if libres < 2:
+                lineas.append(f"⚠️ disco: {libres:.1f} GB libres (poco espacio)")
+            else:
+                lineas.append(f"✅ disco: {libres:.0f} GB libres")
+
+        await self._reply(update, "\n".join(lineas))
+
     async def _dm_or_group(self, target_user_id: int, text: str) -> None:
         """Envia un mensaje privado a un usuario; si falla (nunca inicio un
         chat con el bot), cae al grupo permitido. Nunca rompe el flujo."""
@@ -999,6 +1048,9 @@ class YTRemoteBot:
 
     def _quality_keyboard(self) -> InlineKeyboardMarkup:
         return self.card.quality_keyboard()
+
+    def _sleep_keyboard(self) -> InlineKeyboardMarkup:
+        return self.card.sleep_keyboard()
 
     async def _render_card(self, text: str, chat_id=None, item=None) -> None:
         await self.card.render_card(text, chat_id, item)
@@ -1765,6 +1817,10 @@ class YTRemoteBot:
             # Selector de calidad de la tarjeta (cl:calidad:N / cl:calidad:cerrar).
             await self._on_quality_callback(update, context)
             return
+        if query.data and query.data.startswith("ap:"):
+            # Menu del apagado programado (ap:N / ap:off / ap:cerrar / ap:noop).
+            await self._on_sleep_callback(update, context)
+            return
         if query.data and query.data.startswith("lst:"):
             # Botones del mensaje de la lista (temas, paginacion, cerrar).
             await self._on_list_callback(update, context)
@@ -2067,7 +2123,7 @@ class YTRemoteBot:
 
         CONTROL_ACTIONS = {
             "pp", "prev", "next", "stop", "vol-10", "vol+10", "vol-info",
-            "seek-10", "seek+10",
+            "seek-10", "seek+10", "apagar",
         }
         if action in CONTROL_ACTIONS and user_id is not None and not self.roles.has_role(user_id, "dj"):
             await query.answer("No tiene permiso para eso.", show_alert=True)
@@ -2149,6 +2205,12 @@ class YTRemoteBot:
                         await query.answer("Solo el admin puede gestionar usuarios.", show_alert=True)
                         return
                     await self._open_members_list(query, user_id)
+                    reflect_status = False
+                elif action == "apagar":
+                    # Menu del apagado programado: solo cambia el teclado
+                    # (mismo patron que el selector de calidad); el estado
+                    # de la tarjeta (titulo/pausa) no cambia.
+                    await self._swap_card_keyboard(self._sleep_keyboard())
                     reflect_status = False
                 else:
                     return
@@ -2668,7 +2730,7 @@ class YTRemoteBot:
         `_list_can_select` decide si hay botones de tema: al paginar no
         cambia aunque lo pages un user. La fila de navegacion mantiene 3
         slots para que el ❌ quede centrado; el slot vacio usa "·" (callback
-        inerte `lst:noop`). Al pie, un boton � Historial convierte el MISMO
+        inerte `lst:noop`). Al pie, un boton 🕘 Historial convierte el MISMO
         mensaje en el historial (el hub de contexto del 📋).
         """
         items = self.queue.all()
@@ -2794,6 +2856,126 @@ class YTRemoteBot:
                 await self._app.bot.delete_message(chat, msg)
             except Exception as exc:  # noqa: BLE001 - no romper el flujo
                 logger.warning("No se pudo borrar el mensaje de la lista: %s", exc)
+
+    async def _on_sleep_callback(
+        self, update: Update, context: ContextTypes.DEFAULT_TYPE
+    ) -> None:
+        """Menu del apagado programado de la tarjeta (callback `ap:*`).
+
+        Dj, igual que el resto de los controles: `ap:N` (re)programa el
+        temporizador de la sesion — a los N minutos para la reproduccion como
+        ⏹ y avisa al chat — y vuelve el teclado de control con el ⏻ marcado
+        (⏻⏰). `ap:off` lo apaga, `ap:cerrar` solo cierra el menu (conserva
+        el temporizador) y `ap:noop` es el encabezado inerte. El temporizador
+        vive en la sesion: un reinicio lo borra.
+        """
+        query = update.callback_query
+        user_id = query.from_user.id if query.from_user else None
+        if user_id is not None and not self.roles.has_role(user_id, "dj"):
+            await query.answer("No tiene permiso para eso.", show_alert=True)
+            return
+
+        if self._control_lock.locked():
+            try:
+                await query.answer("⏳ Un momento, primero termina...")
+            except Exception:
+                pass
+            return
+
+        async with self._control_lock:
+            self._from_card = True
+            try:
+                data = query.data or ""
+                accion = data.split(":", 1)[1] if data.startswith("ap:") else ""
+                self._card_chat_id = update.effective_chat.id
+                self._card_message_id = query.message.message_id
+
+                if accion == "noop":
+                    try:
+                        await query.answer()
+                    except Exception:
+                        pass
+                    return
+                if accion == "cerrar":
+                    try:
+                        await query.answer()
+                    except Exception:
+                        pass
+                    await self._swap_card_keyboard(self._control_keyboard())
+                    return
+                if accion == "off":
+                    self._cancelar_apagado()
+                    await self._swap_card_keyboard(self._control_keyboard())
+                    try:
+                        await query.answer("Temporizador apagado ⏻")
+                    except Exception:
+                        pass
+                    return
+                try:
+                    minutos = int(accion)
+                except ValueError:
+                    try:
+                        await query.answer()
+                    except Exception:
+                        pass
+                    return
+                if minutos not in SLEEP_PRESETS:
+                    try:
+                        await query.answer()
+                    except Exception:
+                        pass
+                    return
+                self._programar_apagado(minutos)
+                # Vuelve el teclado de control con el ⏻ ya marcado (⏻⏰) y
+                # confirma cuanto falta en el toast.
+                await self._swap_card_keyboard(self._control_keyboard())
+                try:
+                    await query.answer(f"⏰ La musica para en {minutos} min.")
+                except Exception:
+                    pass
+            finally:
+                self._from_card = False
+
+    # --- Apagado programado (boton ⏻) ------------------------------------
+
+    def _programar_apagado(self, minutos: int) -> None:
+        """(Re)programa el apagado de la sesion: a los `minutos` para la
+        reproduccion. Reprogramar cancela el temporizador anterior."""
+        self._cancelar_apagado()
+        self._sleep_minutes = minutos
+        self._sleep_task = asyncio.create_task(self._dormir_tras(minutos))
+
+    def _cancelar_apagado(self) -> None:
+        """Apaga el temporizador si estaba armado (idempotente)."""
+        tarea = self._sleep_task
+        self._sleep_task = None
+        self._sleep_minutes = None
+        if tarea is not None:
+            tarea.cancel()
+
+    async def _dormir_tras(self, minutos: int) -> None:
+        """Espera `minutos` y dispara el apagado. Reprogramar o apagar
+        cancela la tarea antes de que llegue a disparar."""
+        await asyncio.sleep(minutos * 60)
+        await self._apagar_por_temporizador()
+
+    async def _apagar_por_temporizador(self) -> None:
+        """Disparo del temporizador: para la musica igual que ⏹ (rebobina a
+        0:00 y queda en pausa, conservando cola, historial y navegacion) y
+        avisa al chat de la tarjeta."""
+        self._sleep_task = None
+        self._sleep_minutes = None
+        if self.player.is_running:
+            await self.player.rewind()
+        self._queue_advance_needed = False
+        self._paused = True
+        self._persist_dirty()
+        await self._render_card(self._track_status_text())
+        if self._card_chat_id is not None:
+            await self._enviar_al_chat(
+                self._card_chat_id,
+                "⏹️ El temporizador llego: buena noche 🌙 (▶ para reanudar).",
+            )
 
     async def _open_queue_list(
         self, query, user_id: int | None, chat_id: int

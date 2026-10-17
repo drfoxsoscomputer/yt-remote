@@ -369,6 +369,112 @@ async def test_player_seek_emite_comando_mpv():
     assert _json.loads(enviados[1])["command"] == ["seek", "10", "relative"]
 
 
+async def test_salud_diagnostico_admin():
+    """/salud junta mpv, yt-dlp, red y disco en UN mensaje; solo admin."""
+    b = make_bot()
+    h = b._require("admin", b.cmd_salud)
+
+    # No-admin: denegado, sin diagnostico.
+    upd_user = FakeMessageUpdate("/salud", user_id=50)
+    await h(upd_user, SimpleNamespace(args=[]))
+    assert any("denegado" in t for t, _ in upd_user.sent), upd_user.sent
+    assert not any("🩺" in t for t, _ in upd_user.sent), "el user no ve nada"
+
+    # Admin: una sola pantalla con las 4 lineas del plan.
+    b.roles.set_role(1, "admin")
+    upd_admin = FakeMessageUpdate("/salud", user_id=1)
+    await h(upd_admin, SimpleNamespace(args=[]))
+    assert len(upd_admin.sent) == 1, upd_admin.sent
+    texto = upd_admin.sent[0][0]
+    assert texto.startswith("🩺 Salud del sistema:"), texto
+    assert "mpv:" in texto and "yt-dlp:" in texto, texto
+    assert "red:" in texto and "disco:" in texto, texto
+    assert texto.count("\n") == 4, texto  # encabezado + 4 lineas: una pantalla
+
+
+async def test_sleep_menu_abre_y_programa():
+    """El ⏻ abre el menu de presets SOLO cambiando el teclado; elegir uno
+    programa el temporizador de la sesion y devuelve el ⏻ marcado (⏻⏰)."""
+    b = make_bot()
+    b._card_chat_id = 44
+    b._card_message_id = 7
+
+    fila3 = [btn.text for btn in b._control_keyboard().inline_keyboard[2]]
+    assert fila3 == ["⚙️ Calidad: 1080p", "👥 Usuarios", "⏻"], fila3
+
+    upd = FakeUpdate("ctl:apagar", user_id=77, chat_id=44, message_id=7)
+    await b._on_control(upd, SimpleNamespace(args=[]), "apagar")
+    assert b._app.bot.edited[-1][2] == "MARKUP", b._app.bot.edited[-1]
+    menu = b._app.bot.edited[-1][3].get("reply_markup")
+    etiquetas = [btn.text for fila in menu.inline_keyboard for btn in fila]
+    assert "15 min" in etiquetas and "60 min" in etiquetas, etiquetas
+    assert "❌" in etiquetas, etiquetas
+    assert "⏰" not in "".join(etiquetas), "sin temporizador no hay encabezado"
+
+    # Programar: estado + tarea + teclado de control con el ⏻ marcado.
+    upd2 = FakeUpdate("ap:45", user_id=77, chat_id=44, message_id=7)
+    await b._on_sleep_callback(upd2, SimpleNamespace(args=[]))
+    assert b._sleep_minutes == 45, b._sleep_minutes
+    assert b._sleep_task is not None and not b._sleep_task.done()
+    assert upd2.answered and "45" in str(upd2.answered), upd2.answered
+    kb2 = b._control_keyboard()
+    assert kb2.inline_keyboard[2][2].text == "⏻⏰", "el ⏻ marca el temporizador"
+
+    # Reprogramar cancela la tarea anterior (solo una puede correr).
+    tarea_vieja = b._sleep_task
+    upd3 = FakeUpdate("ap:15", user_id=77, chat_id=44, message_id=7)
+    await b._on_sleep_callback(upd3, SimpleNamespace(args=[]))
+    assert b._sleep_minutes == 15, b._sleep_minutes
+    assert b._sleep_task is not tarea_vieja
+    assert tarea_vieja.cancelled() or tarea_vieja.cancelling() >= 1
+
+    # Enrutado real: on_callback encamina ap:* y CERRAR conserva el timer.
+    upd4 = FakeUpdate("ap:cerrar", user_id=77, chat_id=44, message_id=7)
+    await b.on_callback(upd4, SimpleNamespace(args=[]))
+    assert b._sleep_minutes == 15, "cerrar el menu no apaga el temporizador"
+    assert b._app.bot.edited[-1][2] == "MARKUP", "cierra volviendo controles"
+
+    # Apagar el temporizador limpia estado y teclado.
+    upd5 = FakeUpdate("ap:off", user_id=77, chat_id=44, message_id=7)
+    await b._on_sleep_callback(upd5, SimpleNamespace(args=[]))
+    assert b._sleep_minutes is None and b._sleep_task is None
+    menu_final = b._app.bot.edited[-1][3].get("reply_markup")
+    assert menu_final.inline_keyboard[2][2].text == "⏻", "vuelve el ⏻ solo"
+
+
+async def test_sleep_permisos_y_disparo():
+    """Sin rol dj no se abre ni se programa; el disparo del temporizador
+    para igual que ⏹ (rebobina + pausa, conserva todo) y avisa al chat."""
+    b = make_bot()
+    b.roles.set_role(50, "user")
+    b._card_chat_id = 44
+    b._card_message_id = 7
+
+    b._app.bot.edited.clear()
+    upd = FakeUpdate("ctl:apagar", user_id=50, chat_id=44, message_id=7)
+    await b._on_control(upd, SimpleNamespace(args=[]), "apagar")
+    assert upd.answered and "permiso" in str(upd.answered[0]), upd.answered
+    assert b._app.bot.edited == [], "el user no abre el menu"
+
+    upd2 = FakeUpdate("ap:30", user_id=50, chat_id=44, message_id=7)
+    await b._on_sleep_callback(upd2, SimpleNamespace(args=[]))
+    assert upd2.answered_kwargs.get("show_alert") is True
+    assert b._sleep_minutes is None, "el user no programa"
+
+    # Disparo: rebobina, queda en pausa, limpia el timer y avisa al chat.
+    b.player.running = True
+    b._paused = False
+    b._sleep_minutes = 30
+    enviados = len(b._app.bot.sent)
+    await b._apagar_por_temporizador()
+    assert b.player.rewinds == 1, "rebobina como ⏹"
+    assert b._paused is True, "queda en pausa"
+    assert b._sleep_minutes is None and b._sleep_task is None
+    assert any(
+        "temporizador" in str(s[1]) for s in b._app.bot.sent[enviados:]
+    ), "avisa al chat de la card"
+
+
 async def test_dispatch_unknown_action():
     b = make_bot()
     upd = FakeUpdate("ctl:???")
@@ -1540,18 +1646,21 @@ async def test_playlist_feedback_renders_in_card():
 
 
 async def test_quality_button_in_card_keyboard():
-    """La tarjeta muestra la fila 3 con calidad y usuarios: '⚙️ Calidad: 1080p'
-    y '👥 Usuarios', visible para todos (el acceso lo controla el handler)."""
+    """La tarjeta muestra la fila 3 con calidad, usuarios y el ⏻ del
+    apagado: '⚙️ Calidad: 1080p', '👥 Usuarios' y '⏻', visibles para todos
+    (el acceso lo controla cada handler)."""
     b = make_bot()
     kb = b._control_keyboard()
     rows = kb.inline_keyboard
     assert len(rows) == 3, f"la tarjeta debe tener 3 filas, tiene {len(rows)}"
     quality_btn = rows[2]
-    assert len(quality_btn) == 2, f"la fila 3 tiene 2 botones: {quality_btn}"
+    assert len(quality_btn) == 3, f"la fila 3 tiene 3 botones: {quality_btn}"
     assert quality_btn[0].text == "⚙️ Calidad: 1080p", quality_btn[0].text
     assert quality_btn[0].callback_data == "ctl:calidad"
     assert quality_btn[1].text == "👥 Usuarios", quality_btn[1].text
     assert quality_btn[1].callback_data == "ctl:usuarios"
+    assert quality_btn[2].text == "⏻", quality_btn[2].text
+    assert quality_btn[2].callback_data == "ctl:apagar"
     b._max_height = 480
     kb = b._control_keyboard()
     assert kb.inline_keyboard[2][0].text == "⚙️ Calidad: 480p"
