@@ -1814,6 +1814,165 @@ async def test_radio_reproduce_directo_sin_yt_dlp():
     assert prefetch == [], prefetch
 
 
+def _stub_letra(valor=None, error=None):
+    """Reemplaza lyrics.buscar_letra por un stub que registra la llamada y
+    devuelve `valor` (o lanza `error`). Se restaura con el viejo que
+    devuelve, como los stubs de radio."""
+    import lyrics as lyrics_mod
+
+    llamado = {}
+
+    async def buscar_letra(cancion, artista=""):
+        llamado["args"] = (cancion, artista)
+        if error is not None:
+            raise error
+        return valor
+
+    viejo = lyrics_mod.buscar_letra
+    lyrics_mod.buscar_letra = buscar_letra
+    return lyrics_mod, viejo, llamado
+
+
+def _sin_admin(b):
+    """Ningun mensaje debe haber ido al chat del admin (chat 1)."""
+    return all(cid != 1 for cid, _, _ in b._app.bot.sent)
+
+
+async def test_letra_sin_nada_sonando():
+    """/letra sin nada en reproduccion solo avisa: no hay nada que buscar."""
+    b = make_bot()
+
+    upd = FakeMessageUpdate("/letra")
+    await b.cmd_letra(upd, SimpleNamespace(args=[]))
+    assert any("No hay nada sonando" in t for t, _ in upd.sent), upd.sent
+    assert _sin_admin(b)
+
+
+async def test_letra_en_radio_no_aplica():
+    """En emisoras no aplica (es un stream en vivo, no una cancion): se
+    avisa y NO se le pregunta nada a lrclib."""
+    import lyrics as lyrics_mod
+    from queue_manager import QueueItem
+
+    b = make_bot()
+    b.queue.set_current(
+        QueueItem(url="https://s.mp3", title="Mango Radio", directo=True)
+    )
+
+    async def _no_preguntar(cancion, artista=""):
+        raise AssertionError("no debe preguntarse por letra en radio")
+
+    viejo = lyrics_mod.buscar_letra
+    lyrics_mod.buscar_letra = _no_preguntar
+    try:
+        upd = FakeMessageUpdate("/letra")
+        await b.cmd_letra(upd, SimpleNamespace(args=[]))
+    finally:
+        lyrics_mod.buscar_letra = viejo
+
+    assert any("En la radio no hay letra" in t for t, _ in upd.sent), upd.sent
+    assert _sin_admin(b)
+
+
+async def test_letra_enviada_desde_titulo():
+    """La letra llega como MENSAJE DE TEXTO. El titulo "Artista - Cancion
+    (ruido)" se parte para preguntarle preciso a lrclib, y el admin no se
+    entera: la letra es informacion, no reproducecon."""
+    from queue_manager import QueueItem
+
+    b = make_bot()
+    b.queue.set_current(
+        QueueItem(url="u1", title="GP Band - Inexplicable (Video Oficial)")
+    )
+    lyrics_mod, viejo, llamado = _stub_letra(valor="Linea uno\nLinea dos")
+    try:
+        upd = FakeMessageUpdate("/letra")
+        await b.cmd_letra(upd, SimpleNamespace(args=[]))
+    finally:
+        lyrics_mod.buscar_letra = viejo
+
+    assert llamado["args"] == ("Inexplicable (Video Oficial)", "GP Band"), llamado
+    assert any(t == "Linea uno\nLinea dos" for t, _ in upd.sent), upd.sent
+    assert _sin_admin(b)
+
+
+async def test_letra_no_encontrada_responde_sin_admin():
+    """Sin coincidencia en lrclib: el mensaje EXACTO del plan y CERO aviso
+    al admin (no encontre no es una emergencia)."""
+    from queue_manager import QueueItem
+
+    b = make_bot()
+    b.queue.set_current(QueueItem(url="u1", title="Tema Raro"))
+    lyrics_mod, viejo, _ = _stub_letra(valor=None)
+    try:
+        upd = FakeMessageUpdate("/letra")
+        await b.cmd_letra(upd, SimpleNamespace(args=[]))
+    finally:
+        lyrics_mod.buscar_letra = viejo
+
+    assert any(
+        t == "No encontré la letra de esta canción." for t, _ in upd.sent
+    ), upd.sent
+    assert _sin_admin(b)
+
+
+async def test_letra_fallo_de_red_honesto():
+    """Si lrclib esta caido el motivo es honesto ("no responde (...)") y
+    tampoco se le avisa al admin."""
+    from lyrics import LetraError
+    from queue_manager import QueueItem
+
+    b = make_bot()
+    b.queue.set_current(QueueItem(url="u1", title="Tema"))
+    lyrics_mod, viejo, _ = _stub_letra(
+        error=LetraError("lrclib no responde (boom)")
+    )
+    try:
+        upd = FakeMessageUpdate("/letra")
+        await b.cmd_letra(upd, SimpleNamespace(args=[]))
+    finally:
+        lyrics_mod.buscar_letra = viejo
+
+    assert any(
+        "La letra no se pudo buscar" in t and "boom" in t for t, _ in upd.sent
+    ), upd.sent
+    assert _sin_admin(b)
+
+
+async def test_letra_larga_se_corta_con_aviso():
+    """Una letra interminable NO revienta el limite de 4096 de Telegram:
+    se corta en el tope con un aviso honesto, nunca a medias sin decirlo."""
+    from queue_manager import QueueItem
+
+    b = make_bot()
+    b.queue.set_current(QueueItem(url="u1", title="Tema"))
+    lyrics_mod, viejo, _ = _stub_letra(valor="palabra " * 3000)
+    try:
+        upd = FakeMessageUpdate("/letra")
+        await b.cmd_letra(upd, SimpleNamespace(args=[]))
+    finally:
+        lyrics_mod.buscar_letra = viejo
+
+    assert len(upd.sent) == 1, upd.sent
+    (t, _kwargs) = upd.sent[0]
+    assert t.endswith("… (letra cortada)"), t[-40:]
+    assert len(t) <= 3600, len(t)
+
+
+def test_cancion_y_artista_de_titulo():
+    """El titulo de YouTube se parte por " - ": lo de antes es el artista.
+    Sin " - " no se adivina (el titulo entero va como busqueda libre)."""
+    import bot as bot_mod
+
+    assert bot_mod._cancion_y_artista("GP Band - Inexplicable") == (
+        "Inexplicable",
+        "GP Band",
+    )
+    assert bot_mod._cancion_y_artista("Tema Sin Guion") == ("Tema Sin Guion", "")
+    assert bot_mod._cancion_y_artista(" - Cancion") == ("- Cancion", "")
+    assert bot_mod._cancion_y_artista("  A  -  B  ") == ("B", "A")
+
+
 async def test_notify_admin_sends_to_owner():
     """Fase 4: _notify_admin copia el error al chat del dueno (log del admin)."""
     b = make_bot()

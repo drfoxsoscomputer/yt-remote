@@ -71,6 +71,19 @@ RADIO_PAGE_SIZE = 5
 RADIO_API = "https://de1.api.radio-browser.info"
 RADIO_API_TIMEOUT = 15.0
 
+# /letra (lrclib.net): base de datos libre de letras, sin API key. El
+# User-Agent identifica al bot (lrclib pide un agente que no parezca un
+# navegador vacio); si no responde, el aviso es honesto ("lrclib no
+# responde (...)") y NUNCA se le avisa al admin: la letra es informacion,
+# no reproducecon.
+LRCLIB_API = "https://lrclib.net/api/search"
+LRCLIB_TIMEOUT = 10.0
+LRCLIB_USER_AGENT = "yt-remote-bot (github.com/drfoxsoscomputer/yt-remote)"
+# Telegram corta los mensajes en 4096 caracteres: la letra se manda entera
+# hasta este tope y mas alla se corta con un aviso honesto, nunca a medias
+# sin decirlo.
+TOPE_LETRA = 3500
+
 # Listado de resultados de /buscar: cuantos resultados se traen por tanda y
 # cuantos se ven por pagina. El listado se pagina, asi que traer 10 de una no
 # hace esperar mas: es la MISMA busqueda con mas resultados.

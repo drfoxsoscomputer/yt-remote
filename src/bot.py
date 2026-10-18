@@ -36,6 +36,7 @@ from telegram.ext import (
 )
 
 import artist_match
+import lyrics
 import radio
 from card import QUALITY_LEVELS, SLEEP_PRESETS, CardManager
 from playback import PlaybackEngine
@@ -120,6 +121,7 @@ from constants import (  # noqa: E402
     SEARCH_BATCH_CON_ARTISTA,
     SEARCH_PAGE_SIZE,
     SEARCH_TIMEOUT,
+    TOPE_LETRA,
 )
 
 _RESOLVE_TIMEOUT = RESOLVE_TIMEOUT
@@ -138,6 +140,7 @@ _SEARCH_PAGE_SIZE = SEARCH_PAGE_SIZE
 _SEARCH_BATCH_CON_ARTISTA = SEARCH_BATCH_CON_ARTISTA
 _RADIO_BATCH = RADIO_BATCH
 _RADIO_PAGE_SIZE = RADIO_PAGE_SIZE
+_TOPE_LETRA = TOPE_LETRA
 
 
 class ActualizacionError(Exception):
@@ -154,6 +157,23 @@ def _version_num(version: str) -> tuple[int, ...]:
             break
         partes.append(int(m.group()))
     return tuple(partes) or (0,)
+
+
+def _cancion_y_artista(titulo: str) -> tuple[str, str]:
+    """Titulo de YouTube -> (cancion, artista) para preguntarle a lrclib.
+
+    Los titulos de YouTube vienen casi siempre como "Artista - Cancion
+    (Video Oficial)": si hay " - ", lo de antes es el artista y lo de
+    despues la cancion (el parentesis de ruido lo aguanta la busqueda
+    difusa de lrclib). Sin " - " no se adivina: la cancion es el titulo
+    entero y el artista queda vacio (se busca por texto libre).
+    """
+    if " - " in titulo:
+        izq, _, der = titulo.partition(" - ")
+        artista, cancion = izq.strip(), der.strip()
+        if artista and cancion:
+            return cancion, artista
+    return titulo.strip(), ""
 
 
 def _verificar_sha256(datos: bytes, esperado: str) -> None:
@@ -697,6 +717,14 @@ class YTRemoteBot:
             CommandHandler(
                 "radio",
                 self._with_card_reposition(self._require_chat(self.cmd_radio)),
+            )
+        )
+        # /letra es informacion, no reproducecon: la pide cualquiera (como
+        # el 📋) y nunca le avisa al admin si falla.
+        app.add_handler(
+            CommandHandler(
+                "letra",
+                self._with_card_reposition(self._require_chat(self.cmd_letra)),
             )
         )
         # Editor de usuarios (boton 👥): los callbacks mem:* viven en el chat
@@ -3306,6 +3334,36 @@ class YTRemoteBot:
         await self._reply(
             update, f"🔀 Cola mezclada: {barajados} temas por venir en otro orden."
         )
+
+    async def cmd_letra(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """La letra de lo que suena, como mensaje de texto. Cualquiera
+        puede pedirla (como el 📋): es informacion, no reproducecon.
+
+        En emisoras no aplica (no hay cancion: hay un stream en vivo). Si
+        lrclib no tiene la cancion, la respuesta es "no encontre" SIN
+        avisar al admin; si lrclib esta caido, el motivo honesto tambien
+        sin avisar: nada de esto detiene la fiesta.
+        """
+        item = self.queue.current
+        if item is None:
+            await self._reply(update, "No hay nada sonando.")
+            return
+        if item.directo:
+            await self._reply(update, "En la radio no hay letra.")
+            return
+        cancion, artista = _cancion_y_artista(item.title)
+        try:
+            letra = await lyrics.buscar_letra(cancion, artista)
+        except lyrics.LetraError as exc:
+            logger.warning("/letra fallo: %s", exc)
+            await self._reply(update, f"La letra no se pudo buscar ({exc}).")
+            return
+        if letra is None:
+            await self._reply(update, "No encontré la letra de esta canción.")
+            return
+        if len(letra) > _TOPE_LETRA:
+            letra = letra[:_TOPE_LETRA].rstrip() + "\n… (letra cortada)"
+        await self._reply(update, letra)
 
     async def cmd_volume(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         if not context.args:
