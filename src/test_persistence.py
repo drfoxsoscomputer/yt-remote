@@ -77,7 +77,12 @@ def make_store_en(path) -> StateStore:
 
 
 def test_round_trip_complex():
-    """Todo el estado, con lista, historial y cancion en curso, sobrevive."""
+    """Todo el estado, con lista, historial y cancion en curso, sobrevive.
+
+    OJO: el historial ya NO viaja en save() — se siembra con
+    marcar_historial(), que es como lo hace el bot de verdad (cada cancion
+    que suena). Lo que se exige es que el reload lo encuentre igual.
+    """
     s = make_store()
     playlist = [
         {"url": f"u{i}", "title": f"T{i}", "duration": "3:00", "duration_seconds": 180}
@@ -87,7 +92,6 @@ def test_round_trip_complex():
     s.save(
         _estado(
             playlist=playlist,
-            history=history,
             current=playlist[2],
             cursor=2,
             list_page=1,
@@ -98,6 +102,8 @@ def test_round_trip_complex():
             card={"chat_id": 44, "message_id": 500, "is_photo": True},
         )
     )
+    for h in history:
+        s.marcar_historial(h)
 
     leido = make_store_en(s.path).load()
     assert leido["volume"] == 73, leido
@@ -122,7 +128,8 @@ def test_history_truncated_to_max():
     """El historial se poda al tope: no crece para siempre."""
     s = make_store()
     historia = [{"url": f"h{i}", "title": f"H{i}"} for i in range(MAX_HISTORY + 40)]
-    s.save(_estado(history=historia))
+    for h in historia:
+        s.marcar_historial(h)
 
     leido = make_store_en(s.path).load()
     assert len(leido["history"]) == MAX_HISTORY, len(leido["history"])
@@ -248,6 +255,49 @@ def test_no_quedan_archivos_temporales():
     assert not [n for n in vecinos if n.endswith(".tmp")], vecinos
     assert not [n for n in vecinos if n.endswith(".json.tmp")], vecinos
     print("  OK  test_no_quedan_archivos_temporales")
+
+
+def test_save_no_pisa_el_historial():
+    """LA REGRESION del 2/10: cada guardado reescribia la tabla entera desde
+    el deque en memoria y BORRABA lo que la base acumulaba. Ahora save() no
+    toca el historial: solo se escribe incremental desde marcar_historial()."""
+    s = make_store()
+    s.load()
+    s.marcar_historial({"url": "u1", "title": "Lo que sonó"})
+    # Un estado guardado que trae un historial DISTINTO: se ignora.
+    s.save(_estado(history=[{"url": "deberia-ignorarse", "title": "No"}]))
+
+    leido = make_store_en(s.path).load()
+    assert [t["url"] for t in leido["history"]] == ["u1"], leido["history"]
+    print("  OK  test_save_no_pisa_el_historial")
+
+
+def test_marcar_reubica_sin_repeticiones():
+    """Una sola fila por cancion: vuelve a sonar y queda la ULTIMA, arriba."""
+    s = make_store()
+    s.load()
+    s.marcar_historial({"url": "ua", "title": "A"})
+    s.marcar_historial({"url": "ub", "title": "B"})
+    s.marcar_historial({"url": "ua", "title": "A de nuevo"})
+
+    leido = make_store_en(s.path).load()
+    assert [t["url"] for t in leido["history"]] == ["ua", "ub"], leido["history"]
+    assert leido["history"][0]["title"] == "A de nuevo", leido["history"][0]
+    print("  OK  test_marcar_reubica_sin_repeticiones")
+
+
+def test_borrar_y_vaciar_desde_la_fachada():
+    """Los botones del hub usan la fachada: borrar UNA cancion y vaciar TODA."""
+    s = make_store()
+    s.load()
+    s.marcar_historial({"url": "ua", "title": "A"})
+    s.marcar_historial({"url": "ub", "title": "B"})
+
+    assert s.borrar_historial("ua") is True
+    assert [t["url"] for t in s.leer_historial()] == ["ub"]
+    s.vaciar_historial()
+    assert s.leer_historial() == []
+    print("  OK  test_borrar_y_vaciar_desde_la_fachada")
 
 
 def run():

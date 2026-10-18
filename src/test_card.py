@@ -2902,7 +2902,7 @@ async def test_list_hub_historial_view():
 
     b = make_bot()
     b.queue.set_playlist([QueueItem(url=f"u{i}", title=f"Tema {i}") for i in range(3)])
-    b.queue._history_items.append(QueueItem(url="uv", title="Vieja Cancion"))
+    b._state.marcar_historial(QueueItem(url="uv", title="Vieja Cancion"))
     await b._on_control(
         FakeUpdate("ctl:lista", user_id=77, chat_id=44), SimpleNamespace(args=[]), "lista"
     )
@@ -2932,7 +2932,7 @@ async def test_list_historial_abre_directo_si_cola_vacia():
     from queue_manager import QueueItem
 
     b = make_bot()
-    b.queue._history_items.append(QueueItem(url="uv", title="Vieja"))
+    b._state.marcar_historial(QueueItem(url="uv", title="Vieja"))
     upd = FakeUpdate("ctl:lista", user_id=77, chat_id=44)
     await b._on_control(upd, SimpleNamespace(args=[]), "lista")
     assert b._list_view == "historial", "debe abrir directo en el historial"
@@ -2947,8 +2947,10 @@ async def test_list_historial_rep_link_del():
     from queue_manager import QueueItem
 
     b = make_bot()
-    b.queue._history_items.append(QueueItem(url="ua", title="Cancion A"))
-    b.queue._history_items.append(QueueItem(url="ub", title="Cancion B"))
+    # Siembra AL REVES: la base se lee mas nuevo primero, asi que ua (el
+    # ultimo en entrar) queda en la posicion 1 del teclado.
+    b._state.marcar_historial(QueueItem(url="ub", title="Cancion B"))
+    b._state.marcar_historial(QueueItem(url="ua", title="Cancion A"))
 
     async def fake_stream_for(url):
         return (f"stream-{url}", None)
@@ -2979,10 +2981,10 @@ async def test_list_historial_rep_link_del():
     assert b._app.bot.sent[enviados_antes][1] == "ub", b._app.bot.sent
     assert b._list_message_id is not None, "copiar el enlace no cierra"
 
-    # 🗑 borrar: quita la entrada del historial y re-renderiza la vista.
+    # 🗑 borrar: quita la entrada de la BASE y re-renderiza la vista.
     upd = FakeUpdate("lst:del:1", user_id=77, chat_id=44)
     await b._on_list_callback(upd, SimpleNamespace(args=[]))
-    assert [i.url for i in b.queue._history_items] == ["ua"], b.queue._history_items
+    assert [h["url"] for h in b._historial()] == ["ua"], b._historial()
     etiquetas = [
         btn.text
         for fila in b._app.bot.edited[-1][3]["reply_markup"].inline_keyboard
@@ -2998,7 +3000,7 @@ async def test_list_historial_permisos():
 
     b = make_bot()
     b.roles.set_role(50, "user")
-    b.queue._history_items.append(QueueItem(url="ua", title="Cancion A"))
+    b._state.marcar_historial(QueueItem(url="ua", title="Cancion A"))
     await b._on_control(
         FakeUpdate("ctl:lista", user_id=50, chat_id=44), SimpleNamespace(args=[]), "lista"
     )
@@ -3010,7 +3012,103 @@ async def test_list_historial_permisos():
     upd = FakeUpdate("lst:del:0", user_id=50, chat_id=44)
     await b._on_list_callback(upd, SimpleNamespace(args=[]))
     assert upd.answered_kwargs.get("show_alert") is True
-    assert len(b.queue._history_items) == 1, "el user no borra"
+    assert len(b._historial()) == 1, "el user no borra"
+
+
+async def test_reproducir_registra_el_historial():
+    """SI sonó, ENTRA al historial guardado: tambien las canciones de la
+    COLA (el defecto del 2/10: solo entraba lo suelto de radio)."""
+    from queue_manager import QueueItem
+
+    b = make_bot()
+    b.queue.set_playlist([QueueItem(url="u1", title="Tema 1")])
+
+    async def fake_stream_for(url):
+        return (f"stream-{url}", None)
+
+    async def _no_candidate(current=None):
+        return None, False, False
+
+    b._stream_for = fake_stream_for
+    b.playback.stream_for = fake_stream_for
+    b._pick_next_candidate = _no_candidate
+    b.playback.pick_next_candidate = _no_candidate
+
+    started = await b._play_item(
+        FakeUpdate("ctl:pp", chat_id=44), QueueItem(url="u1", title="Tema 1")
+    )
+    assert started, "debio arrancar"
+    assert [h["url"] for h in b._historial()] == ["u1"], b._historial()
+    assert b._historial()[0]["title"] == "Tema 1", b._historial()[0]
+
+
+async def test_reproducir_fallido_no_registra_el_historial():
+    """Si NO arranco (fallo de resolucion), no se registra nada: el
+    historial es lo que SONO, no lo que se intentó."""
+    from queue_manager import QueueItem
+
+    b = make_bot()
+
+    async def sin_stream(url):
+        return None
+
+    b._stream_for = sin_stream
+    b.playback.stream_for = sin_stream
+
+    started = await b._play_item(
+        FakeUpdate("ctl:pp", chat_id=44), QueueItem(url="u1", title="X")
+    )
+    assert started is False, "no debio arrancar"
+    assert b._historial() == [], b._historial()
+
+
+async def test_autoadvance_prefetch_tambien_registra():
+    """El siguiente automatico por el camino del prefetch NO pasa por
+    play_item: tambien debe entrar al historial."""
+    from queue_manager import QueueItem
+
+    b = make_bot()
+
+    async def _no_candidate(current=None):
+        return None, False, False
+
+    b.playback.pick_next_candidate = _no_candidate
+    b.queue.set_current(QueueItem(url="v0", title="Suena"))
+    item = QueueItem(url="u2", title="Siguiente")
+    b.playback.prefetch_resolved = ((item, False), ("stream-u2", None))
+
+    await b.playback.advance_after_end(SimpleNamespace(args=[]))
+
+    assert [h["url"] for h in b._historial()] == ["u2"], b._historial()
+
+
+async def test_list_historial_borrar_todo():
+    """🗑 Borrar todo: alerta para quien no es dj; para el dj vacia la base
+    y la vista vuelve a la cola (o se cierra si no hay nada)."""
+    from queue_manager import QueueItem
+
+    b = make_bot()
+    b.roles.set_role(50, "user")
+    b._state.marcar_historial(QueueItem(url="ua", title="Cancion A"))
+    b._state.marcar_historial(QueueItem(url="ub", title="Cancion B"))
+    await b._on_control(
+        FakeUpdate("ctl:lista", user_id=50, chat_id=44), SimpleNamespace(args=[]), "lista"
+    )
+    assert b._list_view == "historial"
+
+    # El user no puede: alerta y la base queda igual.
+    upd = FakeUpdate("lst:delall", user_id=50, chat_id=44)
+    await b._on_list_callback(upd, SimpleNamespace(args=[]))
+    assert upd.answered_kwargs.get("show_alert") is True
+    assert len(b._historial()) == 2, "el user no borra nada"
+
+    # El dj si: la base queda vacia y, sin cola ni nada sonando, se cierra
+    # el mensaje de lista.
+    upd = FakeUpdate("lst:delall", user_id=77, chat_id=44)
+    await b._on_list_callback(upd, SimpleNamespace(args=[]))
+    assert b._historial() == [], b._historial()
+    assert upd.answered_kwargs.get("text") == "Historial borrado ✓", upd.answered
+    assert b._list_message_id is None, "sin nada que listar se cierra"
 
 
 async def test_playlist_expand_times_out():

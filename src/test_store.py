@@ -296,7 +296,7 @@ def test_actualizar_una_cancion_no_borra_la_cola_ni_el_historial():
         ]
     )
     s.agregar_historial({"url": "u1", "video_id": "v1", "title": "Uno"}, cuando=1)
-    s.agregar_historial({"url": "u1", "video_id": "v1", "title": "Uno x2"}, cuando=2)
+    s.agregar_historial({"url": "u2", "video_id": "v2", "title": "Dos"}, cuando=2)
 
     # Se actualiza la cancion dos veces, como haria el historial o la cola.
     s.guardar_track({"url": "u1", "video_id": "v1", "title": "Uno EDITADO"})
@@ -310,9 +310,10 @@ def test_actualizar_una_cancion_no_borra_la_cola_ni_el_historial():
     assert len(historial) == 2, (
         f"actualizar borro el historial: quedo {len(historial)} de 2"
     )
-    # Son dos entradas aunque las dos apunten al mismo video del catalogo: el
-    # historial registra REPeticiones (la misma canción se puede volver a oir).
-    assert [h["video_id"] for h in historial] == ["v1", "v1"], historial
+    # Sin repetidas: una fila por cancion. El punto sigue intacto: ACTUALIZAR
+    # no puede borrar filas por la cascada del catalogo.
+    assert [h["video_id"] for h in historial] == ["v2", "v1"], historial
+    assert historial[1]["title"] == "Uno EDITADO", historial[1]
 
     # El catalogo quedo actualizado, no duplicado.
     assert len(s.conn.execute("SELECT * FROM tracks").fetchall()) == 2, "se duplico el catalogo"
@@ -321,12 +322,24 @@ def test_actualizar_una_cancion_no_borra_la_cola_ni_el_historial():
     s.cerrar()
 
 
-def test_el_historial_conserva_las_repeticiones():
-    """La misma canción dos veces son dos filas: se puede volver a escuchar."""
+def test_historial_sin_repeticiones_se_reubica_la_ultima():
+    """UNA sola fila por cancion: si vuelve a sonar, se reubica arriba
+    (queda la ultima reproduccion). Regla de casa."""
     s = _store()
+    s.agregar_historial({"url": "u1", "video_id": "v1", "title": "Uno"}, cuando=100)
+    s.agregar_historial({"url": "u2", "video_id": "v2", "title": "Dos"}, cuando=101)
+    # u1 vuelve a sonar: NO suma fila, se mueve arriba con su titulo nuevo.
+    s.agregar_historial({"url": "u1", "video_id": "v1", "title": "Uno nuevo"}, cuando=102)
+
+    leido = s.leer_historial(100)
+    assert len(leido) == 2, leido
+    assert [h["url"] for h in leido] == ["u1", "u2"], leido
+    assert leido[0]["title"] == "Uno nuevo", leido[0]
+
+    # Y las cinco veces iguales del caso viejo quedan en UNA.
     for i in range(5):
-        s.agregar_historial({"url": "u1", "video_id": "v1", "title": "Uno"}, cuando=100 + i)
-    assert len(s.leer_historial(100)) == 5, s.leer_historial(100)
+        s.agregar_historial({"url": "u3", "video_id": "v3", "title": "Tres"}, cuando=200 + i)
+    assert len(s.leer_historial(100)) == 3, s.leer_historial(100)
     s.cerrar()
 
 
@@ -340,7 +353,8 @@ def test_la_migracion_no_pierde_una_sola_cancion():
     de 56 en el historial.
 
     Aqui se reproduce el patron exacto: una cancion que esta en la cola y
-    tambien repetida en el historial, y despues se actualiza.
+    tambien en el historial, y despues se actualiza (y si el JSON viejo
+    trae la misma cancion repetida en el historial, queda solo la ultima).
     """
     import json as _json
     import tempfile as _tf
@@ -358,8 +372,9 @@ def test_la_migracion_no_pierde_una_sola_cancion():
         "playlist": [
             {"url": f"u{i}", "title": f"T{i}", "duration_seconds": 100 + i} for i in range(9)
         ],
-        # La cancion 0 aparece en el historial (y repetida, como pasa de verdad).
-        "history": [{"url": "u0", "title": "T0"}, {"url": "u0", "title": "T0 otra vez"}],
+        # Dos canciones distintas en el historial: ninguna se pierde al
+        # actualizar el catalogo.
+        "history": [{"url": "u0", "title": "T0"}, {"url": "u5", "title": "T5"}],
     }
     carpeta = Path(_tf.mkdtemp())
     (carpeta / "state.json").write_text(_json.dumps(origen), encoding="utf-8")
@@ -478,6 +493,48 @@ def test_la_base_se_repara_si_el_legacy_ya_estaba_renombrado():
     assert len(s.leer_historial(100)) == 1, s.leer_historial(100)
     assert s.leer_ajuste("volume") == 80, s.leer_ajuste("volume")
     assert (carpeta / "state.json.migrado").is_file(), "el legacy se perdio"
+    s.cerrar()
+
+
+def test_historial_borrar_y_vaciar():
+    """Borrar UNA cancion y vaciar TODA la lista (los botones del hub)."""
+    s = _store()
+    s.agregar_historial({"url": "ua", "video_id": "va", "title": "A"}, cuando=1)
+    s.agregar_historial({"url": "ub", "video_id": "vb", "title": "B"}, cuando=2)
+    s.agregar_historial({"url": "uc", "video_id": "vc", "title": "C"}, cuando=3)
+
+    assert s.borrar_historial("vb") is True
+    assert [t["url"] for t in s.leer_historial(100)] == ["uc", "ua"]
+    assert s.borrar_historial("no-existe") is False
+
+    s.vaciar_historial()
+    assert s.leer_historial(100) == []
+    s.cerrar()
+
+
+def test_depurar_historial_deja_la_ultima():
+    """Filas repetidas viejas (el historial de antes): al depurar queda la
+    MAS NUEVA de cada cancion. Es lo que corre una vez al abrir la base."""
+    s = _store()
+    # Se insertan repetidas A MANO (sin pasar por agregar_historial, que ya
+    # es sin repetidas) para simular una base heredada.
+    s.guardar_track({"url": "ua", "video_id": "va", "title": "A"})
+    s.guardar_track({"url": "ub", "video_id": "vb", "title": "B"})
+    s.conn.execute("INSERT INTO history (played_at, video_id) VALUES (1, 'va')")
+    s.conn.execute("INSERT INTO history (played_at, video_id) VALUES (2, 'va')")
+    s.conn.execute("INSERT INTO history (played_at, video_id) VALUES (3, 'vb')")
+    s.conn.execute("INSERT INTO history (played_at, video_id) VALUES (4, 'va')")
+    s.conn.commit()
+
+    quitadas = s.depurar_historial()
+    assert quitadas == 2, quitadas
+    filas = s.conn.execute(
+        "SELECT video_id, played_at FROM history ORDER BY id"
+    ).fetchall()
+    assert [(f["video_id"], f["played_at"]) for f in filas] == [
+        ("vb", 3),
+        ("va", 4),
+    ], filas
     s.cerrar()
 
 

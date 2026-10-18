@@ -46,6 +46,8 @@ import time
 from pathlib import Path
 from typing import Any, Optional
 
+from constants import MAX_HISTORY
+
 logger = logging.getLogger("bot")
 
 SCHEMA_VERSION = 1
@@ -313,6 +315,9 @@ class Store:
         if not video_id:
             return
         self.guardar_track(track)
+        # Sin repetidas: UNA sola fila por cancion. Volver a sonar la
+        # REUBICA arriba (id nuevo = lo mas reciente); queda la ultima.
+        self.conn.execute("DELETE FROM history WHERE video_id = ?", (video_id,))
         self.conn.execute(
             "INSERT INTO history (played_at, video_id) VALUES (?, ?)",
             (int(cuando if cuando is not None else time.time()), video_id),
@@ -333,32 +338,36 @@ class Store:
                 salida.append(dict(t))
         return salida
 
-    def reemplazar_historial(self, tracks: list[dict], limite: int = 100) -> None:
-        """Deja el historial exactamente como viene, y lo poda al tope.
+    def borrar_historial(self, video_id: str) -> bool:
+        """Quita TODAS las filas de UNA cancion. True si habia algo."""
+        self._verificar_escritura()
+        cur = self.conn.execute("DELETE FROM history WHERE video_id = ?", (video_id,))
+        self.conn.commit()
+        return cur.rowcount > 0
 
-        El bot trae el historial en memoria (un deque de 100) y lo persiste
-        entero en cada guardado. Se reescribe el bloque, no se incrementally:
-        son 100 filas, no vale la pena llevar la cuenta de los cambios y el
-        riesgo de que se desincronice con la memoria del bot.
-        """
+    def vaciar_historial(self) -> None:
+        """Borra la lista del historial entera."""
         self._verificar_escritura()
         self.conn.execute("DELETE FROM history")
-        ahora = int(time.time())
-        filas = []
-        for i, t in enumerate(tracks):
-            video_id = t.get("video_id") or t.get("url") or ""
-            if not video_id:
-                continue
-            filas.append(((ahora + i), video_id, t))
-        for _, video_id, t in filas:
-            self.guardar_track(t)
-        if filas:
-            self.conn.executemany(
-                "INSERT INTO history (played_at, video_id) VALUES (?, ?)",
-                [(quedada, vid) for quedada, vid, _ in filas],
-            )
         self.conn.commit()
-        self.podar_historial(limite)
+
+    def depurar_historial(self) -> int:
+        """Deja UNA sola fila por cancion: la MAS NUEVA.
+
+        Los datos viejos podian acumular la misma cancion en varias filas
+        (el historial de antes registraba repeticiones). Devuelve cuantas
+        filas quitaron. Se corre una vez al abrir la base.
+        """
+        self._verificar_escritura()
+        cur = self.conn.execute(
+            """
+            DELETE FROM history WHERE id NOT IN (
+                SELECT MAX(id) FROM history GROUP BY video_id
+            )
+            """
+        )
+        self.conn.commit()
+        return cur.rowcount
 
     def podar_historial(self, limite: int = 100) -> None:
         self._verificar_escritura()
@@ -480,10 +489,12 @@ class Store:
         historial = [t for t in (estado.get("history") or []) if isinstance(t, dict)]
         if historial:
             for t in historial:
+                # agregar_historial es sin repetidas: si el JSON viejo trae
+                # la misma cancion varias veces, queda la ULTIMA.
                 self.agregar_historial(
                     {**t, "video_id": t.get("video_id") or t.get("url")}
                 )
-            self.podar_historial(100)
+            self.podar_historial(MAX_HISTORY)
 
         ajustes = {
             "volume": estado.get("volume", 100),

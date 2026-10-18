@@ -445,7 +445,6 @@ class YTRemoteBot:
 
     def _persist_dirty(self) -> None:
         """Construye el estado actual y lo marca como dirty para guardado."""
-        history = [i.to_dict() for i in list(self.queue._history_items)[-100:]]
         self._state._current = {
             "version": 1,
             "volume": self._volume,
@@ -454,7 +453,6 @@ class YTRemoteBot:
             "playlist": [i.to_dict() for i in self.queue._items],
             "cursor": self.queue._cursor if self.queue.has_playlist else 0,
             "list_page": self._list_page,
-            "history": history,
             "radio_artist": self._radio_artist,
             "max_height": self._max_height,
             "card": {
@@ -466,6 +464,16 @@ class YTRemoteBot:
             "radio_favs": [f.to_dict() for f in self._radio_favs],
         }
         self._state.mark_dirty()
+
+    def _registrar_historial(self, item) -> None:
+        """Una cancion que SONO queda en el historial guardado.
+
+        La base guarda UNA sola fila por cancion: si ya sonó, la reubica
+        arriba (queda la ultima reproduccion). Si la base esta en solo
+        lectura, no escribe y la reproduccion sigue igual: el historial
+        nunca tumba un play.
+        """
+        self._state.marcar_historial(item)
 
     def _persist_flush(self) -> None:
         """Guardado inmediato: llama save() sin esperar el debounce."""
@@ -3469,9 +3477,17 @@ class YTRemoteBot:
         rows.append([prev, close, next_])
         return InlineKeyboardMarkup(rows)
 
+    def _historial(self) -> list[dict]:
+        """El historial GUARDADO (la base), lo mas reciente primero.
+
+        La base es la fuente del hub 🕘 — no el deque de navegacion de la
+        cola, que existe para el /prev y el anti-repetir de la radio.
+        """
+        return self._state.leer_historial()
+
     def _history_text(self, page: int = 0) -> str | None:
         """Encabezado del historial del hub; None si no hay nada registrado."""
-        items = list(self.queue._history_items)
+        items = self._historial()
         if not items:
             return None
         pages = max(1, (len(items) + _HISTORY_PAGE_SIZE - 1) // _HISTORY_PAGE_SIZE)
@@ -3483,8 +3499,8 @@ class YTRemoteBot:
     def _history_keyboard(self) -> InlineKeyboardMarkup:
         """Teclado del historial: una fila por cancion con repetir (🔄 con el
         titulo COMPLETO, igual que la cola), copiar enlace (🔗) y borrar (🗑);
-        al pie [🔙 Cola] y la navegacion habitual."""
-        items = list(self.queue._history_items)
+        al pie [🗑 Borrar todo] (dj), [🔙 Cola] y la navegacion habitual."""
+        items = self._historial()
         pages = max(1, (len(items) + _HISTORY_PAGE_SIZE - 1) // _HISTORY_PAGE_SIZE)
         page = max(0, min(self._history_page, pages - 1))
         start = page * _HISTORY_PAGE_SIZE
@@ -3496,7 +3512,7 @@ class YTRemoteBot:
             rows.append(
                 [
                     InlineKeyboardButton(
-                        f"🔄 {idx + 1}. {it.title.strip()}",
+                        f"🔄 {idx + 1}. {str(it.get('title') or '').strip()}",
                         callback_data=f"lst:rep:{idx}",
                     ),
                     InlineKeyboardButton("🔗", callback_data=f"lst:link:{idx}"),
@@ -3508,6 +3524,14 @@ class YTRemoteBot:
                 [
                     InlineKeyboardButton(
                         "El historial esta vacio.", callback_data="lst:noop"
+                    )
+                ]
+            )
+        else:
+            rows.append(
+                [
+                    InlineKeyboardButton(
+                        "🗑 Borrar todo", callback_data="lst:delall"
                     )
                 ]
             )
@@ -3688,7 +3712,7 @@ class YTRemoteBot:
         self._list_view = "cola"
         self._history_page = 0
         text = self._queue_list_text()
-        if text is None and self.queue._history_items:
+        if text is None and self._historial():
             text = self._history_text()
             self._list_view = "historial"
         if text is None:
@@ -3762,7 +3786,8 @@ class YTRemoteBot:
         - `lst:N`: solo admin/dj (alerta si no): salta a la cancion N de la
           cola y la reproduce de inmediato; la lista se borra al salir.
         - `lst:rep:N` (dj) repite la cancion N del historial; `lst:link:N`
-          (cualquiera) manda su enlace al chat; `lst:del:N` (dj) la borra.
+          (cualquiera) manda su enlace al chat; `lst:del:N` (dj) la borra;
+          `lst:delall` (dj) borra TODA la lista del historial.
         - `lst:noop`: placeholder inerte, se responde mudo.
 
         Cada callback se responde UNA sola vez (un answer por query).
@@ -3777,7 +3802,7 @@ class YTRemoteBot:
             return
 
         if action == "historial":
-            if not self.queue._history_items:
+            if not self._historial():
                 await self._list_answer(query, "El historial esta vacio.")
                 return
             self._list_view = "historial"
@@ -3804,6 +3829,10 @@ class YTRemoteBot:
         if action == "close":
             await self._list_answer(query)
             await self._close_list_message()
+            return
+
+        if action == "delall":
+            await self._historial_borrar_todo(query, user_id)
             return
 
         if action.startswith(("rep:", "link:", "del:")):
@@ -3848,7 +3877,7 @@ class YTRemoteBot:
         """Acciones del historial del hub: rep:N (dj, repite), link:N
         (cualquiera, manda el enlace al chat) y del:N (dj, borra la entrada).
 
-        El historial se relee de memoria en cada accion: los indices del
+        El historial se RELEE DE LA BASE en cada accion: los indices del
         teclado son posiciones vivas, y si el historial cambio entre el
         render y el toque se responde "fuera de rango" en vez de tocar la
         cancion equivocada.
@@ -3859,17 +3888,19 @@ class YTRemoteBot:
         except ValueError:
             await self._list_answer(query)
             return
-        historial = list(self.queue._history_items)
+        historial = self._historial()
         if idx < 0 or idx >= len(historial):
             await self._list_answer(query, "Numero fuera de rango.")
             return
-        item = historial[idx]
+        fila = historial[idx]
 
         if kind == "link":
             if self._list_chat_id is None:
                 return
             try:
-                await self._app.bot.send_message(self._list_chat_id, item.url)
+                await self._app.bot.send_message(
+                    self._list_chat_id, fila.get("url", "")
+                )
             except Exception as exc:  # noqa: BLE001 - no romper el hub
                 logger.warning("No se pudo enviar el enlace del historial: %s", exc)
                 await self._list_answer(query, "No se pudo enviar el enlace.")
@@ -3884,10 +3915,13 @@ class YTRemoteBot:
             return
 
         if kind == "del":
-            if self.queue.borrar_historial_en(idx) is None:
+            # El borrado es contra la BASE (la fuente del hub). El deque de
+            # navegacion de la cola no se toca: sus labores son el /prev y
+            # el anti-repetir de la radio.
+            video_id = fila.get("video_id") or fila.get("url") or ""
+            if not self._state.borrar_historial(video_id):
                 await self._list_answer(query, "Numero fuera de rango.")
                 return
-            self._persist_dirty()
             await self._edit_list_message()
             await self._list_answer(query, "Borrado del historial ✓")
             return
@@ -3895,6 +3929,7 @@ class YTRemoteBot:
         # rep: repetir la cancion del historial con las MISMAS garantias que
         # elegir de la cola: resolver el stream primero y, si falla, no se
         # toca lista, historial ni tarjeta.
+        item = QueueItem.from_dict(fila)
         async with self._control_lock:
             self._from_card = True
             try:
@@ -3903,6 +3938,27 @@ class YTRemoteBot:
                 await self._play_item(update, item, preserve_current=True)
             finally:
                 self._from_card = False
+
+    async def _historial_borrar_todo(self, query, user_id: int | None) -> None:
+        """🗑 Borrar TODA la lista del historial (solo dj).
+
+        Despues de vaciar, la vista del historial quedo sin nada: si hay
+        cola (o un tema sonando) se vuelve a ella, y si no hay nada se
+        cierra el mensaje de lista.
+        """
+        if user_id is None or not self.roles.has_role(user_id, "dj"):
+            await self._list_answer(
+                query, "Solo el admin o un dj pueden hacer eso.", show_alert=True
+            )
+            return
+        self._state.vaciar_historial()
+        if self._queue_list_text() is not None:
+            self._list_view = "cola"
+            self._list_page = 0
+            await self._edit_list_message()
+        else:
+            await self._close_list_message()
+        await self._list_answer(query, "Historial borrado ✓")
 
     def _members_text(self, page: int = 0) -> str:
         """Encabezado del mensaje del editor de usuarios (boton 👥): contador

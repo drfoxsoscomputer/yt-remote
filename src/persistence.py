@@ -31,10 +31,11 @@ import time
 from asyncio import AbstractEventLoop, TimerHandle, get_event_loop
 from pathlib import Path
 
+from constants import MAX_HISTORY
+
 DATA_DIR = Path(__file__).resolve().parent.parent / "data"
 STATE_PATH = DATA_DIR / "state.json"
 CURRENT_VERSION = 1
-MAX_HISTORY = 100
 DEBOUNCE_SECS = 0.5
 NOMBRE_BASE = "ytremote.db"
 
@@ -93,6 +94,14 @@ class StateStore:
                     "volumen quedan intactos.",
                     self._motivo_solo_lectura,
                 )
+            else:
+                # Al abrir: depurar repetidas viejas del historial (los
+                # datos de antes podian traer la misma cancion en varias
+                # filas); queda la ultima reproduccion.
+                try:
+                    self._store.depurar_historial()
+                except Exception as exc:  # noqa: BLE001 - no tumbar arranque
+                    logger.warning("No se pudo depurar el historial: %s", exc)
         except Exception as exc:  # noqa: BLE001 - sin base, se arranca igual
             self._solo_lectura = True
             self._motivo_solo_lectura = f"no se pudo abrir la base ({exc})"
@@ -167,25 +176,21 @@ class StateStore:
                 logger.error("NO se guarda el estado: %s", exc)
                 self._dirty = False
                 return
-        if "history" in state:
-            try:
-                self._store.reemplazar_historial(
-                    _para_guardar(state["history"]), MAX_HISTORY
-                )
-            except RuntimeError as exc:
-                self._solo_lectura = True
-                self._motivo_solo_lectura = str(exc)
-                logger.error("NO se guarda el estado: %s", exc)
-                self._dirty = False
-                return
+        # OJO: el historial NO se escribe desde el estado. Es lo contrario:
+        # la base es la fuente — cada cancion que suena llama a
+        # marcar_historial() y el deque en memoria ya no manda (reescribir
+        # la tabla entera en cada guardado BORRABA lo que sumaba
+        # marcar_historial).
         self._dirty = False
         self._current = state
 
     def marcar_historial(self, item) -> None:
-        """Suma UNA cancion al historial (con repeticiones, como antes).
+        """Suma UNA cancion al historial guardado.
 
-        Antes el historial vivia dentro del JSON y se reescribia entero en cada
-        cancion. Ahora es una fila.
+        La base guarda UNA sola fila por cancion: si ya sonó, la reubica
+        arriba (queda la ultima reproduccion). Antes el historial vivia en
+        el JSON y se reescribia entero en cada cancion; ahora es una fila
+        incremental.
         """
         if self._solo_lectura or self._store is None:
             return
@@ -197,6 +202,35 @@ class StateStore:
             self._store.podar_historial(MAX_HISTORY)
         except Exception as exc:  # noqa: BLE001
             logger.error("No se pudo guardar el historial: %s", exc)
+
+    def leer_historial(self, limite: int = MAX_HISTORY) -> list[dict]:
+        """El historial guardado, lo mas reciente primero (fuente del hub)."""
+        if self._store is None or self._solo_lectura:
+            return []
+        try:
+            return self._store.leer_historial(limite)
+        except Exception as exc:  # noqa: BLE001 - no tumbar el render
+            logger.error("No se pudo leer el historial: %s", exc)
+            return []
+
+    def borrar_historial(self, video_id: str) -> bool:
+        """Quita UNA cancion del historial. False si no estaba o no se puede."""
+        if self._solo_lectura or self._store is None or not video_id:
+            return False
+        try:
+            return self._store.borrar_historial(video_id)
+        except Exception as exc:  # noqa: BLE001
+            logger.error("No se pudo borrar del historial: %s", exc)
+            return False
+
+    def vaciar_historial(self) -> None:
+        """Borra TODA la lista del historial (el boton borrar todo del hub)."""
+        if self._solo_lectura or self._store is None:
+            return
+        try:
+            self._store.vaciar_historial()
+        except Exception as exc:  # noqa: BLE001
+            logger.error("No se pudo vaciar el historial: %s", exc)
 
     def marcar_lista_vacia(self) -> None:
         """Vacia la cola (el usuario la limpio desde el boton 📋)."""

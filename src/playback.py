@@ -369,6 +369,9 @@ class PlaybackEngine:
                 await self._app._reply(None, f"No se pudo continuar: {fallo}")
                 await self._app._notify_admin(f"Fallo en autoplay: {fallo}")
                 return
+            # Arranco el siguiente por el camino del prefetch (NO pasa por
+            # play_item): tambien entra al historial guardado.
+            self._app._registrar_historial(candidate)
             self._app._push_to_nav_back()
             # Si venia de la playlist, avanzar el cursor (bucle) para no repetir
             # el mismo track en el siguiente prefetch.
@@ -506,6 +509,9 @@ class PlaybackEngine:
                 f"Fallo al reproducir {item.title}: {fallo}"
             )
             return False
+        # Si sonó, queda en el historial guardado: cola, busqueda, radio o
+        # siguiente automatico — TODOS los caminos de arranque pasan por aca.
+        self._app._registrar_historial(item)
         self._app._paused = False
         # Un tema DISTINTO al guardado consume el stop de /continuar: no
         # debe resucitar la posicion de un tema que ya no es el actual. (El

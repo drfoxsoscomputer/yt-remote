@@ -48,6 +48,11 @@ LIST_PAGE_SIZE = 10
 # enlace y borrar) ademas del titulo completo.
 HISTORY_PAGE_SIZE = 5
 
+# Cuantas canciones GUARDADAS conserva el historial (filas unicas: si una
+# cancion vuelve a sonar se reubica arriba, no suma otra fila). 500 unicas
+# son varios meses de memoria de escucha; lo mas viejo se recorta solo.
+MAX_HISTORY = 500
+
 # Editor de usuarios (boton de usuarios): usuarios conocidos visibles por pagina.
 MEMBERS_PAGE_SIZE = 10
 
