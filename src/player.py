@@ -599,7 +599,7 @@ class Player:
     async def seek(self, delta: int) -> None:
         """Salta `delta` segundos desde la posicion actual (negativo = atras).
 
-        Es el seek de la tarjeta (⏪10/⏩10): a diferencia de rewind(), no
+        Es el seek de la tarjeta (⏪/⏩): a diferencia de rewind(), no
         toca la pausa ni la posicion absoluta, solo mueve el cursor dentro
         del stream cargado.
         """

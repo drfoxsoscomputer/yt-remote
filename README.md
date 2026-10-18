@@ -154,7 +154,7 @@ Cuando suena algo aparece una tarjeta con botones:
 | ▶/⏸ | Pausa o reanuda |
 | ⏭ | Siguiente canción del mismo artista |
 | ⏹ | Detiene todo |
-| 🔊−10 / 🔊+10 | Bajar o subir volumen 10 puntos |
+| -🔊 / 🔊+ | Bajar o subir volumen 10 puntos |
 | 📋 | Ver la lista |
 | ⚙️ Calidad: N | Elegir la resolución de los videos (solo admin) |
 

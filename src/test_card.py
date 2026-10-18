@@ -266,11 +266,11 @@ def test_control_keyboard_and_status():
     kb = b._control_keyboard()
     rows = kb.inline_keyboard
     # Fila 1: ⏮, seek atras, play/pause, seek adelante, ⏭, ⏹;
-    # fila 2: vol-10, estado, vol+10, lista
+    # fila 2: vol-, estado, vol+, lista (sin numeros en las etiquetas)
     labels1 = [btn.text for btn in rows[0]]
     labels2 = [btn.text for btn in rows[1]]
-    assert labels1 == ["⏮", "⏪10", "⏸️", "⏩10", "⏭", "⏹"], labels1
-    assert labels2 == ["🔊−10", "🔊 100", "🔊+10", "📋"], labels2
+    assert labels1 == ["⏮", "⏪", "⏸️", "⏩", "⏭", "⏹"], labels1
+    assert labels2 == ["-🔊", "🔊 100", "🔊+", "📋"], labels2
     # En pausa el botón central (indice 2) debe ser ▶️
     b._paused = True
     kb = b._control_keyboard()
@@ -339,7 +339,7 @@ async def test_dispatch_vol():
 
 
 async def test_dispatch_seek():
-    """⏪10/⏩10 de la tarjeta: simetricos (10 s en cada sentido), mudos si
+    """⏪/⏩ de la tarjeta: simetricos (10 s en cada sentido), mudos si
     no hay mpv corriendo (no hay posicion que mover) y con permiso dj."""
     b = make_bot()
     await b._on_control(FakeUpdate("ctl:seek-10"), SimpleNamespace(args=[]), "seek-10")

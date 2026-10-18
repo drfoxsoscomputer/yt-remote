@@ -90,8 +90,8 @@ class CardManager:
     def control_keyboard(self) -> InlineKeyboardMarkup:
         """Teclado del mini reproductor persistente.
 
-        Fila 1: ⏮ anterior | ⏪10 atras | ▶/⏸ alternar | ⏩10 adelante | ⏭ siguiente | ⏹ detener
-        Fila 2: 🔊−10 | <volumen actual> | 🔊+10 | 📋 lista
+        Fila 1: ⏮ anterior | ⏪ atras | ▶/⏸ alternar | ⏩ adelante | ⏭ siguiente | ⏹ detener
+        Fila 2: -🔊 | <volumen actual> | 🔊+ | 📋 lista
         Fila 3: ⚙️ Calidad: Np | 👥 Usuarios | ⏻ apagado programado
         (calidad y usuarios solo admin; ⏻ es de dj y se marca ⏰ mientras
         haya temporizador armado)
@@ -100,16 +100,16 @@ class CardManager:
         keyboard = [
             [
                 InlineKeyboardButton("⏮", callback_data="ctl:prev"),
-                InlineKeyboardButton("⏪10", callback_data="ctl:seek-10"),
+                InlineKeyboardButton("⏪", callback_data="ctl:seek-10"),
                 InlineKeyboardButton(play_pause, callback_data="ctl:pp"),
-                InlineKeyboardButton("⏩10", callback_data="ctl:seek+10"),
+                InlineKeyboardButton("⏩", callback_data="ctl:seek+10"),
                 InlineKeyboardButton("⏭", callback_data="ctl:next"),
                 InlineKeyboardButton("⏹", callback_data="ctl:stop"),
             ],
             [
-                InlineKeyboardButton("🔊−10", callback_data="ctl:vol-10"),
+                InlineKeyboardButton("-🔊", callback_data="ctl:vol-10"),
                 InlineKeyboardButton(f"🔊 {self._app._volume}", callback_data="ctl:vol-info"),
-                InlineKeyboardButton("🔊+10", callback_data="ctl:vol+10"),
+                InlineKeyboardButton("🔊+", callback_data="ctl:vol+10"),
                 InlineKeyboardButton("📋", callback_data="ctl:lista"),
             ],
             [
