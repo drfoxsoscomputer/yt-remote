@@ -1,0 +1,52 @@
+# CI: la suite del bot corre en cada push.
+#
+# El bot es Windows-only, asi que el runner es Windows con un Python 3.13
+# limpio y las dependencias del requirements.txt (la fuente de verdad de lo
+# que el bot importa de verdad).
+#
+# Excluidos A PROPOSITO (no son olvidos):
+# - test_build_sync: compara src\ contra dist\ytremote\src\, y dist es el
+#   artefacto de despliegue, NO esta trackeado en git.
+# - test_emoji_font: no es una prueba (no tiene asserts) sino una herramienta
+#   VISUAL: abre una ventana Tk, captura la pantalla a una ruta local fija y
+#   destruye la ventana. Es una revision a ojo, local.
+name: suite
+
+on:
+  push:
+
+jobs:
+  suite:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+          cache: pip
+
+      - name: Dependencias
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          # flask solo lo usa el launcher web de desarrollo (launcher_web.py);
+          # el portable no lo empaqueta, por eso no vive en requirements.txt.
+          pip install flask
+
+      - name: Suite
+        run: |
+          $modulos = @(
+            "test_card",
+            "test_garantias",
+            "test_store",
+            "test_roles",
+            "test_persistence",
+            "test_members",
+            "test_launcher_secreto"
+          )
+          foreach ($m in $modulos) {
+            Write-Host "=== $m ==="
+            python "src\$m.py"
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          }
