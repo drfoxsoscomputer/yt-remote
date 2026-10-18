@@ -464,25 +464,32 @@ class PlaybackEngine:
           actual (set_current) y programa el prefetch del siguiente.
         - preserve_current=True (playlist/jump): la cola ya posiciono el item
           como current; solo reproduce y programa el prefetch.
+        - Un item marcado como directo (emisora de /radio) no se resuelve ni
+          programa prefetch: su URL ya ES el stream.
         """
         self.cancel_prefetch()
 
         # Resolver el stream: del cache del mesonero si ya se anticipo; si no,
         # resolver en caliente. Si la URL cacheada vencio, mpv la rechaza y se
         # re-resuelve UNA vez abajo (sin TTL preventivos ni esperas).
-        resolved = await self.stream_for(item.url)
-        if not resolved:
-            motivo = last_resolve_error()
-            if motivo and "resuelto con client" in motivo:
-                # No es un error real: es el testeo interno del client fallback.
-                motivo = "todas las variantes de yt-dlp fallaron"
-            detalle = f"\nMotivo: {motivo}" if motivo else ""
-            await self._app._reply(update, "No se pudo reproducir. Esto suele ser un bloqueo del proveedor de internet o de YouTube a este equipo." + detalle)
-            await self._app._notify_admin(
-                f"Fallo de resolucion: {item.title}\n{motivo or 'sin motivo detallado'}"
-            )
-            return False
-        stream_url, audio_url = resolved
+        if not item.directo:
+            resolved = await self.stream_for(item.url)
+            if not resolved:
+                motivo = last_resolve_error()
+                if motivo and "resuelto con client" in motivo:
+                    # No es un error real: es el testeo interno del client fallback.
+                    motivo = "todas las variantes de yt-dlp fallaron"
+                detalle = f"\nMotivo: {motivo}" if motivo else ""
+                await self._app._reply(update, "No se pudo reproducir. Esto suele ser un bloqueo del proveedor de internet o de YouTube a este equipo." + detalle)
+                await self._app._notify_admin(
+                    f"Fallo de resolucion: {item.title}\n{motivo or 'sin motivo detallado'}"
+                )
+                return False
+            stream_url, audio_url = resolved
+        else:
+            # Item marcado como directo (emisora de /radio): el stream ES la
+            # url, sin yt-dlp.
+            stream_url, audio_url = item.url, None
 
         # empezar reproduccion desde cero
         try:
@@ -512,7 +519,10 @@ class PlaybackEngine:
             self._app._push_to_nav_back()
             self._app.queue.set_current(item)
             self._app._persist_dirty()
-        self.schedule_prefetch(item)
+        if not item.directo:
+            # Un item directo (emisora) no programa prefetch: el "siguiente"
+            # seria una busqueda de YouTube de la nada.
+            self.schedule_prefetch(item)
         # La tarjeta del mini reproductor refleja el tema nuevo. En acciones
         # del usuario se crea/edita en su chat; en el auto-advance (update
         # None) se re-edita la ultima tarjeta con el titulo nuevo.

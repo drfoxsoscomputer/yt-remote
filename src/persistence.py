@@ -125,6 +125,7 @@ class StateStore:
                 "max_height": s.leer_ajuste("max_height"),
                 "card": s.leer_ajuste("card", {}) or {},
                 "continuar": s.leer_ajuste("continuar"),
+                "radio_favs": s.leer_ajuste("radio_favs") or [],
             }
         except Exception as exc:  # noqa: BLE001 - no debe tumbar el arranque
             logger.error("No se pudo leer el estado: %s. Arranca con defaults", exc)
@@ -146,6 +147,7 @@ class StateStore:
             "card",
             "current",
             "continuar",
+            "radio_favs",
         ):
             if clave in state:
                 try:

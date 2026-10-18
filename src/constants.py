@@ -59,6 +59,18 @@ PYPI_YTDLP_JSON = "https://pypi.org/pypi/yt-dlp/json"
 PYPI_META_TIMEOUT = 30.0
 PYPI_WHEEL_TIMEOUT = 60.0
 
+# /radio (radio-browser): lote de emisoras por consulta y emisoras por
+# pagina del listado. El lote es mayor que la pagina para que ◀ ▶ paginen
+# sin volver al API.
+RADIO_BATCH = 20
+RADIO_PAGE_SIZE = 5
+
+# Host fijo de radio-browser: si cae, el error es honesto ("radio-browser
+# no responde (...)"); no hay fallback multi-servidor porque el plan no lo
+# pide.
+RADIO_API = "https://de1.api.radio-browser.info"
+RADIO_API_TIMEOUT = 15.0
+
 # Listado de resultados de /buscar: cuantos resultados se traen por tanda y
 # cuantos se ven por pagina. El listado se pagina, asi que traer 10 de una no
 # hace esperar mas: es la MISMA busqueda con mas resultados.

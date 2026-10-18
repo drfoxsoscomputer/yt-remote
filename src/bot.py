@@ -36,6 +36,7 @@ from telegram.ext import (
 )
 
 import artist_match
+import radio
 from card import QUALITY_LEVELS, SLEEP_PRESETS, CardManager
 from playback import PlaybackEngine
 from config import Config
@@ -112,6 +113,8 @@ from constants import (  # noqa: E402
     PYPI_YTDLP_JSON,
     QUICK_TIMEOUT,
     QUICK_TRACKS,
+    RADIO_BATCH,
+    RADIO_PAGE_SIZE,
     RESOLVE_TIMEOUT,
     SEARCH_BATCH,
     SEARCH_BATCH_CON_ARTISTA,
@@ -133,6 +136,8 @@ _MEMBERS_PAGE_SIZE = MEMBERS_PAGE_SIZE
 _SEARCH_BATCH = SEARCH_BATCH
 _SEARCH_PAGE_SIZE = SEARCH_PAGE_SIZE
 _SEARCH_BATCH_CON_ARTISTA = SEARCH_BATCH_CON_ARTISTA
+_RADIO_BATCH = RADIO_BATCH
+_RADIO_PAGE_SIZE = RADIO_PAGE_SIZE
 
 
 class ActualizacionError(Exception):
@@ -257,6 +262,28 @@ async def _bajar_wheel_ytdlp(url: str, sha256: str) -> bytes:
     return datos
 
 
+def _radio_parsear(texto: str) -> tuple[str, str]:
+    """(vista, termino) de los argumentos de /radio.
+
+    "genero:"/"género:"/"g:" buscan por genero (tag del API); "pais:"/
+    "país:"/"p:" por pais; "favoritas"/"fav"/"❤️" abren la lista propia; y
+    cualquier otra cosa es una busqueda por nombre. Sin argumentos:
+    destacadas.
+    """
+    t = texto.strip()
+    if not t:
+        return "top", ""
+    if t.lower() in ("favoritas", "favorita", "fav", "❤", "❤️"):
+        return "fav", ""
+    m = re.match(r"^(?:genero|género|g)\s*[:=]\s*(.+)$", t, re.IGNORECASE)
+    if m:
+        return "tag", m.group(1).strip()
+    m = re.match(r"^(?:pais|país|p)\s*[:=]\s*(.+)$", t, re.IGNORECASE)
+    if m:
+        return "pais", m.group(1).strip()
+    return "name", t
+
+
 class YTRemoteBot:
     """Ensambla bot, player, cola y roles."""
 
@@ -348,6 +375,16 @@ class YTRemoteBot:
         # "pos": segundos}. Lo escribe cmd_stop (y el ⏻ del temporizador)
         # antes de rebobinar; se persiste con el estado comun.
         self._continuar: dict | None = None
+        # /radio: la vista abierta (destacadas/buscada/favoritas) vive SOLO
+        # en la sesion (un reinicio reabre en destacadas); las FAVORITAS si
+        # se persisten con el estado comun (clave radio_favs).
+        self._radio_view: str = "top"
+        self._radio_page: int = 0
+        self._radio_query: str = ""
+        self._radio_items: list = []
+        self._radio_favs: list = []
+        self._radio_chat_id: int | None = None
+        self._radio_message_id: int | None = None
         # Editor de usuarios (boton 👥): la lista vive en el chat PRIVADO del
         # admin. Los cambios quedan "staged" (sin persistir en roles.json)
         # hasta el boton ❌ (commit); tocar un usuario dos veces lo revierte.
@@ -406,6 +443,7 @@ class YTRemoteBot:
                 "is_photo": self._card_is_photo,
             },
             "continuar": self._continuar,
+            "radio_favs": [f.to_dict() for f in self._radio_favs],
         }
         self._state.mark_dirty()
 
@@ -425,6 +463,12 @@ class YTRemoteBot:
         self._volume = loaded.get("volume", 100)
         self._radio_artist = loaded.get("radio_artist", "")
         self._continuar = loaded.get("continuar") or None
+        try:
+            self._radio_favs = [
+                radio.Emisora.desde_dict(d) for d in loaded.get("radio_favs") or []
+            ]
+        except Exception:  # noqa: BLE001 - un state corrupto no tumba el arranque
+            self._radio_favs = []
         has_current = bool(loaded.get("current"))
         self._restored = has_current
         # Si se restauro una cancion, arranca en PAUSA aunque el estado
@@ -645,6 +689,14 @@ class YTRemoteBot:
             CommandHandler(
                 "actualizar",
                 self._with_card_reposition(self._require_chat(self._require("admin", self.cmd_actualizar))),
+            )
+        )
+        # /radio abre para cualquiera (como el 📋): ELEGIR emisora o tocar
+        # favoritas es de dj y se exige dentro del handler de callbacks.
+        app.add_handler(
+            CommandHandler(
+                "radio",
+                self._with_card_reposition(self._require_chat(self.cmd_radio)),
             )
         )
         # Editor de usuarios (boton 👥): los callbacks mem:* viven en el chat
@@ -1094,6 +1146,296 @@ class YTRemoteBot:
         if leido is None:
             raise ActualizacionError("el paquete quedo sin version legible")
         return actual, leido
+
+    async def cmd_radio(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """Emisoras de internet (radio-browser): el 📻 del salon.
+
+        Sin argumentos abre las DESTACADAS por votos. Con argumentos, el
+        texto es la busqueda (ver _radio_parsear): por nombre, con
+        "genero:<texto>" por genero y "pais:<texto>" por pais; y
+        "/radio favoritas" abre la lista propia.
+
+        El listado es un mensaje aparte (teclas 🔥 ❤️ ◀ ▶ ❌) que cualquiera
+        puede abrir; ELEGIR una emisora o tocar favoritas es de dj, igual
+        que el resto de la musica. Si radio-browser no responde, el motivo
+        llega honesto en un solo mensaje.
+        """
+        vista, termino = _radio_parsear(" ".join(context.args))
+        try:
+            if vista == "fav":
+                items = list(self._radio_favs)
+            elif vista == "tag":
+                items = await radio.buscar_genero(termino, _RADIO_BATCH)
+            elif vista == "pais":
+                items = await radio.buscar_pais(termino, _RADIO_BATCH)
+            elif vista == "name":
+                items = await radio.buscar_nombre(termino, _RADIO_BATCH)
+            else:
+                items = await radio.destacadas(_RADIO_BATCH)
+        except radio.RadioError as exc:
+            await self._reply(update, f"⚠️ No se pudo buscar emisoras: {exc}")
+            return
+        if not items:
+            if vista == "fav":
+                await self._reply(update, "Todavía no guardas emisoras favoritas.")
+            elif termino:
+                await self._reply(update, f"No encontré emisoras para «{termino}».")
+            else:
+                await self._reply(update, "No encontré emisoras destacadas.")
+            return
+        self._radio_view = {"top": "top", "fav": "fav"}.get(vista, "busqueda")
+        self._radio_query = termino if self._radio_view == "busqueda" else ""
+        self._radio_items = items
+        self._radio_page = 0
+        await self._open_radio_list(update.effective_chat.id)
+
+    async def _open_radio_list(self, chat_id: int) -> None:
+        """Manda el mensaje-lista de /radio (la tarjeta nunca se pisa).
+
+        Si ya habia un listado de radio abierto se borra y se manda uno
+        fresco, igual que decide el hub del 📋: nunca editar una lista
+        existente.
+        """
+        await self._close_radio_message()
+        try:
+            msg = await self._app.bot.send_message(
+                chat_id, self._radio_text(), reply_markup=self._radio_keyboard()
+            )
+        except Exception as exc:  # noqa: BLE001 - no romper el flujo
+            logger.warning("No se pudo enviar el listado de radio: %s", exc)
+            return
+        self._radio_chat_id = chat_id
+        self._radio_message_id = msg.message_id
+
+    def _radio_pagina(self) -> list:
+        """La pagina activa de la vista de /radio (emisoras del lote)."""
+        inicio = self._radio_page * _RADIO_PAGE_SIZE
+        return self._radio_items[inicio : inicio + _RADIO_PAGE_SIZE]
+
+    def _radio_clamp_page(self) -> None:
+        """La pagina nunca se sale del lote cargado (si se vacio la vista,
+        vuelve a la primera)."""
+        if self._radio_items:
+            ultimo = (len(self._radio_items) - 1) // _RADIO_PAGE_SIZE
+            self._radio_page = max(0, min(self._radio_page, ultimo))
+        else:
+            self._radio_page = 0
+
+    def _radio_text(self) -> str:
+        """Encabezado segun la vista activa y la pagina de emisoras. El pais
+        va aqui al lado del nombre, no en el teclado: es donde cabe."""
+        if self._radio_view == "fav":
+            encabezado = "❤️ Tus emisoras favoritas:"
+        elif self._radio_view == "busqueda":
+            encabezado = f"🔎 Emisoras para «{self._radio_query}»:"
+        else:
+            encabezado = "🔥 Emisoras destacadas:"
+        lineas = [encabezado]
+        inicio = self._radio_page * _RADIO_PAGE_SIZE
+        for n, e in enumerate(self._radio_pagina(), start=inicio + 1):
+            pais = f" — {e.pais}" if e.pais else ""
+            lineas.append(f"{n}. {e.nombre}{pais}")
+        if len(lineas) == 1:
+            lineas.append("(sin emisoras en esta vista)")
+        return "\n".join(lineas)
+
+    def _radio_es_fav(self, emisora) -> bool:
+        """La identidad de una emisora es su STREAM: el nombre del API cambia
+        (le agregan sucursales, emojis) y el stream es lo que suena."""
+        return any(f.stream == emisora.stream for f in self._radio_favs)
+
+    def _radio_keyboard(self) -> InlineKeyboardMarkup:
+        """Teclado del listado de /radio: cada fila es una emisora (elegir)
+        con su boton de favorita, la navegacion con el ❌ siempre presente
+        (3 slots fijos, como la lista del 📋) y al pie la fila de vistas
+        🔥 Destacadas | ❤️ Favoritas.
+
+        Los indices son GLOBALES sobre el lote cargado (rad:play:7 = la 8a
+        emisora de la vista), asi que paginar no renumeran los botones.
+        """
+        self._radio_clamp_page()
+        filas: list[list[InlineKeyboardButton]] = []
+        base = self._radio_page * _RADIO_PAGE_SIZE
+        for n, e in enumerate(self._radio_pagina(), start=base):
+            accion = "❤️ Quitar" if self._radio_es_fav(e) else "❤️ Guardar"
+            filas.append(
+                [
+                    InlineKeyboardButton(f"📻 {e.nombre}", callback_data=f"rad:play:{n}"),
+                    InlineKeyboardButton(accion, callback_data=f"rad:fav:{n}"),
+                ]
+            )
+        ultima = (len(self._radio_items) - 1) // _RADIO_PAGE_SIZE if self._radio_items else 0
+        filas.append(
+            [
+                InlineKeyboardButton(
+                    "◀" if self._radio_page > 0 else "·",
+                    callback_data="rad:prev" if self._radio_page > 0 else "rad:noop",
+                ),
+                InlineKeyboardButton("❌", callback_data="rad:close"),
+                InlineKeyboardButton(
+                    "▶" if self._radio_page < ultima else "·",
+                    callback_data="rad:next" if self._radio_page < ultima else "rad:noop",
+                ),
+            ]
+        )
+        filas.append(
+            [
+                InlineKeyboardButton("🔥 Destacadas", callback_data="rad:top"),
+                InlineKeyboardButton("❤️ Favoritas", callback_data="rad:fav"),
+            ]
+        )
+        return InlineKeyboardMarkup(filas)
+
+    async def _radio_render(self) -> None:
+        """Repinta el listado abierto (texto + teclado de la vista/pagina
+        nueva). Si el mensaje ya no existe, se ignora."""
+        if self._radio_chat_id is None or self._radio_message_id is None:
+            return
+        try:
+            await self._app.bot.edit_message_text(
+                self._radio_text(),
+                chat_id=self._radio_chat_id,
+                message_id=self._radio_message_id,
+                reply_markup=self._radio_keyboard(),
+            )
+        except Exception as exc:  # noqa: BLE001 - no romper el flujo
+            logger.warning("No se pudo repintar el listado de radio: %s", exc)
+
+    async def _close_radio_message(self) -> None:
+        """Borra el mensaje-lista de /radio y limpia las referencias.
+        Tolera que el mensaje ya no exista."""
+        chat = self._radio_chat_id
+        msg = self._radio_message_id
+        self._radio_chat_id = None
+        self._radio_message_id = None
+        if msg is not None and chat is not None:
+            try:
+                await self._app.bot.delete_message(chat, msg)
+            except Exception as exc:  # noqa: BLE001 - no romper el flujo
+                logger.warning("No se pudo borrar el listado de radio: %s", exc)
+
+    async def _on_radio_callback(
+        self, update: Update, context: ContextTypes.DEFAULT_TYPE
+    ) -> None:
+        """Botones del mensaje-lista de /radio (callback `rad:*`).
+
+        - `rad:top`/`rad:fav`: cambia la vista sobre el MISMO mensaje (top
+          vuelve al API; favoritas lee la lista persistida).
+        - `rad:prev`/`rad:next`: pagina; `rad:close` borra el mensaje.
+        - `rad:play:N` (dj) suena la emisora N de la vista activa y cierra
+          el listado; si no arranca, el listado queda en pie para elegir
+          otra (misma garantia que /buscar: nada se destruye antes).
+        - `rad:fav:N` (dj) guarda o quita la emisora N de favoritas.
+        - `rad:noop`: placeholder inerte.
+
+        Cada callback se responde UNA sola vez (un answer por query), con el
+        mismo helper mudo que usa la lista del 📋.
+        """
+        query = update.callback_query
+        data = query.data or ""
+        accion = data.split(":", 1)[1] if data.startswith("rad:") else ""
+        user_id = query.from_user.id if query.from_user else None
+
+        if accion in ("", "noop"):
+            await self._list_answer(query)
+            return
+        if accion == "close":
+            await self._list_answer(query)
+            await self._close_radio_message()
+            return
+        if accion in ("prev", "next"):
+            self._radio_page += -1 if accion == "prev" else 1
+            await self._radio_render()
+            await self._list_answer(query)
+            return
+        if accion == "top":
+            try:
+                self._radio_items = await radio.destacadas(_RADIO_BATCH)
+            except radio.RadioError as exc:
+                await self._list_answer(query, str(exc), show_alert=True)
+                return
+            self._radio_view = "top"
+            self._radio_query = ""
+            self._radio_page = 0
+            await self._radio_render()
+            await self._list_answer(query)
+            return
+        if accion == "fav":
+            self._radio_view = "fav"
+            self._radio_query = ""
+            self._radio_items = list(self._radio_favs)
+            self._radio_page = 0
+            await self._radio_render()
+            await self._list_answer(query)
+            return
+        if accion.startswith("play:"):
+            await self._radio_play(query, update, user_id, accion)
+            return
+        if accion.startswith("fav:"):
+            await self._radio_favorita(query, user_id, accion)
+            return
+        await self._list_answer(query)
+
+    def _radio_emisora_de(self, accion: str):
+        """La emisora N de la vista activa para un callback rad:play:N /
+        rad:fav:N; None si el indice ya no existe (el lote cambio)."""
+        try:
+            return self._radio_items[int(accion.split(":", 1)[1])]
+        except (ValueError, IndexError):
+            return None
+
+    async def _radio_play(self, query, update, user_id, accion: str) -> None:
+        """Elegir emisora (dj): suena ya con el stream DIRECTO (sin yt-dlp)
+        y el listado se cierra. Si no arranca, el listado queda en pie."""
+        if user_id is None or not self.roles.has_role(user_id, "dj"):
+            await self._list_answer(
+                query, "Solo el admin o un dj pueden elegir.", show_alert=True
+            )
+            return
+        emisora = self._radio_emisora_de(accion)
+        if emisora is None:
+            await self._list_answer(query, "Esa emisora ya no está en la lista.")
+            return
+        async with self._control_lock:
+            self._from_card = True
+            try:
+                item = QueueItem(
+                    url=emisora.stream,
+                    title=emisora.nombre,
+                    thumbnail=emisora.logo,
+                    channel=emisora.pais,
+                    directo=True,
+                )
+                await self._list_answer(query)
+                ok = await self._play_item(update, item)
+                if ok:
+                    await self._close_radio_message()
+            finally:
+                self._from_card = False
+
+    async def _radio_favorita(self, query, user_id, accion: str) -> None:
+        """Guarda o quita la emisora N de favoritas (dj): la lista se
+        persiste con el estado comun y el listado se repinta al toque."""
+        if user_id is None or not self.roles.has_role(user_id, "dj"):
+            await self._list_answer(
+                query, "Solo el admin o un dj pueden elegir.", show_alert=True
+            )
+            return
+        emisora = self._radio_emisora_de(accion)
+        if emisora is None:
+            await self._list_answer(query, "Esa emisora ya no está en la lista.")
+            return
+        if self._radio_es_fav(emisora):
+            self._radio_favs = [f for f in self._radio_favs if f.stream != emisora.stream]
+            aviso = "Quitada de favoritas."
+        else:
+            self._radio_favs.append(emisora)
+            aviso = "Guardada en favoritas."
+        if self._radio_view == "fav":
+            self._radio_items = list(self._radio_favs)
+        self._persist_dirty()
+        await self._radio_render()
+        await self._list_answer(query, aviso)
 
     async def _dm_or_group(self, target_user_id: int, text: str) -> None:
         """Envia un mensaje privado a un usuario; si falla (nunca inicio un
@@ -2023,6 +2365,10 @@ class YTRemoteBot:
         if query.data and query.data.startswith("lst:"):
             # Botones del mensaje de la lista (temas, paginacion, cerrar).
             await self._on_list_callback(update, context)
+            return
+        if query.data and query.data.startswith("rad:"):
+            # Botones del mensaje-lista de /radio (emisoras radio-browser).
+            await self._on_radio_callback(update, context)
             return
         if query.data in ("pick:prev", "pick:next", "pick:mas", "pick:noop"):
             await self._on_search_nav(query)

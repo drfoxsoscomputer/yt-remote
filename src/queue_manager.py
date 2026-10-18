@@ -25,6 +25,9 @@ class QueueItem:
     thumbnail: str = ""
     channel: str = ""
     artist: str = ""
+    # True cuando la URL ya ES el stream (emisora de /radio): no se resuelve
+    # con yt-dlp ni se le programa prefetch del siguiente.
+    directo: bool = False
 
     def to_dict(self) -> dict:
         """Serializa el item para persistence (data/state.json)."""
@@ -36,6 +39,7 @@ class QueueItem:
             "thumbnail": self.thumbnail,
             "channel": self.channel,
             "artist": self.artist,
+            "directo": self.directo,
         }
 
     @classmethod
@@ -49,6 +53,7 @@ class QueueItem:
             thumbnail=d.get("thumbnail", ""),
             channel=d.get("channel", ""),
             artist=d.get("artist", ""),
+            directo=d.get("directo", False),
         )
 
 

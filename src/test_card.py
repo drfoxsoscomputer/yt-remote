@@ -1593,6 +1593,227 @@ def test_instalar_wheel_reemplaza_el_paquete():
         ), "un fallo no debe tocar lo instalado"
 
 
+def test_radio_parsea_argumentos():
+    """Los argumentos de /radio: sin nada, destacadas; texto suelto =
+    nombre; genero:/género:/g: = tag; pais:/país:/p: = pais; y
+    favoritas/fav/❤️ = la lista propia."""
+    import bot as bot_mod
+
+    assert bot_mod._radio_parsear("") == ("top", "")
+    assert bot_mod._radio_parsear("  salsa  ") == ("name", "salsa")
+    assert bot_mod._radio_parsear("genero:bolero") == ("tag", "bolero")
+    assert bot_mod._radio_parsear("género: rock") == ("tag", "rock")
+    assert bot_mod._radio_parsear("g:bachata") == ("tag", "bachata")
+    assert bot_mod._radio_parsear("pais:Venezuela") == ("pais", "Venezuela")
+    assert bot_mod._radio_parsear("p: ve") == ("pais", "ve")
+    assert bot_mod._radio_parsear("país:México") == ("pais", "México")
+    assert bot_mod._radio_parsear("favoritas") == ("fav", "")
+    assert bot_mod._radio_parsear("❤️") == ("fav", "")
+
+
+def _emisora(nombre="Mango Radio", pais="DE", stream="https://s.mp3", logo=""):
+    import radio as radio_mod
+
+    return radio_mod.Emisora(nombre=nombre, pais=pais, stream=stream, logo=logo)
+
+
+async def test_radio_destacadas_abren_listado():
+    """/radio sin argumentos abre DESTACADAS en un mensaje-lista propio:
+    encabezado, emisoras con pais y el teclado con play/favorita, la
+    navegacion inerte (una sola pagina) y la fila de vistas."""
+    import radio as radio_mod
+
+    b = make_bot()
+
+    async def destacadas(cantidad):
+        return [_emisora(nombre=f"Emisora {n}") for n in range(1, 4)]
+
+    viejo = radio_mod.destacadas
+    radio_mod.destacadas = destacadas
+    try:
+        await b.cmd_radio(FakeMessageUpdate("/radio"), SimpleNamespace(args=[]))
+    finally:
+        radio_mod.destacadas = viejo
+
+    chat_id, texto, kwargs = b._app.bot.sent[-1]
+    assert chat_id == 44 and texto.startswith("🔥 Emisoras destacadas:"), texto
+    assert "1. Emisora 1 — DE" in texto, texto
+    kb = kwargs["reply_markup"]
+    assert kb.inline_keyboard[0][0].callback_data == "rad:play:0"
+    assert kb.inline_keyboard[0][1].callback_data == "rad:fav:0"
+    assert [btn.text for btn in kb.inline_keyboard[-2]] == ["·", "❌", "·"]
+    assert [btn.callback_data for btn in kb.inline_keyboard[-1]] == ["rad:top", "rad:fav"]
+
+
+async def test_radio_busqueda_por_nombre():
+    """/radio <texto> busca por NOMBRE (rad:busqueda) y el encabezado lleva
+    el termino entrecomillado."""
+    import radio as radio_mod
+
+    b = make_bot()
+    llamado = {}
+
+    async def buscar_nombre(termino, cantidad):
+        llamado["q"] = termino
+        return [_emisora(nombre="Salsa Brava", pais="", stream="https://s/s.mp3")]
+
+    viejo = radio_mod.buscar_nombre
+    radio_mod.buscar_nombre = buscar_nombre
+    try:
+        await b.cmd_radio(
+            FakeMessageUpdate("/radio salsa"), SimpleNamespace(args=["salsa"])
+        )
+    finally:
+        radio_mod.buscar_nombre = viejo
+
+    assert llamado == {"q": "salsa"}, llamado
+    assert b._radio_view == "busqueda"
+    texto = b._app.bot.sent[-1][1]
+    assert texto.startswith("🔎 Emisoras para «salsa»:"), texto
+    assert "Salsa Brava" in texto and "—" not in texto, texto
+
+
+async def test_radio_fallo_honesto():
+    """Si radio-browser no responde, el motivo llega honesto en UN mensaje y
+    no se abre ningun listado."""
+    import radio as radio_mod
+
+    b = make_bot()
+
+    async def destacadas(cantidad):
+        raise radio_mod.RadioError("radio-browser no responde (timeout)")
+
+    viejo = radio_mod.destacadas
+    radio_mod.destacadas = destacadas
+    try:
+        upd = FakeMessageUpdate("/radio")
+        await b.cmd_radio(upd, SimpleNamespace(args=[]))
+    finally:
+        radio_mod.destacadas = viejo
+
+    assert any(
+        t.startswith("⚠️ No se pudo buscar emisoras: radio-browser no responde")
+        for t, _ in upd.sent
+    ), upd.sent
+    assert b._app.bot.sent == [], "un fallo no debe abrir listado"
+
+
+async def test_radio_favoritas_vacias_avisan():
+    """Sin favoritas guardadas no se abre listado: avisa y ya."""
+    b = make_bot()
+    upd = FakeMessageUpdate("/radio favoritas")
+    await b.cmd_radio(upd, SimpleNamespace(args=["favoritas"]))
+    assert any(
+        "Todavía no guardas emisoras favoritas" in t for t, _ in upd.sent
+    ), upd.sent
+    assert b._app.bot.sent == []
+
+
+async def test_radio_elegir_es_dj_y_sonar():
+    """Elegir emisora: solo dj (user = alerta y NO se dispara nada). El dj
+    que la elige la suena ya (el item lleva el stream directo, el pais como
+    canal y el logo como miniatura) y el listado se cierra."""
+    b = make_bot()
+    e = _emisora(stream="https://stream.example/live", logo="https://logo.png")
+    b._radio_items = [e]
+    b._radio_chat_id, b._radio_message_id = 44, 7
+    registro = []
+
+    async def play_ok(update, item, preserve_current=False):
+        registro.append(
+            (item.url, item.title, item.channel, item.thumbnail, item.directo)
+        )
+        return True
+
+    b._play_item = play_ok
+
+    upd_user = FakeUpdate("rad:play:0", user_id=50)
+    await b._on_radio_callback(upd_user, None)
+    assert "Solo el admin o un dj pueden elegir." == upd_user.answered_kwargs.get(
+        "text"
+    ), upd_user.answered_kwargs
+    assert registro == [] and b._radio_message_id == 7
+
+    upd_dj = FakeUpdate("rad:play:0", user_id=77)
+    await b._on_radio_callback(upd_dj, None)
+    assert registro == [
+        ("https://stream.example/live", "Mango Radio", "DE", "https://logo.png", True)
+    ], registro
+    assert (44, 7) in b._app.bot.deleted, b._app.bot.deleted
+    assert b._radio_message_id is None
+
+
+async def test_radio_favoritas_guardan_y_quitan():
+    """❤️ Guardar (dj) mete la emisora en favoritas PERSISTIDAS (clave
+    radio_favs del estado comun) y el mismo boton la quita."""
+    b = make_bot()
+    e = _emisora()
+    b._radio_items = [e]
+    b._radio_chat_id, b._radio_message_id = 44, 7
+
+    upd = FakeUpdate("rad:fav:0", user_id=77)
+    await b._on_radio_callback(upd, None)
+    assert [f.nombre for f in b._radio_favs] == ["Mango Radio"], b._radio_favs
+    assert upd.answered_kwargs.get("text") == "Guardada en favoritas."
+    assert [d["nombre"] for d in b._state._current["radio_favs"]] == ["Mango Radio"]
+
+    upd2 = FakeUpdate("rad:fav:0", user_id=77)
+    await b._on_radio_callback(upd2, None)
+    assert b._radio_favs == [], b._radio_favs
+    assert upd2.answered_kwargs.get("text") == "Quitada de favoritas."
+    assert b._state._current["radio_favs"] == []
+
+
+async def test_radio_vista_favoritas_pagina():
+    """/radio favoritas abre la vista propia y ◀ ▶ pagina el MISMO mensaje
+    (6 favoritas: pagina 1 = 5, la 6a queda para la segunda)."""
+    b = make_bot()
+    b._radio_favs = [
+        _emisora(nombre=f"Fav {n}", stream=f"https://f/{n}") for n in range(1, 7)
+    ]
+    await b.cmd_radio(
+        FakeMessageUpdate("/radio favoritas"), SimpleNamespace(args=["favoritas"])
+    )
+    texto = b._app.bot.sent[-1][1]
+    assert texto.startswith("❤️ Tus emisoras favoritas:"), texto
+    assert "Fav 5" in texto and "Fav 6" not in texto, texto
+
+    await b._on_radio_callback(FakeUpdate("rad:next"), None)
+    assert b._radio_page == 1
+    editado = b._app.bot.edited[-1]
+    assert "Fav 6" in editado[2] and "Fav 1" not in editado[2], editado
+
+
+async def test_radio_reproduce_directo_sin_yt_dlp():
+    """La emisora entra por play_item COMO cualquier tema, pero marcada como
+    directa: el stream ES su URL (si alguien la resolviera, el stub
+    revienta), mpv la carga tal cual y NO hay prefetch — el "siguiente"
+    seria una busqueda de YouTube de la nada."""
+    from queue_manager import QueueItem
+
+    b = make_bot()
+    e = _emisora(stream="https://stream.example/live")
+    prefetch = []
+    b.playback.schedule_prefetch = lambda item: prefetch.append(item.url)
+    resolver = playback_mod.resolve_stream_url
+
+    def _no_resolver(url):
+        raise AssertionError(f"no debe resolverse con yt-dlp: {url}")
+
+    playback_mod.resolve_stream_url = _no_resolver
+    try:
+        ok = await b._play_item(
+            FakeMessageUpdate("/radio"),
+            QueueItem(url=e.stream, title=e.nombre, directo=True),
+        )
+    finally:
+        playback_mod.resolve_stream_url = resolver
+
+    assert ok is True
+    assert b.player.loaded == [(e.stream, None)], b.player.loaded
+    assert prefetch == [], prefetch
+
+
 async def test_notify_admin_sends_to_owner():
     """Fase 4: _notify_admin copia el error al chat del dueno (log del admin)."""
     b = make_bot()
