@@ -2939,6 +2939,7 @@ class YTRemoteBot:
                     await self._reply(update, f"No se pudo saltar: {fallo}")
                     return
                 self._paused = False
+                self._registrar_historial(candidate)
                 if from_queue:
                     self.queue.next()
                 else:
@@ -3004,6 +3005,7 @@ class YTRemoteBot:
                 await self._notify_admin(f"Fallo al reproducir {item.title}: {fallo}")
                 return
             self._paused = False
+            self._registrar_historial(item)
             self.queue._current = item
             self.queue._items = []
             self.queue._cursor = 0
@@ -3036,6 +3038,7 @@ class YTRemoteBot:
                 await self._notify_admin(f"Fallo al saltar en /next: {fallo}")
                 return
             self._paused = False
+            self._registrar_historial(candidate)
             # En radio, from_queue siempre es False. Navegacion pura: seteamos
             # _current directo para no duplicar el push al stack (ya lo hicimos).
             self.queue._current = candidate
@@ -3100,6 +3103,7 @@ class YTRemoteBot:
                     return
                 stream_url, audio_url = resolved
         # Audio arrancando: recien aqui se commitea el nuevo tema en la cola.
+        self._registrar_historial(candidate)
         self.queue._current = candidate
         self.queue._items = []
         self.queue._cursor = 0
@@ -3194,6 +3198,7 @@ class YTRemoteBot:
                         await self._notify_admin(f"Fallo al re-resolver {item.title}: {exc}")
                         return
                     stream_url, audio_url = resolved
+            self._registrar_historial(item)
             self._schedule_prefetch(item)
             if update is not None:
                 await self._show_card(update.effective_chat.id)
@@ -3240,6 +3245,7 @@ class YTRemoteBot:
                     await self._notify_admin(f"Fallo al re-resolver {item.title}: {exc}")
                     return
                 stream_url, audio_url = resolved
+        self._registrar_historial(item)
         self._schedule_prefetch(item)
         if update is not None:
             await self._show_card(update.effective_chat.id)
@@ -3498,8 +3504,13 @@ class YTRemoteBot:
 
     def _history_keyboard(self) -> InlineKeyboardMarkup:
         """Teclado del historial: una fila por cancion con repetir (🔄 con el
-        titulo COMPLETO, igual que la cola), copiar enlace (🔗) y borrar (🗑);
-        al pie [🗑 Borrar todo] (dj), [🔙 Cola] y la navegacion habitual."""
+        titulo COMPLETO, igual que la cola) y borrar (🗑); al pie [🗑 Borrar
+        todo] (dj), [🔙 Cola] y la navegacion habitual.
+
+        Sin boton de enlace: 🗑 y 🔄 se reparten el ancho y el titulo se lee
+        completo. El callback lst:link sigue atendido (sin boton) para que
+        un teclado viejo no quede muerto.
+        """
         items = self._historial()
         pages = max(1, (len(items) + _HISTORY_PAGE_SIZE - 1) // _HISTORY_PAGE_SIZE)
         page = max(0, min(self._history_page, pages - 1))
@@ -3515,7 +3526,6 @@ class YTRemoteBot:
                         f"🔄 {idx + 1}. {str(it.get('title') or '').strip()}",
                         callback_data=f"lst:rep:{idx}",
                     ),
-                    InlineKeyboardButton("🔗", callback_data=f"lst:link:{idx}"),
                     InlineKeyboardButton("🗑", callback_data=f"lst:del:{idx}"),
                 ]
             )

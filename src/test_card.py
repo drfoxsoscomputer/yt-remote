@@ -270,7 +270,7 @@ def test_control_keyboard_and_status():
     labels1 = [btn.text for btn in rows[0]]
     labels2 = [btn.text for btn in rows[1]]
     assert labels1 == ["⏮", "⏪", "⏸️", "⏩", "⏭", "⏹"], labels1
-    assert labels2 == ["-🔊", "🔊 100", "🔊+", "📋"], labels2
+    assert labels2 == ["➖🔊", "🔊 100", "🔊➕", "📋"], labels2
     # En pausa el botón central (indice 2) debe ser ▶️
     b._paused = True
     kb = b._control_keyboard()
@@ -1027,6 +1027,124 @@ async def test_nav_playlist_unaffected():
         # prev -> A (cursor vuelve a 0, wrap)
         await b.cmd_prev(FakeUpdate("ctl:prev"), SimpleNamespace(args=[]))
         assert cast(QueueItem, b.queue.current).url == "A"
+    finally:
+        bot_mod.resolve_stream_url = lambda url: None
+        playback_mod.resolve_stream_url = lambda url: None
+
+
+async def test_next_en_cola_con_prefetch_registra_historial():
+    """⏭ en modo cola con el siguiente YA resuelto: carga directo a mpv
+    (camino que NO pasa por play_item) y la cancion igual queda registrada."""
+    import bot as bot_mod
+    from queue_manager import QueueItem
+
+    bot_mod.resolve_stream_url = lambda url: ("stream-" + url, None)
+    playback_mod.resolve_stream_url = lambda url: ("stream-" + url, None)
+    try:
+        b = make_bot()
+        b._clear_nav_stacks()
+        items = [
+            QueueItem(url="A", title="A"),
+            QueueItem(url="B", title="B"),
+        ]
+        b.queue.set_playlist(items)
+
+        async def fake_pick(current):
+            return None, False, False
+
+        b._pick_next_candidate = fake_pick
+        b.playback.pick_next_candidate = fake_pick
+        b._prefetch_resolved = ((items[1], True), ("stream-B", None))
+
+        await b.cmd_next(FakeUpdate("ctl:next"), SimpleNamespace(args=[]))
+
+        assert cast(QueueItem, b.queue.current).url == "B"
+        assert [h["url"] for h in b._historial()] == ["B"], b._historial()
+    finally:
+        bot_mod.resolve_stream_url = lambda url: None
+        playback_mod.resolve_stream_url = lambda url: None
+
+
+async def test_next_de_radio_con_prefetch_registra_historial():
+    """⏭ en radio con el prefetch ya resuelto: otra carga directa sin pasar
+    por play_item — tambien debe quedar en el historial."""
+    import bot as bot_mod
+    from queue_manager import QueueItem
+
+    bot_mod.resolve_stream_url = lambda url: ("stream-" + url, None)
+    playback_mod.resolve_stream_url = lambda url: ("stream-" + url, None)
+    try:
+        b = make_bot()
+        b._radio_artist = ""
+        b._clear_nav_stacks()
+        b.queue.set_current(QueueItem(url="A", title="A"))
+
+        async def fake_pick(current):
+            return None, False, False
+
+        b._pick_next_candidate = fake_pick
+        b.playback.pick_next_candidate = fake_pick
+        siguiente = QueueItem(url="B", title="B")
+        b._prefetch_resolved = ((siguiente, False), ("stream-B", None))
+
+        await b.cmd_next(FakeUpdate("ctl:next"), SimpleNamespace(args=[]))
+
+        assert cast(QueueItem, b.queue.current).url == "B"
+        assert [h["url"] for h in b._historial()] == ["B"], b._historial()
+    finally:
+        bot_mod.resolve_stream_url = lambda url: None
+        playback_mod.resolve_stream_url = lambda url: None
+
+
+async def test_next_de_radio_sin_cache_registra_historial():
+    """⏭ en radio sin stream cacheado: resuelve y carga con el loop propio
+    de cmd_next (tampoco pasa por play_item) — queda en el historial."""
+    import bot as bot_mod
+    from queue_manager import QueueItem
+
+    bot_mod.resolve_stream_url = lambda url: ("stream-" + url, None)
+    playback_mod.resolve_stream_url = lambda url: ("stream-" + url, None)
+    try:
+        b = make_bot()
+        b._radio_artist = ""
+        b._clear_nav_stacks()
+        b.queue.set_current(QueueItem(url="A", title="A"))
+        nuevo = QueueItem(url="B", title="B")
+
+        async def fake_pick(current):
+            return nuevo, False, False
+
+        b._pick_next_candidate = fake_pick
+        b.playback.pick_next_candidate = fake_pick
+
+        await b.cmd_next(FakeUpdate("ctl:next"), SimpleNamespace(args=[]))
+
+        assert cast(QueueItem, b.queue.current).url == "B"
+        assert [h["url"] for h in b._historial()] == ["B"], b._historial()
+    finally:
+        bot_mod.resolve_stream_url = lambda url: None
+        playback_mod.resolve_stream_url = lambda url: None
+
+
+async def test_prev_de_radio_registra_historial():
+    """⏮ con la pila back vacia: carga directa por el historico de la cola
+    (otro camino sin play_item) — la cancion que vuelve a sonar queda registrada."""
+    import bot as bot_mod
+    from queue_manager import QueueItem
+
+    bot_mod.resolve_stream_url = lambda url: ("stream-" + url, None)
+    playback_mod.resolve_stream_url = lambda url: ("stream-" + url, None)
+    try:
+        b = make_bot()
+        b._radio_artist = ""
+        b._clear_nav_stacks()
+        b.queue.set_current(QueueItem(url="A", title="A"))
+        b.queue._history_items.append(QueueItem(url="Z", title="Z"))
+
+        await b.cmd_prev(FakeUpdate("ctl:prev"), SimpleNamespace(args=[]))
+
+        assert cast(QueueItem, b.queue.current).url == "Z"
+        assert [h["url"] for h in b._historial()] == ["Z"], b._historial()
     finally:
         bot_mod.resolve_stream_url = lambda url: None
         playback_mod.resolve_stream_url = lambda url: None
@@ -2896,8 +3014,8 @@ async def test_list_select_out_of_range_keeps_open():
 
 async def test_list_hub_historial_view():
     """El 📋 es un hub de contexto: la cola gana un boton 🕘 Historial que
-    convierte el MISMO mensaje en el historial (🔄 con titulo completo,
-    🔗 enlace, 🗑 borrar) y 🔙 Cola vuelve a la cola."""
+    convierte el MISMO mensaje en el historial (🔄 con titulo completo
+    y 🗑 borrar) y 🔙 Cola vuelve a la cola."""
     from queue_manager import QueueItem
 
     b = make_bot()
@@ -2942,8 +3060,10 @@ async def test_list_historial_abre_directo_si_cola_vacia():
 
 async def test_list_historial_rep_link_del():
     """Acciones del historial: 🔄 repite (dj: resuelve stream y suena, la
-    lista se cierra), 🔗 manda el enlace al chat (cualquiera) sin cerrar y
-    🗑 borra la entrada (dj) re-renderizando."""
+    lista se cierra) y 🗑 borra la entrada (dj) re-renderizando. El paso de
+    enlace ejercita el callback lst:link, que ya NO tiene boton en el
+    teclado (la fila es solo 🔄 + 🗑) pero sigue atendido para los
+    teclados viejos."""
     from queue_manager import QueueItem
 
     b = make_bot()

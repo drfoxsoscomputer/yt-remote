@@ -91,7 +91,7 @@ class CardManager:
         """Teclado del mini reproductor persistente.
 
         Fila 1: ⏮ anterior | ⏪ atras | ▶/⏸ alternar | ⏩ adelante | ⏭ siguiente | ⏹ detener
-        Fila 2: -🔊 | <volumen actual> | 🔊+ | 📋 lista
+        Fila 2: ➖🔊 | <volumen actual> | 🔊➕ | 📋 lista
         Fila 3: ⚙️ Calidad: Np | 👥 Usuarios | ⏻ apagado programado
         (calidad y usuarios solo admin; ⏻ es de dj y se marca ⏰ mientras
         haya temporizador armado)
@@ -107,9 +107,9 @@ class CardManager:
                 InlineKeyboardButton("⏹", callback_data="ctl:stop"),
             ],
             [
-                InlineKeyboardButton("-🔊", callback_data="ctl:vol-10"),
+                InlineKeyboardButton("➖🔊", callback_data="ctl:vol-10"),
                 InlineKeyboardButton(f"🔊 {self._app._volume}", callback_data="ctl:vol-info"),
-                InlineKeyboardButton("🔊+", callback_data="ctl:vol+10"),
+                InlineKeyboardButton("🔊➕", callback_data="ctl:vol+10"),
                 InlineKeyboardButton("📋", callback_data="ctl:lista"),
             ],
             [
