@@ -1660,41 +1660,6 @@ async def test_play_ignora_el_instante_de_otro_tema():
         playback_mod.resolve_stream_url = lambda url: None
 
 
-
-async def test_mezclar_revuelve_solo_los_proximos():
-    """/mezclar baraja SOLO los temas que faltan: el actual queda intacto, el
-    orden nuevo se persiste, y en modo radio (sin playlist) no hay cola."""
-    import queue_manager as qm_mod
-    from queue_manager import QueueItem
-
-    b = make_bot()
-    items = [QueueItem(url=f"u{i}", title=f"T{i}") for i in range(6)]
-    b.queue.set_playlist(items)
-    # Cursor en 0: el actual es u0 y los proximos son u1..u5.
-
-    # Shuffle determinista: invertir el tramo barajado.
-    original = qm_mod.random.shuffle
-    qm_mod.random.shuffle = lambda lista: lista.reverse()
-    try:
-        upd = FakeMessageUpdate("/mezclar")
-        await b.cmd_mezclar(upd, SimpleNamespace(args=[]))
-    finally:
-        qm_mod.random.shuffle = original
-
-    urls = [i.url for i in b.queue.all()]
-    assert urls == ["u0", "u5", "u4", "u3", "u2", "u1"], urls
-    assert b.queue._cursor == 0, "el actual no se mueve"
-    assert [d["url"] for d in b._state._current["playlist"]] == urls, "se persiste"
-    assert any("5 temas" in t for t, _ in upd.sent), upd.sent
-
-    # Sin playlist (modo radio): no hay cola que mezclar.
-    b2 = make_bot()
-    b2.queue.set_current(QueueItem(url="r1", title="Radio"))
-    upd2 = FakeMessageUpdate("/mezclar")
-    await b2.cmd_mezclar(upd2, SimpleNamespace(args=[]))
-    assert any("No hay cola que mezclar" in t for t, _ in upd2.sent), upd2.sent
-
-
 async def test_actualizar_solo_admin():
     """/actualizar es de admin (mismo envoltorio que /salud): el resto ni
     entra, y sin permiso no se dispara la actualizacion."""

@@ -9,7 +9,6 @@ Tambien mantiene el modo radio: sin playlist, un item suelto es el "actual"
 y la radio por semilla decide el siguiente (nunca repite URLs recientes).
 """
 
-import random
 from collections import deque
 from dataclasses import dataclass
 
@@ -222,22 +221,6 @@ class QueueManager:
         else:
             self._cursor = min(self._cursor, len(self._items) - 1)
         return removed
-
-    def shuffle(self) -> int:
-        """Baraja los temas PROXIMOS (los que faltan por sonar).
-
-        El actual y los ya reproducidos quedan donde estan: la navegacion
-        atras no se rompe. Devuelve cuantos temas se barajaron
-        (0 = no hay cola que revolver).
-        """
-        if not self._items or len(self._items) < 2:
-            return 0
-        proximos = self._items[self._cursor + 1 :]
-        if len(proximos) < 2:
-            return 0
-        random.shuffle(proximos)
-        self._items = self._items[: self._cursor + 1] + proximos
-        return len(proximos)
 
     def clear(self) -> None:
         self._items = []

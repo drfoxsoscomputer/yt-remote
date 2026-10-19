@@ -156,7 +156,6 @@ _COMANDOS_PUBLICOS = [
     BotCommand("solicitar", "Pedir acceso de dj al admin"),
     BotCommand("radio", "Elegir emisora o favoritas"),
     BotCommand("letra", "Letra de lo que esta sonando"),
-    BotCommand("mezclar", "Barajar la cola (dj+)"),
 ]
 _COMANDOS_ADMIN = [
     BotCommand("reglas", "Re-envia y fija (pin) las reglas del grupo"),
@@ -726,12 +725,6 @@ class YTRemoteBot:
             CommandHandler(
                 "salud",
                 self._with_card_reposition(self._require_chat(self._require("admin", self.cmd_salud))),
-            )
-        )
-        app.add_handler(
-            CommandHandler(
-                "mezclar",
-                self._with_card_reposition(self._require_chat(self._require("dj", self.cmd_mezclar))),
             )
         )
         app.add_handler(
@@ -3334,22 +3327,6 @@ class YTRemoteBot:
         if pos is None:
             return
         self._posicion_guardada = {"item": self.queue.current.to_dict(), "pos": int(pos)}
-
-    async def cmd_mezclar(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-        """Dj: revuelve el orden de los temas PROXIMOS de la cola.
-
-        El actual y los ya reproducidos quedan donde estan: mezclar solo
-        cambia lo que falta por sonar (y se persiste el nuevo orden). En
-        modo radio (sin playlist) no hay cola que revolver.
-        """
-        barajados = self.queue.shuffle()
-        if not barajados:
-            await self._reply(update, "No hay cola que mezclar.")
-            return
-        self._persist_dirty()
-        await self._reply(
-            update, f"🔀 Cola mezclada: {barajados} temas por venir en otro orden."
-        )
 
     async def cmd_letra(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         """La letra de lo que suena, como mensaje de texto. Cualquiera
