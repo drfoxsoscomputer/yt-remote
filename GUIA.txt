@@ -134,20 +134,23 @@ que le permiten controlar la reproducción sin escribir comandos:
 
 Fila 1:
   ⏮  — vuelve a la canción anterior
-  ▶/⏸ — pausa o reanuda
+  ▶/⏸ — un solo botón: carga la actual, pausa, o sigue donde quedó
   ⏭  — pasa a la siguiente canción
-  ⏹  — detiene la reproducción
+  ⏹  — detiene: rebobina a 0 y el próximo ▶ empieza desde el inicio
 
 Fila 2:
-  ⬇️🔊    — baja el volumen 10 puntos
-  🔊 70   — volumen actual
-  🔊⬆️    — sube el volumen 10 puntos
+  🔉      — baja el volumen 10 puntos
+  🔊 70   — volumen actual (🔇 cuando esta en 0)
+  🔊      — sube el volumen 10 puntos
   📋     — muestra la lista de canciones
 
 Fila 3:
   ⚙️ Ajustes — abre el menú de configuración, una opción por fila:
-    💤 Apagado programado (dj; con temporizador arma­do muestra los
-       minutos que faltan, p. ej. "💤 Para en 12 min")
+    💤 Apagado programado (dj; con temporizador armado muestra los
+       minutos que faltan, p. ej. "💤 Se apagará en 12 min"). Al llegar
+       la hora cierra TODO en silencio (mpv, bot y app, la card queda
+       como está). Al día siguiente: abrir la app, Conectar y dar ▶
+       sigue en el minuto donde quedó
     ⚙️ Calidad: 1080p — elige la resolución de los videos (solo admin)
     👥 Usuarios — gestión de roles (solo admin)
     ❌ — vuelve a los controles
@@ -193,7 +196,6 @@ Solo dj y admin:
   /buscar <artista> - <canción>  busca y reproduce de un artista
   /buscar <artista>              busca un artista (sin canción)
   /buscar <link>                 reproduce un link de YouTube directo
-  /continuar                     retoma donde se paró el ⏹ o el 💤
   /mezclar                       baraja la cola
 
 Solo admin:

@@ -151,12 +151,12 @@ Cuando suena algo aparece una tarjeta con botones:
 | Botón | Qué hace |
 |-------|---------|
 | ⏮ | Canción anterior |
-| ▶/⏸ | Pausa o reanuda |
+| ▶/⏸ | Un solo botón con tres funciones: sin nada sonando carga la canción actual; sonando pone en pausa; en pausa (o apagado el mpv, tras el temporizador) sigue donde quedó |
 | ⏭ | Siguiente canción del mismo artista |
-| ⏹ | Detiene todo |
-| ⬇️🔊 / 🔊⬆️ | Bajar o subir volumen 10 puntos |
+| ⏹ | Detiene: rebobina a 0 y el próximo ▶ arranca desde el inicio |
+| 🔉 / 🔊 | Bajar o subir volumen 10 puntos (el nivel actual muestra 🔇 en 0) |
 | 📋 | Ver la lista |
-| ⚙️ Ajustes | Abre el menú de configuración: 💤 apagado programado (dj), ⚙️ Calidad y 👥 Usuarios (solo admin), una opción por fila |
+| ⚙️ Ajustes | Abre el menú de configuración: 💤 apagado programado (dj), ⚙️ Calidad y 👥 Usuarios (solo admin), una opción por fila. El 💤 cierra todo a la hora elegida (mpv, bot y app) sin avisar en el chat; al día siguiente, abrir la app, Conectar y dar ▶ sigue en el minuto donde quedó |
 
 La radio pasa automáticamente a la siguiente canción del mismo artista cuando
 termina. Use `/buscar` con otro nombre para cambiar de cantante.
@@ -206,7 +206,6 @@ desde la lista.
 | `/buscar <link>` | dj, admin | Reproduce un link de YouTube directo |
 | `/solicitar` | user | Solicitar acceso de dj al admin |
 | `/reglas` | admin | Re-envía y fija (pin) el mensaje de reglas del grupo |
-| `/continuar` | dj, admin | Retoma donde lo dejaron el ⏹ o el 💤 |
 | `/mezclar` | dj, admin | Baraja la cola |
 | `/radio` | todos (elegir es de dj) | Abre el listado de emisoras y favoritas |
 | `/letra` | todos | Letra de lo que está sonando |
