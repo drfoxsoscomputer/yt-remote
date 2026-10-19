@@ -133,7 +133,7 @@ class StateStore:
                 "radio_artist": s.leer_ajuste("radio_artist", ""),
                 "max_height": s.leer_ajuste("max_height"),
                 "card": s.leer_ajuste("card", {}) or {},
-                "continuar": s.leer_ajuste("continuar"),
+                "posicion_guardada": s.leer_ajuste("posicion_guardada"),
                 "radio_favs": s.leer_ajuste("radio_favs") or [],
             }
         except Exception as exc:  # noqa: BLE001 - no debe tumbar el arranque
@@ -155,7 +155,7 @@ class StateStore:
             "max_height",
             "card",
             "current",
-            "continuar",
+            "posicion_guardada",
             "radio_favs",
         ):
             if clave in state:

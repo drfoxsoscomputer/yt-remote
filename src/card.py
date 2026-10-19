@@ -91,7 +91,7 @@ class CardManager:
         """Teclado del mini reproductor persistente.
 
         Fila 1: ⏮ anterior | ⏪ atras | ▶/⏸ alternar | ⏩ adelante | ⏭ siguiente | ⏹ detener
-        Fila 2: ⬇️🔊 | <volumen actual> | 🔊⬆️ | 📋 lista
+        Fila 2: 🔉 bajar | <volumen actual> (🔇 en 0) | 🔊 subir | 📋 lista
         Fila 3: ⚙️ Ajustes (menu con apagado programado, calidad y usuarios,
         una opcion por fila y filtrada por rol)
         """
@@ -106,9 +106,12 @@ class CardManager:
                 InlineKeyboardButton("⏹", callback_data="ctl:stop"),
             ],
             [
-                InlineKeyboardButton("⬇️🔊", callback_data="ctl:vol-10"),
-                InlineKeyboardButton(f"🔊 {self._app._volume}", callback_data="ctl:vol-info"),
-                InlineKeyboardButton("🔊⬆️", callback_data="ctl:vol+10"),
+                InlineKeyboardButton("🔉", callback_data="ctl:vol-10"),
+                InlineKeyboardButton(
+                    "🔇" if self._app._volume == 0 else f"🔊 {self._app._volume}",
+                    callback_data="ctl:vol-info",
+                ),
+                InlineKeyboardButton("🔊", callback_data="ctl:vol+10"),
                 InlineKeyboardButton("📋", callback_data="ctl:lista"),
             ],
             [
@@ -131,7 +134,7 @@ class CardManager:
         if es_dj:
             restan = self._app._sleep_restante_min()
             etiqueta = (
-                f"💤 Para en {restan} min" if restan else "💤 Apagado programado"
+                f"💤 Se apagará en {restan} min" if restan else "💤 Apagado programado"
             )
             rows.append(
                 [InlineKeyboardButton(etiqueta, callback_data="ctl:apagar")]
@@ -187,7 +190,7 @@ class CardManager:
             rows.append(
                 [
                     InlineKeyboardButton(
-                        f"⏰ Para en {restan} min",
+                        f"⏰ Se apagará en {restan} min",
                         callback_data="ap:noop",
                     )
                 ]
@@ -202,7 +205,7 @@ class CardManager:
             rows.append(
                 [
                     InlineKeyboardButton(
-                        "⏹ Apagar temporizador", callback_data="ap:off"
+                        "⏹ Detener temporizador", callback_data="ap:off"
                     )
                 ]
             )

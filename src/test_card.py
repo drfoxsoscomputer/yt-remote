@@ -136,6 +136,7 @@ class FakePlayer:
         self.loaded = []
         self.starts = 0
         self.rewinds = 0
+        self.quits = 0
         self.seeks = []
         self.seek_tos = []
         self.time_pos = None
@@ -168,6 +169,10 @@ class FakePlayer:
 
     async def rewind(self):
         self.rewinds += 1
+
+    async def quit(self):
+        self.quits += 1
+        self.running = False
 
     async def seek(self, delta):
         self.seeks.append(delta)
@@ -270,7 +275,12 @@ def test_control_keyboard_and_status():
     labels1 = [btn.text for btn in rows[0]]
     labels2 = [btn.text for btn in rows[1]]
     assert labels1 == ["⏮", "⏪", "⏸️", "⏩", "⏭", "⏹"], labels1
-    assert labels2 == ["⬇️🔊", "🔊 100", "🔊⬆️", "📋"], labels2
+    assert labels2 == ["🔉", "🔊 100", "🔊", "📋"], labels2
+    # Volumen en 0: el nivel actual se muestra con 🔇 solo.
+    b._volume = 0
+    kb = b._control_keyboard()
+    assert [btn.text for btn in kb.inline_keyboard[1]][1] == "🔇"
+    b._volume = 100
     # En pausa el botón central (indice 2) debe ser ▶️
     b._paused = True
     kb = b._control_keyboard()
@@ -450,7 +460,7 @@ async def test_sleep_menu_abre_y_programa():
     assert b._sleep_task is not None and not b._sleep_task.done()
     assert upd2.answered and "45" in str(upd2.answered), upd2.answered
     opcion = b._ajustes_keyboard(77).inline_keyboard[0][0]
-    assert opcion.text == "💤 Para en 45 min", opcion.text
+    assert opcion.text == "💤 Se apagará en 45 min", opcion.text
     assert opcion.callback_data == "ctl:apagar"
 
     # Reprogramar cancela la tarea anterior (solo una puede correr).
@@ -491,9 +501,9 @@ async def test_sleep_muestra_minutos_que_faltan():
     b._sleep_deadline = _time.monotonic() + 12 * 60 + 5
     b._sleep_minutes = 45
     header = b._sleep_keyboard().inline_keyboard[0][0].text
-    assert header == "⏰ Para en 12 min", header
+    assert header == "⏰ Se apagará en 12 min", header
     opcion = b._ajustes_keyboard(77).inline_keyboard[0][0].text
-    assert opcion == "💤 Para en 12 min", opcion
+    assert opcion == "💤 Se apagará en 12 min", opcion
     # A menos de un minuto nunca muestra 0.
     b._sleep_deadline = _time.monotonic() + 20
     assert b._sleep_restante_min() == 1
@@ -548,7 +558,11 @@ async def test_ajustes_menu_roles_y_cierre():
 
 async def test_sleep_permisos_y_disparo():
     """Sin rol dj no se abre ni se programa; el disparo del temporizador
-    para igual que ⏹ (rebobina + pausa, conserva todo) y avisa al chat."""
+    cierra todo en silencio: guarda el instante del tema (para que el ▶ lo
+    retome al volver), cierra el mpv, deja la marca para el launcher y sale
+    — sin nada en el chat y sin tocar la card."""
+    from queue_manager import QueueItem
+
     b = make_bot()
     b.roles.set_role(50, "user")
     b._card_chat_id = 44
@@ -565,18 +579,31 @@ async def test_sleep_permisos_y_disparo():
     assert upd2.answered_kwargs.get("show_alert") is True
     assert b._sleep_minutes is None, "el user no programa"
 
-    # Disparo: rebobina, queda en pausa, limpia el timer y avisa al chat.
+    # Disparo: instante guardado y flusheado, mpv cerrado, marca en data para
+    # el launcher, NADA al chat y la card sin un solo edit. La salida
+    # (os._exit) queda sustituida para no matar la prueba.
     b.player.running = True
-    b._paused = False
+    b.player.time_pos = 90.0
+    b.queue.set_current(QueueItem(url="u1", title="Tema"))
     b._sleep_minutes = 30
-    enviados = len(b._app.bot.sent)
-    await b._apagar_por_temporizador()
-    assert b.player.rewinds == 1, "rebobina como ⏹"
-    assert b._paused is True, "queda en pausa"
-    assert b._sleep_minutes is None and b._sleep_task is None
-    assert any(
-        "temporizador" in str(s[1]) for s in b._app.bot.sent[enviados:]
-    ), "avisa al chat de la card"
+    b._salir_del_proceso = lambda: None
+    import persistence as persistence_mod
+
+    with isolated_state_path():
+        enviados = len(b._app.bot.sent)
+        b._app.bot.edited.clear()
+        await b._apagar_por_temporizador()
+        assert b.player.quits == 1, "cierra el mpv de verdad"
+        assert b._posicion_guardada == {
+            "item": b.queue.current.to_dict(),
+            "pos": 90,
+        }, "el ▶ retoma el minuto al volver a abrir"
+        assert b._state._current["posicion_guardada"]["pos"] == 90, "flusheado"
+        assert b._sleep_minutes is None and b._sleep_task is None
+        assert b._app.bot.sent[enviados:] == [], "en silencio: nada al chat"
+        assert b._app.bot.edited == [], "la card queda intacta"
+        marca = persistence_mod.STATE_PATH.parent / "salir_total.flag"
+        assert marca.is_file(), "la marca que el launcher detecta"
 
 
 async def test_dispatch_unknown_action():
@@ -1548,72 +1575,11 @@ async def test_stop_does_not_clear_queue():
         QueueManager.clear = original_clear
 
 
-async def test_stop_guarda_posicion_y_continuar_reanuda():
-    """⏹ guarda el instante antes de rebobinar y /continuar retoma AHÍ (seek
-    absoluto + play) sin re-resolver nada: el guardado es el actual."""
-    from queue_manager import QueueItem
-
-    b = make_bot()
-    fp = cast(Any, b.player)
-    fp.time_pos = 125.0
-    b.queue.set_current(QueueItem(url="u1", title="Tema"))
-    b._paused = False
-
-    await b.cmd_stop(FakeUpdate("ctl:stop"), SimpleNamespace(args=[]))
-    assert fp.rewinds == 1, "sigue rebobinando a 0:00"
-    assert b._continuar == {"item": b.queue.current.to_dict(), "pos": 125}
-    assert b._state._current["continuar"]["pos"] == 125, "debe persistirse"
-
-    upd = FakeMessageUpdate("/continuar")
-    await b.cmd_continuar(upd, SimpleNamespace(args=[]))
-    assert fp.seek_tos == [125], fp.seek_tos
-    assert fp.resumed == 1, "debe reanudar la pausa que dejo el stop"
-    assert b._paused is False
-    assert b._continuar is None, "el guardado se consume al retomarlo"
-    assert any("2:05" in t for t, _ in upd.sent), upd.sent
-
-
-async def test_continuar_sin_nada_guardado_avisa():
-    """Sin stop previo (o con el guardado corrupto) solo avisa, sin tocar mpv."""
-    b = make_bot()
-    fp = cast(Any, b.player)
-
-    upd = FakeMessageUpdate("/continuar")
-    await b.cmd_continuar(upd, SimpleNamespace(args=[]))
-    assert any("No hay ninguna cancion guardada" in t for t, _ in upd.sent), upd.sent
-    assert fp.seek_tos == [] and fp.loaded == [], "no debe tocar el player"
-
-    # Estado corrupto (item ilegible): se descarta y vuelve al mismo aviso.
-    b2 = make_bot()
-    b2._continuar = {"item": "roto", "pos": 9}
-    upd2 = FakeMessageUpdate("/continuar")
-    await b2.cmd_continuar(upd2, SimpleNamespace(args=[]))
-    assert any("No hay ninguna cancion guardada" in t for t, _ in upd2.sent), upd2.sent
-    assert b2._continuar is None, "el guardado corrupto se descarta"
-
-
-async def test_continuar_guardado_divergente_se_descarta():
-    """Si se eligio OTRO tema despues del stop, /continuar no revive la
-    posicion vieja: avisa, descarta el guardado y no carga nada."""
-    from queue_manager import QueueItem
-
-    b = make_bot()
-    fp = cast(Any, b.player)
-    b.queue.set_current(QueueItem(url="u1", title="Ahora"))
-    b._continuar = {"item": {"url": "u2", "title": "Guardada"}, "pos": 42}
-
-    upd = FakeMessageUpdate("/continuar")
-    await b.cmd_continuar(upd, SimpleNamespace(args=[]))
-    assert any("No hay ninguna cancion guardada" in t for t, _ in upd.sent), upd.sent
-    assert b._continuar is None, "el guardado divergente se descarta"
-    assert b._state._current["continuar"] is None, "y se persiste el descarte"
-    assert fp.loaded == [] and fp.seek_tos == [], "no debe tocar el player"
-
-
-async def test_continuar_con_mpv_muerto_re_resuelve_y_busca():
-    """Sin mpv corriendo, /continuar re-resuelve el MISMO tema actual (las
-    garantias de un pick), lo carga y recien ahi busca a la posicion."""
+async def test_stop_borra_el_instante_y_play_arranca_en_cero():
+    """⏹ es parar: rebobina, BORRA cualquier instante guardado y el proximo ▶
+    arranca de cero (no revive la posicion de antes)."""
     import bot as bot_mod
+    import playback as playback_mod
     from queue_manager import QueueItem
 
     bot_mod.resolve_stream_url = lambda url: ("stream-" + url, None)
@@ -1622,21 +1588,77 @@ async def test_continuar_con_mpv_muerto_re_resuelve_y_busca():
         b = make_bot()
         fp = cast(Any, b.player)
         b.queue.set_current(QueueItem(url="u1", title="Tema"))
-        fp.running = False
-        b._continuar = {"item": {"url": "u1", "title": "Tema"}, "pos": 42}
-        b._paused = True
+        b._posicion_guardada = {"item": b.queue.current.to_dict(), "pos": 125}
 
-        upd = FakeMessageUpdate("/continuar")
-        await b.cmd_continuar(upd, SimpleNamespace(args=[]))
+        await b.cmd_stop(FakeUpdate("ctl:stop"), SimpleNamespace(args=[]))
+        assert fp.rewinds == 1, "sigue rebobinando a 0:00"
+        assert b._posicion_guardada is None, "parar borra el instante guardado"
+        assert b._state._current["posicion_guardada"] is None, "y se persiste"
+
+        fp.running = False  # como tras un ⏹: mpv apagado
+        await b._toggle_play_pause(FakeUpdate("ctl:play"))
         assert fp.loaded == [("stream-u1", None)], fp.loaded
-        assert fp.seek_tos == [42], fp.seek_tos
-        assert cast(QueueItem, b.queue.current).url == "u1", "el actual no cambia"
-        assert b._paused is False, "queda sonando, no en pausa"
-        assert b._continuar is None, "el guardado consumido se borra"
-        assert any("0:42" in t for t, _ in upd.sent), upd.sent
+        assert fp.seek_tos == [], "tras ⏹ el ▶ arranca en 0, no retoma nada"
     finally:
         bot_mod.resolve_stream_url = lambda url: None
         playback_mod.resolve_stream_url = lambda url: None
+
+
+async def test_play_tras_temporizador_retoma_el_minuto():
+    """El temporizador guarda el instante y cierra todo; al volver a abrir, el
+    mismo ▶ (mpv apagado) carga el tema y RETOMA ahi: el guardado se consume."""
+    import bot as bot_mod
+    import playback as playback_mod
+    from queue_manager import QueueItem
+
+    bot_mod.resolve_stream_url = lambda url: ("stream-" + url, None)
+    playback_mod.resolve_stream_url = lambda url: ("stream-" + url, None)
+    try:
+        b = make_bot()
+        fp = cast(Any, b.player)
+        b.queue.set_current(QueueItem(url="u1", title="Tema"))
+        # Estado tal como quedo despues del temporizador (y de un reinicio).
+        b._posicion_guardada = {"item": b.queue.current.to_dict(), "pos": 42}
+        fp.running = False
+        fp.loaded.clear()
+
+        await b._toggle_play_pause(FakeUpdate("ctl:play"))
+        assert fp.loaded == [("stream-u1", None)], fp.loaded
+        assert fp.seek_tos == [42], "retoma el minuto donde quedo"
+        assert cast(QueueItem, b.queue.current).url == "u1", "el actual no cambia"
+        assert b._paused is False, "queda sonando"
+        assert b._posicion_guardada is None, "el instante se consume al retomarlo"
+        assert b._state._current["posicion_guardada"] is None, "y se persiste"
+    finally:
+        bot_mod.resolve_stream_url = lambda url: None
+        playback_mod.resolve_stream_url = lambda url: None
+
+
+async def test_play_ignora_el_instante_de_otro_tema():
+    """Si el guardado es de un tema que ya no es el actual, el ▶ lo descarta
+    en silencio: arranca el actual en 0, sin seek y sin revivir nada."""
+    import bot as bot_mod
+    import playback as playback_mod
+    from queue_manager import QueueItem
+
+    bot_mod.resolve_stream_url = lambda url: ("stream-" + url, None)
+    playback_mod.resolve_stream_url = lambda url: ("stream-" + url, None)
+    try:
+        b = make_bot()
+        fp = cast(Any, b.player)
+        b.queue.set_current(QueueItem(url="u1", title="Ahora"))
+        b._posicion_guardada = {"item": {"url": "u2", "title": "Vieja"}, "pos": 42}
+        fp.running = False
+
+        await b._toggle_play_pause(FakeUpdate("ctl:play"))
+        assert fp.seek_tos == [], "no revive la posicion de otro tema"
+        assert fp.loaded == [("stream-u1", None)], fp.loaded
+        assert b._posicion_guardada is None, "el guardado divergente se descarta"
+        assert b._state._current["posicion_guardada"] is None, "y se persiste"
+    finally:
+        bot_mod.resolve_stream_url = lambda url: None
+        playback_mod.resolve_stream_url = lambda url: None
+
 
 
 async def test_mezclar_revuelve_solo_los_proximos():

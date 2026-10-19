@@ -156,7 +156,6 @@ _COMANDOS_PUBLICOS = [
     BotCommand("solicitar", "Pedir acceso de dj al admin"),
     BotCommand("radio", "Elegir emisora o favoritas"),
     BotCommand("letra", "Letra de lo que esta sonando"),
-    BotCommand("continuar", "Retomar donde quedo (dj+)"),
     BotCommand("mezclar", "Barajar la cola (dj+)"),
 ]
 _COMANDOS_ADMIN = [
@@ -416,12 +415,13 @@ class YTRemoteBot:
         self._sleep_minutes: int | None = None
         self._sleep_task: asyncio.Task | None = None
         # Hora limite del apagado programado (monotonic): de aca sale el
-        # "Para en N min" con los minutos que FALTAN de verdad.
+        # "Se apagara en N min" con los minutos que FALTAN de verdad.
         self._sleep_deadline: float | None = None
-        # Ultimo stop guardado para /continuar: {"item": item.to_dict(),
-        # "pos": segundos}. Lo escribe cmd_stop (y el 💤 del temporizador)
-        # antes de rebobinar; se persiste con el estado comun.
-        self._continuar: dict | None = None
+        # Instante guardado del tema actual: {"item": item.to_dict(),
+        # "pos": segundos}. Lo escribe SOLO el temporizador antes de cerrar
+        # todo; el ▶ lo consume al retomar (el ⏹ lo borra: parar = proximo
+        # ▶ desde 0). Se persiste con el estado comun.
+        self._posicion_guardada: dict | None = None
         # /radio: la vista abierta (destacadas/buscada/favoritas) vive SOLO
         # en la sesion (un reinicio reabre en destacadas); las FAVORITAS si
         # se persisten con el estado comun (clave radio_favs).
@@ -487,7 +487,7 @@ class YTRemoteBot:
                 "message_id": self._card_message_id,
                 "is_photo": self._card_is_photo,
             },
-            "continuar": self._continuar,
+            "posicion_guardada": self._posicion_guardada,
             "radio_favs": [f.to_dict() for f in self._radio_favs],
         }
         self._state.mark_dirty()
@@ -517,7 +517,7 @@ class YTRemoteBot:
         loaded = self._state.load()
         self._volume = loaded.get("volume", 100)
         self._radio_artist = loaded.get("radio_artist", "")
-        self._continuar = loaded.get("continuar") or None
+        self._posicion_guardada = loaded.get("posicion_guardada") or None
         try:
             self._radio_favs = [
                 radio.Emisora.desde_dict(d) for d in loaded.get("radio_favs") or []
@@ -726,12 +726,6 @@ class YTRemoteBot:
             CommandHandler(
                 "salud",
                 self._with_card_reposition(self._require_chat(self._require("admin", self.cmd_salud))),
-            )
-        )
-        app.add_handler(
-            CommandHandler(
-                "continuar",
-                self._with_card_reposition(self._require_chat(self._require("dj", self.cmd_continuar))),
             )
         )
         app.add_handler(
@@ -2684,9 +2678,12 @@ class YTRemoteBot:
     async def _toggle_play_pause(self, update: Update | None = None) -> None:
         """Alterna reproducir/pausar (boton ▶/⏸ de la tarjeta).
 
-        Si hay un item actual pero mpv no esta corriendo (tras apagado de la
-        PC o tras un stop), reproduce ese item por _play_item: eso prende mpv
-        y carga el stream. Si mpv ya corre, solo alterna pausa/reproduccion.
+        Un solo boton con las tres funciones de cualquier reproductor: sin
+        mpv corriendo (primera vez, tras un ⏹ o tras el temporizador) prende
+        mpv y carga el tema actual; si mpv corre, pausa o sigue. Ademas, si
+        hay un instante guardado de ESE tema (lo deja el temporizador al
+        cerrar todo), retoma ahi en vez de arrancar en 0; el ⏹ es el que
+        borra ese instante (parar = el proximo ▶ empieza de cero).
         """
         if self.queue.current is None:
             return
@@ -2694,11 +2691,13 @@ class YTRemoteBot:
             # Con playlist activa, reanudar NO debe descartar la cola: el item
             # actual ya esta posicionado (items[cursor]). Sin playlist (radio /
             # cancion suelta) sigue el camino de set_current de siempre.
-            await self._play_item(
+            started = await self._play_item(
                 update,
                 self.queue.current,
                 preserve_current=self.queue.has_playlist,
             )
+            if started:
+                await self._retomar_posicion_guardada()
             return
         if self._paused:
             await self.player.play()
@@ -2707,6 +2706,29 @@ class YTRemoteBot:
             await self.player.pause()
             self._paused = True
         self._persist_dirty()
+
+    async def _retomar_posicion_guardada(self) -> None:
+        """Retoma el instante que dejo el temporizador al cerrar todo.
+
+        Solo aplica si el guardado es del tema actual: si se eligio otro, se
+        descarta en silencio (no se revive la posicion de un tema viejo). Se
+        consume al usarlo: el proximo arranque en frio empieza en 0, como
+        despues de un ⏹.
+        """
+        guardado = self._posicion_guardada
+        if not guardado or not guardado.get("item"):
+            return
+        actual = self.queue.current
+        url_guardada = (guardado["item"] or {}).get("url")
+        if actual is None or actual.url != url_guardada:
+            self._posicion_guardada = None
+            self._persist_dirty()
+            return
+        pos = max(0, int(guardado.get("pos", 0)))
+        self._posicion_guardada = None
+        self._persist_dirty()
+        if pos > 0:
+            await self.player.seek_to(pos)
 
     async def _on_control(
         self,
@@ -3288,8 +3310,9 @@ class YTRemoteBot:
     async def cmd_stop(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         # Detener y rebobinar a 0:00 SIN borrar historial, cola, radio ni
         # navegacion: conserva todo para que ▶ reanude el video desde el inicio.
-        # Antes de rebobinar se guarda el instante para /continuar.
-        await self._guardar_posicion_actual()
+        # ⏹ tambien BORRA el instante guardado: parar es parar, el proximo ▶
+        # arranca de cero (el instante solo lo deja el temporizador al cerrar).
+        self._posicion_guardada = None
         if self.player.is_running:
             await self.player.rewind()
         self._queue_advance_needed = False
@@ -3299,71 +3322,18 @@ class YTRemoteBot:
         await self._reply(update, "⏹️ Detenido. Usa ▶ para reanudar desde el inicio.")
 
     async def _guardar_posicion_actual(self) -> None:
-        """Guarda el instante de la cancion actual antes de parar (⏹ / 💤).
+        """Guarda el instante de la cancion actual antes de cerrar todo (💤).
 
-        Es lo que /continuar usa para retomar ahi en vez de volver a 0:00.
-        Sin mpv corriendo o sin tiempo consultable no hay nada nuevo que
-        guardar: se conserva el ultimo guardado.
+        Es lo que hace que al volver a abrir y dar ▶ el tema siga donde
+        quedo, como en cualquier reproductor. Sin mpv corriendo o sin tiempo
+        consultable no hay nada nuevo que guardar: se conserva lo ultimo.
         """
         if self.queue.current is None or not self.player.is_running:
             return
         pos = await self.player.get_time_pos()
         if pos is None:
             return
-        self._continuar = {"item": self.queue.current.to_dict(), "pos": int(pos)}
-
-    async def cmd_continuar(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-        """Dj: retoma la ultima cancion GUARDADA en la posicion donde se paro.
-
-        cmd_stop (⏹ y el 💤 del temporizador) guarda el instante antes de
-        rebobinar; este comando retoma ahi en vez de volver a 0:00. Solo
-        aplica si el guardado sigue siendo el tema actual: si se eligio otro
-        tema, se descarta (los temas viejos viven en el historial del hub).
-        Con mpv vivo solo busca y reanuda; con mpv muerto re-resuelve el
-        stream y busca. El guardado se consume: el proximo stop guarda su
-        propio instante.
-        """
-        guardado = self._continuar
-        if not guardado or not guardado.get("item"):
-            await self._reply(update, "No hay ninguna cancion guardada para continuar.")
-            return
-        try:
-            item = QueueItem.from_dict(guardado["item"])
-        except Exception:  # noqa: BLE001 - estado guardado corrupto
-            self._continuar = None
-            await self._reply(update, "No hay ninguna cancion guardada para continuar.")
-            return
-        pos = max(0, int(guardado.get("pos", 0)))
-        mmss = f"{pos // 60}:{pos % 60:02d}"
-
-        actual = self.queue.current
-        if actual is None or actual.url != item.url:
-            # El guardado dejo de ser el actual (se eligio otro tema): no hay
-            # nada que continuar; no se revive una posicion vieja.
-            self._continuar = None
-            self._persist_dirty()
-            await self._reply(update, "No hay ninguna cancion guardada para continuar.")
-            return
-        if self.player.is_running:
-            await self.player.seek_to(pos)
-            if self._paused:
-                await self.player.play()
-                self._paused = False
-            # Se consume: el proximo stop vuelve a guardar su instante.
-            self._continuar = None
-            self._persist_dirty()
-            await self._render_card(self._track_status_text())
-            await self._reply(update, f"▶️ Continuando desde {mmss}")
-            return
-        # mpv no esta corriendo: re-resuelve el MISMO tema actual (mismas
-        # garantias que un pick), lo carga y recien ahi busca a pos.
-        started = await self._play_item(update, item, preserve_current=True)
-        if not started:
-            return  # el fallo ya se aviso: el guardado queda para reintentar
-        await self.player.seek_to(pos)
-        self._continuar = None
-        self._persist_dirty()
-        await self._reply(update, f"▶️ Continuando desde {mmss}")
+        self._posicion_guardada = {"item": self.queue.current.to_dict(), "pos": int(pos)}
 
     async def cmd_mezclar(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         """Dj: revuelve el orden de los temas PROXIMOS de la cola.
@@ -3637,12 +3607,13 @@ class YTRemoteBot:
         """Menu del apagado programado de la tarjeta (callback `ap:*`).
 
         Dj, igual que el resto de los controles: `ap:N` (re)programa el
-        temporizador de la sesion — a los N minutos para la reproduccion como
-        ⏹ y avisa al chat — y vuelve el teclado de control (el estado queda
-        visible como "💤 Para en N min" dentro de ⚙️ Ajustes). `ap:off` lo
-        apaga, `ap:cerrar` solo cierra el menu (conserva
-        el temporizador) y `ap:noop` es el encabezado inerte. El temporizador
-        vive en la sesion: un reinicio lo borra.
+        temporizador de la sesion — a los N minutos cierra TODO en silencio
+        (mpv, bot y launcher; el chat queda sin aviso y la card intacta,
+        se re-renderiza al arrancar de nuevo) y vuelve el teclado de control
+        (el estado queda visible como "💤 Se apagará en N min" dentro de
+        ⚙️ Ajustes). `ap:off` lo apaga, `ap:cerrar` solo cierra el menu
+        (conserva el temporizador) y `ap:noop` es el encabezado inerte. El
+        temporizador vive en la sesion: un reinicio lo borra.
         """
         query = update.callback_query
         user_id = query.from_user.id if query.from_user else None
@@ -3702,10 +3673,10 @@ class YTRemoteBot:
                     return
                 self._programar_apagado(minutos)
                 # Vuelve el teclado de control (el estado se ve en Ajustes
-                # como "💤 Para en N min") y confirma cuanto falta en el toast.
+                # como "💤 Se apagará en N min") y confirma cuanto falta en el toast.
                 await self._swap_card_keyboard(self._control_keyboard())
                 try:
-                    await query.answer(f"⏰ La musica para en {minutos} min.")
+                    await query.answer(f"⏰ Se apagará en {minutos} min.")
                 except Exception:
                     pass
             finally:
@@ -3785,26 +3756,39 @@ class YTRemoteBot:
         await self._apagar_por_temporizador()
 
     async def _apagar_por_temporizador(self) -> None:
-        """Disparo del temporizador: para la musica igual que ⏹ (rebobina a
-        0:00 y queda en pausa, conservando cola, historial y navegacion) y
-        avisa al chat de la tarjeta."""
+        """Disparo del temporizador: cierra todo en silencio.
+
+        Guarda el instante del tema para que al volver a abrir y dar ▶ siga
+        donde quedo, flushea el estado a disco, cierra el mpv y SALE del
+        proceso sin avisar en el chat (ni de dia ni de noche) y sin tocar la
+        card: queda como esta y se re-renderiza sola cuando el bot vuelva a
+        arrancar. Antes de irse deja la marca salir_total.flag para que el
+        launcher, al detectar la salida del bot, cierre la app completa
+        (ventana + tray): cero procesos abiertos.
+        """
         self._sleep_task = None
         self._sleep_minutes = None
         self._sleep_deadline = None
-        # Como ⏹: guarda el instante antes de rebobinar por si luego se
-        # quiere retomar con /continuar.
+        # El instante se guarda ANTES de cerrar el mpv (necesita responder
+        # time-pos); al volver a abrir, el ▶ lo retoma y lo consume.
         await self._guardar_posicion_actual()
-        if self.player.is_running:
-            await self.player.rewind()
-        self._queue_advance_needed = False
-        self._paused = True
-        self._persist_dirty()
-        await self._render_card(self._track_status_text())
-        if self._card_chat_id is not None:
-            await self._enviar_al_chat(
-                self._card_chat_id,
-                "⏹️ El temporizador llego: buena noche 🌙 (▶ para reanudar).",
-            )
+        # El cierre es os._exit: atexit no corre, asi que el flush y el
+        # cierre de mpv van EXPLICITOS aca.
+        self._persist_flush()
+        await self.player.quit()
+        try:
+            import persistence as _persistence
+
+            marca = _persistence.STATE_PATH.parent / "salir_total.flag"
+            marca.write_text("temporizador", encoding="utf-8")
+        except Exception as exc:  # noqa: BLE001 - marque donde se pueda
+            logger.warning("No se pudo dejar la marca de salida total: %s", exc)
+        self._salir_del_proceso()
+
+    def _salir_del_proceso(self) -> None:
+        """Sale del proceso del bot sin limpiezas de atexit: ya se hace a
+        mano justo antes (flush del estado y cierre del mpv)."""
+        os._exit(0)
 
     async def _open_queue_list(
         self, query, user_id: int | None, chat_id: int

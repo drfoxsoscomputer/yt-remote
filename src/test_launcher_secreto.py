@@ -153,6 +153,40 @@ def test_sin_sesion_el_token_sigue_siendo_obligatorio():
     assert "token" in r.get_json().get("error", "").lower(), r.get_json()
 
 
+def test_marca_del_temporizador_cierra_toda_la_app():
+    """Si el bot salio dejando salir_total.flag (temporizador),
+    el vigia del launcher borra la marca y dispara el cierre total de la app.
+    Sin marca: la salida es una detencion normal y NO se cierra nada."""
+
+    def _escenario(nombre_marca: str, dejar: bool):
+        import tempfile
+
+        import bot_process
+
+        tmp = Path(tempfile.mkdtemp())
+        real_data_dir = bot_process.data_dir
+        bot_process.data_dir = lambda: tmp
+        cierre = []
+        bp = bot_process.BotProcess()
+        bp.on_cierre_total = lambda: cierre.append(True)
+        marca = tmp / "salir_total.flag"
+        if dejar:
+            marca.write_text("temporizador", encoding="utf-8")
+        try:
+            bp._chequear_salida_total()
+        finally:
+            bot_process.data_dir = real_data_dir
+        return cierre, marca
+
+    cierre, marca = _escenario("con_marca", dejar=True)
+    assert cierre == [True], "la marca dispara el cierre total"
+    assert not marca.exists(), "la marca se borra para la proxima vez"
+
+    cierre, marca = _escenario("sin_marca", dejar=False)
+    assert cierre == [], "sin marca el launcher queda abierto como siempre"
+    assert not marca.exists()
+
+
 def run():
     total = 0
     for nombre, fn in sorted(globals().items()):

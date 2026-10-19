@@ -57,7 +57,7 @@ def build_spec(project_root: Path) -> Path:
 block_cipher = None
 
 a = Analysis(
-    ['src/launcher.py'],
+    ['src/main_launcher.py'],
     pathex=[r'{project_root}', r'{src_dir}'],
     binaries=[],
     datas=[],

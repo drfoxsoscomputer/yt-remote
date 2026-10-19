@@ -606,7 +606,8 @@ class Player:
         await self.command("seek", str(int(delta)), "relative")
 
     async def seek_to(self, seconds: int) -> None:
-        """Salta a una posicion ABSOLUTA en segundos (retomar /continuar)."""
+        """Salta a una posicion ABSOLUTA en segundos (retomar el instante
+        guardado por el temporizador)."""
         await self.command("seek", str(int(seconds)), "absolute")
 
     async def get_time_pos(self) -> float | None:
@@ -626,6 +627,12 @@ class Player:
         await self.command("set", "volume", str(volume))
 
     async def quit(self) -> None:
-        if self.is_playing:
+        """Cierra el proceso mpv de verdad (se usa al salir de todo).
+
+        A diferencia de _quit (atexit), este manda el 'quit' por IPC para que
+        mpv muera prolijo. Va sin guard de is_playing: un mpv vivo pero en
+        pausa tambien tiene que cerrarse."""
+        if self._proc is not None and self._proc.poll() is None:
             await self.command("quit")
-            self._proc = None
+        self._track_active = False
+        self._proc = None

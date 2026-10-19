@@ -480,7 +480,12 @@ def main():
         )
         return
 
-    # 0.2) Arrancar Flask en hilo daemon
+    # 0.2) Apagado total: si el bot muere dejando la marca salir_total.flag
+    # (temporizador), el launcher cierra la APP completa
+    # (ventana + tray + su propio proceso): cero procesos abiertos.
+    bot_process.on_cierre_total = _apagar_todo
+
+    # 0.3) Arrancar Flask en hilo daemon
     global _flask_thread
     _flask_thread = threading.Thread(
         target=lambda: flask_app.run(

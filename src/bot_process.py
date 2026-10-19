@@ -83,6 +83,9 @@ class BotProcess:
         self.process: Optional[subprocess.Popen] = None
         self._lock = threading.Lock()
         self._last_error: str = ""
+        # El launcher lo apunta a su apagado total (_apagar_todo): se invoca
+        # si el bot muere dejando la marca salir_total.flag (temporizador).
+        self.on_cierre_total = None
 
     def last_error(self) -> str:
         """Ultimo motivo de fallo al iniciar el bot (para mostrarlo en la UI)."""
@@ -263,8 +266,30 @@ class BotProcess:
                 if self.process is proc:
                     self.process = None
             self._append_log(f"BOT SALIO (exit_code={exit_code})")
+            self._chequear_salida_total()
 
         threading.Thread(target=_watch, daemon=True).start()
+
+    def _chequear_salida_total(self) -> None:
+        """El bot salio: si dejo la marca salir_total.flag (temporizador de
+        temporizador), borra la marca y CIERRA la app completa via el callback
+        on_cierre_total (ventana + tray + launcher: cero procesos). Sin
+        marca es una detencion normal: el launcher queda abierto con el bot
+        parado, como siempre.
+        """
+        marca = data_dir() / "salir_total.flag"
+        try:
+            if not marca.is_file():
+                return
+            marca.unlink()
+        except Exception:
+            pass
+        callback = getattr(self, "on_cierre_total", None)
+        if callable(callback):
+            try:
+                callback()
+            except Exception as exc:  # noqa: BLE001
+                print(f"Error en cierre total: {exc}")
 
     def stop(self) -> bool:
         """Detiene el proceso del bot."""
