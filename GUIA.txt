@@ -188,14 +188,20 @@ Solo dj y admin:
   /buscar <artista> - <canción>  busca y reproduce de un artista
   /buscar <artista>              busca un artista (sin canción)
   /buscar <link>                 reproduce un link de YouTube directo
+  /continuar                     retoma donde se paró el ⏹ o el ⏻
+  /mezclar                       baraja la cola
 
 Solo admin:
   /reglas                            re-envía y fija (pin) el mensaje de reglas
+  /salud                             estado del bot: reproductor, versión y conexión
+  /actualizar                        renueva el extractor de YouTube (yt-dlp)
   (los roles se gestionan con el botón 👥 Usuarios de la tarjeta: la lista
    llega al chat privado del admin, se toca al usuario para alternar dj/user
    y ❌ aplica los cambios. En el grupo no aparece nada)
 
 Todos (user, dj, admin):
+  /radio                             lista de emisoras (elegir es de dj)
+  /letra                             letra de lo que está sonando
   (la lista se ve con el botón 📋 de la tarjeta: un mensaje aparte,
    paginado de 10 en 10, que cualquiera cierra con el botón ❌; solo dj o
    admin pueden elegir un tema tocándolo)

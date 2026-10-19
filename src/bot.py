@@ -20,6 +20,7 @@ from typing import Optional
 
 from telegram import (
     BotCommand,
+    BotCommandScopeAllChatAdministrators,
     InlineKeyboardButton,
     InlineKeyboardMarkup,
     Update,
@@ -141,6 +142,28 @@ _SEARCH_BATCH_CON_ARTISTA = SEARCH_BATCH_CON_ARTISTA
 _RADIO_BATCH = RADIO_BATCH
 _RADIO_PAGE_SIZE = RADIO_PAGE_SIZE
 _TOPE_LETRA = TOPE_LETRA
+
+# Menú de comandos ("/") por audiencia. Los solo-admin van en el scope
+# all_chat_administrators (solo los admins del grupo los ven); el resto en
+# el default. Telegram no tiene scope por rol del bot — el dj es un rol
+# nuestro, no un admin de Telegram — por eso los dj+ se ven para todos y
+# el bot los niega con educacion si no corres.
+# La cobertura la garantiza test_menu_cubre_todos_los_comandos.
+_COMANDOS_PUBLICOS = [
+    BotCommand("start", "Info del bot"),
+    BotCommand("buscar", "Buscar artista o link para reproducir (dj+)"),
+    BotCommand("play", "Buscar y reproducir (alias de /buscar) (dj+)"),
+    BotCommand("solicitar", "Pedir acceso de dj al admin"),
+    BotCommand("radio", "Elegir emisora o favoritas"),
+    BotCommand("letra", "Letra de lo que esta sonando"),
+    BotCommand("continuar", "Retomar donde quedo (dj+)"),
+    BotCommand("mezclar", "Barajar la cola (dj+)"),
+]
+_COMANDOS_ADMIN = [
+    BotCommand("reglas", "Re-envia y fija (pin) las reglas del grupo"),
+    BotCommand("salud", "Version y estado del bot"),
+    BotCommand("actualizar", "Actualizar el extractor de YouTube (yt-dlp)"),
+]
 
 
 class ActualizacionError(Exception):
@@ -594,13 +617,13 @@ class YTRemoteBot:
         # el mensaje de bienvenida apunta a ellas como referencia ↑.
         await self._ensure_pinned_rules(bot)
         # Menú de comandos: al escribir "/" Telegram muestra esta lista.
+        # Dos listas por audiencia: los solo-admin van en el scope que ven
+        # solo los admins del grupo; el resto en el default. Ningun comando
+        # se queda invisible (lo garantiza la prueba de cobertura).
         try:
+            await bot.set_my_commands(_COMANDOS_PUBLICOS)
             await bot.set_my_commands(
-                [
-                    BotCommand("start", "Info del bot"),
-                    BotCommand("buscar", "Buscar artista o link para reproducir (dj+)"),
-                    BotCommand("solicitar", "Pedir acceso de dj al admin"),
-                ]
+                _COMANDOS_ADMIN, scope=BotCommandScopeAllChatAdministrators()
             )
         except Exception as exc:  # noqa: BLE001 - no debe tumbar el arranque
             logger.warning("No se pudo registrar los comandos: %s", exc)
@@ -1097,41 +1120,27 @@ class YTRemoteBot:
             )
 
     async def cmd_salud(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-        """Admin: mpv, yt-dlp, red y disco en una pantalla.
+        """Admin: reproductor, version del extractor y estado en una pantalla.
 
-        Nada se consulta afuera: es lo que el propio proceso ve. La linea de
-        red es honesta a proposito — si este mensaje te llego, hay conexion;
-        un ping extra solo podria mentir.
+        Nada se consulta afuera: es lo que el propio proceso ve. La linea
+        de estado es honesta a proposito — si este mensaje te llego, hay
+        conexion; un ping extra solo podria mentir.
         """
-        import shutil
-
-        from persistence import STATE_PATH
-
-        lineas = ["🩺 Salud del sistema:"]
+        lineas = ["🩺 YT-Remote — estado:"]
 
         if self.player.is_running:
-            lineas.append("✅ mpv: corriendo")
+            lineas.append("✅ Reproductor: corriendo")
         else:
-            lineas.append("⚠️ mpv: apagado (arranca al reproducir)")
+            lineas.append("⚠️ Reproductor: apagado (arranca al reproducir)")
 
         try:
             import yt_dlp
 
-            lineas.append(f"✅ yt-dlp: {yt_dlp.version.__version__}")
+            lineas.append(f"✅ Version: {yt_dlp.version.__version__}")
         except Exception as exc:  # noqa: BLE001 - el detalle va al reporte
-            lineas.append(f"❌ yt-dlp: no se pudo leer ({exc})")
+            lineas.append(f"❌ Version: no se pudo leer ({exc})")
 
-        lineas.append("✅ red: conectado (si ves esto, responde)")
-
-        try:
-            libres = shutil.disk_usage(str(STATE_PATH.parent)).free / (1024 ** 3)
-        except Exception as exc:  # noqa: BLE001
-            lineas.append(f"❌ disco: no se pudo leer ({exc})")
-        else:
-            if libres < 2:
-                lineas.append(f"⚠️ disco: {libres:.1f} GB libres (poco espacio)")
-            else:
-                lineas.append(f"✅ disco: {libres:.0f} GB libres")
+        lineas.append("✅ Estado: conectado")
 
         await self._reply(update, "\n".join(lineas))
 

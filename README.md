@@ -206,6 +206,12 @@ desde la lista.
 | `/buscar <link>` | dj, admin | Reproduce un link de YouTube directo |
 | `/solicitar` | user | Solicitar acceso de dj al admin |
 | `/reglas` | admin | Re-envía y fija (pin) el mensaje de reglas del grupo |
+| `/continuar` | dj, admin | Retoma donde lo dejaron el ⏹ o el ⏻ |
+| `/mezclar` | dj, admin | Baraja la cola |
+| `/radio` | todos (elegir es de dj) | Abre el listado de emisoras y favoritas |
+| `/letra` | todos | Letra de lo que está sonando |
+| `/salud` | admin | Estado del bot: reproductor, versión del extractor y conexión |
+| `/actualizar` | admin | Renueva el extractor de YouTube (yt-dlp) |
 
 **Todos los roles** pueden tocar el botón 📋 (ver lista). Los demás
 botones de la tarjeta (▶ ⏮ ⏭ ⏹ 🔊) son solo para dj y admin; los botones

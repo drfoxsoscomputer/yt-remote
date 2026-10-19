@@ -378,7 +378,8 @@ async def test_player_seek_emite_comando_mpv():
 
 
 async def test_salud_diagnostico_admin():
-    """/salud junta mpv, yt-dlp, red y disco en UN mensaje; solo admin."""
+    """/salud entrega REPRODUCTOR, VERSION del extractor y ESTADO en UN
+    mensaje de 3 lineas; solo admin (el user ni ve el encabezado)."""
     b = make_bot()
     h = b._require("admin", b.cmd_salud)
 
@@ -388,16 +389,38 @@ async def test_salud_diagnostico_admin():
     assert any("denegado" in t for t, _ in upd_user.sent), upd_user.sent
     assert not any("🩺" in t for t, _ in upd_user.sent), "el user no ve nada"
 
-    # Admin: una sola pantalla con las 4 lineas del plan.
+    # Admin: una sola pantalla con encabezado + las 3 lineas.
     b.roles.set_role(1, "admin")
     upd_admin = FakeMessageUpdate("/salud", user_id=1)
     await h(upd_admin, SimpleNamespace(args=[]))
     assert len(upd_admin.sent) == 1, upd_admin.sent
     texto = upd_admin.sent[0][0]
-    assert texto.startswith("🩺 Salud del sistema:"), texto
-    assert "mpv:" in texto and "yt-dlp:" in texto, texto
-    assert "red:" in texto and "disco:" in texto, texto
-    assert texto.count("\n") == 4, texto  # encabezado + 4 lineas: una pantalla
+    assert texto.startswith("🩺 YT-Remote — estado:"), texto
+    assert "Reproductor:" in texto, texto
+    assert "Version:" in texto, texto
+    assert "Estado: conectado" in texto, texto
+    assert "disco" not in texto, texto
+    assert "si ves esto" not in texto, texto
+    assert texto.count("\n") == 3, texto  # encabezado + 3 lineas
+
+
+async def test_menu_cubre_todos_los_comandos():
+    """Todo nombre de CommandHandler de bot.py tiene que estar en
+    _COMANDOS_PUBLICOS o _COMANDOS_ADMIN: un comando nuevo sin registrar
+    en el menu queda invisible para siempre (el olvido que dejo a /salud
+    y cinco comandos mas afuera de la lista del "/")."""
+    import re as _re
+    from pathlib import Path as _Path
+
+    import bot as bot_mod
+
+    fuente = _Path(bot_mod.__file__).read_text(encoding="utf-8")
+    registrados = set(_re.findall(r'CommandHandler\(\s*"([a-z_]+)"', fuente))
+    menu = {c.command for c in bot_mod._COMANDOS_PUBLICOS}
+    menu |= {c.command for c in bot_mod._COMANDOS_ADMIN}
+    assert registrados, "el patron no agarro ningun CommandHandler: el test no prueba nada"
+    faltan = registrados - menu
+    assert not faltan, f"comandos sin menu: {sorted(faltan)}"
 
 
 async def test_sleep_menu_abre_y_programa():
