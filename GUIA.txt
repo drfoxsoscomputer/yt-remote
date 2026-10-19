@@ -139,9 +139,9 @@ Fila 1:
   ⏹  — detiene la reproducción
 
 Fila 2:
-  ➖🔊    — baja el volumen 10 puntos
+  ⬇️🔊    — baja el volumen 10 puntos
   🔊 70   — volumen actual
-  🔊➕    — sube el volumen 10 puntos
+  🔊⬆️    — sube el volumen 10 puntos
   📋     — muestra la lista de canciones
 
 Fila 3:

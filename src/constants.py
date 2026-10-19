@@ -46,7 +46,7 @@ LIST_PAGE_SIZE = 10
 # Historial (boton 🕘 del hub del 📋): entradas visibles por pagina. Mas
 # corto que la cola a proposito: cada fila lleva tres botones (repetir,
 # enlace y borrar) ademas del titulo completo.
-HISTORY_PAGE_SIZE = 5
+HISTORY_PAGE_SIZE = 10
 
 # Cuantas canciones GUARDADAS conserva el historial (filas unicas: si una
 # cancion vuelve a sonar se reubica arriba, no suma otra fila). 500 unicas

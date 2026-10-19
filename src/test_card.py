@@ -270,7 +270,7 @@ def test_control_keyboard_and_status():
     labels1 = [btn.text for btn in rows[0]]
     labels2 = [btn.text for btn in rows[1]]
     assert labels1 == ["⏮", "⏪", "⏸️", "⏩", "⏭", "⏹"], labels1
-    assert labels2 == ["➖🔊", "🔊 100", "🔊➕", "📋"], labels2
+    assert labels2 == ["⬇️🔊", "🔊 100", "🔊⬆️", "📋"], labels2
     # En pausa el botón central (indice 2) debe ser ▶️
     b._paused = True
     kb = b._control_keyboard()
@@ -3014,8 +3014,9 @@ async def test_list_select_out_of_range_keeps_open():
 
 async def test_list_hub_historial_view():
     """El 📋 es un hub de contexto: la cola gana un boton 🕘 Historial que
-    convierte el MISMO mensaje en el historial (🔄 con titulo completo
-    y 🗑 borrar) y 🔙 Cola vuelve a la cola."""
+    convierte el MISMO mensaje en el historial (una fila por cancion, un
+    solo boton de ancho completo que repite al tocarlo) y 🔙 Cola vuelve a
+    la cola."""
     from queue_manager import QueueItem
 
     b = make_bot()
@@ -3035,7 +3036,8 @@ async def test_list_hub_historial_view():
     markup = b._app.bot.edited[-1][3]["reply_markup"]
     assert "Historial" in texto, texto
     labels = [btn.text for fila in markup.inline_keyboard for btn in fila]
-    assert "🔄 1. Vieja Cancion" in labels, labels
+    assert "1. Vieja Cancion" in labels, labels
+    assert len(markup.inline_keyboard[0]) == 1, "titulo a ancho completo"
     assert "🔙 Cola" in labels, labels
 
     upd2 = FakeUpdate("lst:cola", user_id=77, chat_id=44)
@@ -3060,9 +3062,10 @@ async def test_list_historial_abre_directo_si_cola_vacia():
 
 async def test_list_historial_rep_link_del():
     """Acciones del historial: 🔄 repite (dj: resuelve stream y suena, la
-    lista se cierra) y 🗑 borra la entrada (dj) re-renderizando. El paso de
-    enlace ejercita el callback lst:link, que ya NO tiene boton en el
-    teclado (la fila es solo 🔄 + 🗑) pero sigue atendido para los
+    lista se cierra) y 🗑 borra la entrada (dj) re-renderizando. El test
+    ejercita los callbacks lst:rep, lst:link y lst:del, que YA NO tienen
+    boton en el teclado (la fila del titulo es un solo boton de ancho
+    completo y el borrar por fila se fue) pero siguen atendidos para los
     teclados viejos."""
     from queue_manager import QueueItem
 
@@ -3203,8 +3206,10 @@ async def test_autoadvance_prefetch_tambien_registra():
 
 
 async def test_list_historial_borrar_todo():
-    """🗑 Borrar todo: alerta para quien no es dj; para el dj vacia la base
-    y la vista vuelve a la cola (o se cierra si no hay nada)."""
+    """🗑 Borrar todo en DOS toques para el dj: el primero solo arma la
+    confirmacion (base intacta, teclado con alcance exacto + cancelar); el
+    segundo, con ✅, recien vacia la base. Quien no es dj: alerta inmediata.
+    Sin cola ni nada sonando, el mensaje de lista se cierra."""
     from queue_manager import QueueItem
 
     b = make_bot()
@@ -3216,19 +3221,82 @@ async def test_list_historial_borrar_todo():
     )
     assert b._list_view == "historial"
 
-    # El user no puede: alerta y la base queda igual.
+    # El user no puede ni armar: alerta y la base queda igual.
     upd = FakeUpdate("lst:delall", user_id=50, chat_id=44)
     await b._on_list_callback(upd, SimpleNamespace(args=[]))
     assert upd.answered_kwargs.get("show_alert") is True
     assert len(b._historial()) == 2, "el user no borra nada"
 
-    # El dj si: la base queda vacia y, sin cola ni nada sonando, se cierra
-    # el mensaje de lista.
+    # Primer toque del dj: ARMA la confirmacion pero no borra nada.
     upd = FakeUpdate("lst:delall", user_id=77, chat_id=44)
+    await b._on_list_callback(upd, SimpleNamespace(args=[]))
+    assert b._historial_borrar_armado is True
+    assert len(b._historial()) == 2, "el primer toque no borra"
+
+    # El teclado muestra el alcance EXACTO (2 canciones) + cancelar.
+    markup = b._app.bot.edited[-1][3]["reply_markup"]
+    labels = [btn.text for fila in markup.inline_keyboard for btn in fila]
+    assert "✅ Borrar TODO el historial (2 canciones)" in labels, labels
+    assert "❌ Cancelar" in labels, labels
+    assert "🗑 Borrar todo" not in labels, labels
+
+    # Segundo toque ✅: recien aqui se vacia la base y se cierra el mensaje.
+    upd = FakeUpdate("lst:delall_ok", user_id=77, chat_id=44)
     await b._on_list_callback(upd, SimpleNamespace(args=[]))
     assert b._historial() == [], b._historial()
     assert upd.answered_kwargs.get("text") == "Historial borrado ✓", upd.answered
     assert b._list_message_id is None, "sin nada que listar se cierra"
+
+
+async def test_list_historial_borrar_todo_cancela():
+    """El ❌ de la confirmacion vuelve a la vista normal: base intacta y
+    teclado con el 🗑 Borrar todo comun, sin fila de confirmacion."""
+    from queue_manager import QueueItem
+
+    b = make_bot()
+    b._state.marcar_historial(QueueItem(url="ua", title="Cancion A"))
+    await b._on_control(
+        FakeUpdate("ctl:lista", user_id=77, chat_id=44), SimpleNamespace(args=[]), "lista"
+    )
+    upd = FakeUpdate("lst:delall", user_id=77, chat_id=44)
+    await b._on_list_callback(upd, SimpleNamespace(args=[]))
+    assert b._historial_borrar_armado is True
+
+    upd = FakeUpdate("lst:delall_no", user_id=77, chat_id=44)
+    await b._on_list_callback(upd, SimpleNamespace(args=[]))
+    assert b._historial_borrar_armado is False
+    assert len(b._historial()) == 1, "cancelar no borra nada"
+    markup = b._app.bot.edited[-1][3]["reply_markup"]
+    labels = [btn.text for fila in markup.inline_keyboard for btn in fila]
+    assert "🗑 Borrar todo" in labels, labels
+    assert not any(l.startswith("✅ Borrar TODO") for l in labels), labels
+
+
+async def test_historial_pagina_de_10_y_titulo_ancho_completo():
+    """10 canciones por pagina: con 12 titulos hay 2 paginas; cada cancion
+    es UN solo boton de ancho completo (sin 🔄 en el texto y sin 🗑 al
+    lado), primero el mas reciente, y no queda ningun boton de borrar por
+    fila."""
+    from queue_manager import QueueItem
+
+    b = make_bot()
+    for i in range(12):
+        b._state.marcar_historial(QueueItem(url=f"u{i}", title=f"Cancion {i}"))
+    await b._on_control(
+        FakeUpdate("ctl:lista", user_id=77, chat_id=44), SimpleNamespace(args=[]), "lista"
+    )
+    assert b._list_view == "historial"
+    assert b._history_text(0) == "🕘 Historial (pag 1/2):", b._history_text(0)
+
+    markup = b._app.bot.sent[-1][2]["reply_markup"]
+    filas = markup.inline_keyboard
+    assert len(filas) == 13, filas  # 10 titulos + borrar todo + cola + nav
+    for fila in filas[:10]:
+        assert len(fila) == 1, "el titulo va a ancho completo"
+    assert not any(btn.text.startswith("🔄") for fila in filas for btn in fila)
+    assert not any(btn.text == "🗑" for fila in filas for btn in fila)
+    assert filas[0][0].text == "1. Cancion 11", filas[0]
+    assert filas[9][0].text == "10. Cancion 2", filas[9]
 
 
 async def test_playlist_expand_times_out():

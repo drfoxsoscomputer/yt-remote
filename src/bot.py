@@ -387,6 +387,7 @@ class YTRemoteBot:
         # mensaje mismo: un reinicio reabre en la cola.
         self._list_view: str = "cola"
         self._history_page: int = 0
+        self._historial_borrar_armado: bool = False
         # Apagado programado (boton ⏻): minutos restantes y tarea asyncio que
         # lo dispara. Vive SOLO en la sesion: un reinicio lo borra.
         self._sleep_minutes: int | None = None
@@ -3503,13 +3504,13 @@ class YTRemoteBot:
         return f"🕘 Historial (pag {page + 1}/{pages}):"
 
     def _history_keyboard(self) -> InlineKeyboardMarkup:
-        """Teclado del historial: una fila por cancion con repetir (🔄 con el
-        titulo COMPLETO, igual que la cola) y borrar (🗑); al pie [🗑 Borrar
-        todo] (dj), [🔙 Cola] y la navegacion habitual.
-
-        Sin boton de enlace: 🗑 y 🔄 se reparten el ancho y el titulo se lee
-        completo. El callback lst:link sigue atendido (sin boton) para que
-        un teclado viejo no quede muerto.
+        """Teclado del historial: una fila por cancion con UN SOLO boton de
+        ancho completo (numero + titulo COMPLETO; tocarlo la repite con el
+        callback lst:rep) — Telegram reparte el ancho de cada fila en partes
+        iguales, asi que sin boton de borrar al lado el titulo se lee entero.
+        Al pie [🗑 Borrar todo] (dj, con confirmacion en dos toques), [🔙
+        Cola] y la navegacion habitual. Los callbacks lst:del y lst:link
+        siguen atendidos (sin boton) para que un teclado viejo no quede muerto.
         """
         items = self._historial()
         pages = max(1, (len(items) + _HISTORY_PAGE_SIZE - 1) // _HISTORY_PAGE_SIZE)
@@ -3523,10 +3524,9 @@ class YTRemoteBot:
             rows.append(
                 [
                     InlineKeyboardButton(
-                        f"🔄 {idx + 1}. {str(it.get('title') or '').strip()}",
+                        f"{idx + 1}. {str(it.get('title') or '').strip()}",
                         callback_data=f"lst:rep:{idx}",
-                    ),
-                    InlineKeyboardButton("🗑", callback_data=f"lst:del:{idx}"),
+                    )
                 ]
             )
         if not rows:
@@ -3538,13 +3538,34 @@ class YTRemoteBot:
                 ]
             )
         else:
-            rows.append(
-                [
-                    InlineKeyboardButton(
-                        "🗑 Borrar todo", callback_data="lst:delall"
-                    )
-                ]
-            )
+            if self._historial_borrar_armado:
+                # Confirmacion en dos toques: el alcance EXACTO esta en el
+                # boton, asi que el dj ve cuantas canciones van a la basura.
+                n = len(items)
+                sufijo = "canciones" if n != 1 else "cancion"
+                rows.append(
+                    [
+                        InlineKeyboardButton(
+                            f"✅ Borrar TODO el historial ({n} {sufijo})",
+                            callback_data="lst:delall_ok",
+                        )
+                    ]
+                )
+                rows.append(
+                    [
+                        InlineKeyboardButton(
+                            "❌ Cancelar", callback_data="lst:delall_no"
+                        )
+                    ]
+                )
+            else:
+                rows.append(
+                    [
+                        InlineKeyboardButton(
+                            "🗑 Borrar todo", callback_data="lst:delall"
+                        )
+                    ]
+                )
         rows.append([InlineKeyboardButton("🔙 Cola", callback_data="lst:cola")])
 
         prev = (
@@ -3721,6 +3742,7 @@ class YTRemoteBot:
         """
         self._list_view = "cola"
         self._history_page = 0
+        self._historial_borrar_armado = False
         text = self._queue_list_text()
         if text is None and self._historial():
             text = self._history_text()
@@ -3797,7 +3819,9 @@ class YTRemoteBot:
           cola y la reproduce de inmediato; la lista se borra al salir.
         - `lst:rep:N` (dj) repite la cancion N del historial; `lst:link:N`
           (cualquiera) manda su enlace al chat; `lst:del:N` (dj) la borra;
-          `lst:delall` (dj) borra TODA la lista del historial.
+          `lst:delall` (dj) arma la confirmacion, `lst:delall_ok` (dj,
+          segundo toque) borra TODA la lista del historial y `lst:delall_no`
+          cancela.
         - `lst:noop`: placeholder inerte, se responde mudo.
 
         Cada callback se responde UNA sola vez (un answer por query).
@@ -3817,11 +3841,13 @@ class YTRemoteBot:
                 return
             self._list_view = "historial"
             self._history_page = 0
+            self._historial_borrar_armado = False
             await self._edit_list_message()
             await self._list_answer(query)
             return
 
         if action == "cola":
+            self._historial_borrar_armado = False
             self._list_view = "cola"
             await self._edit_list_message()
             await self._list_answer(query)
@@ -3837,12 +3863,23 @@ class YTRemoteBot:
             return
 
         if action == "close":
+            self._historial_borrar_armado = False
             await self._list_answer(query)
             await self._close_list_message()
             return
 
         if action == "delall":
-            await self._historial_borrar_todo(query, user_id)
+            await self._historial_borrar_confirmar(query, user_id)
+            return
+
+        if action == "delall_ok":
+            await self._historial_borrar_ejecutar(query, user_id)
+            return
+
+        if action == "delall_no":
+            self._historial_borrar_armado = False
+            await self._edit_list_message()
+            await self._list_answer(query)
             return
 
         if action.startswith(("rep:", "link:", "del:")):
@@ -3949,18 +3986,33 @@ class YTRemoteBot:
             finally:
                 self._from_card = False
 
-    async def _historial_borrar_todo(self, query, user_id: int | None) -> None:
-        """🗑 Borrar TODA la lista del historial (solo dj).
-
-        Despues de vaciar, la vista del historial quedo sin nada: si hay
-        cola (o un tema sonando) se vuelve a ella, y si no hay nada se
-        cierra el mensaje de lista.
-        """
+    async def _historial_borrar_confirmar(self, query, user_id: int | None) -> None:
+        """Primer toque de 🗑 Borrar todo (solo dj): NO borra nada. Arma la
+        confirmacion y re-renderiza el teclado con [✅ Borrar TODO el
+        historial (N canciones)] + [❌ Cancelar]; el alcance exacto queda
+        escrito en el boton para que el dj decida bien informado."""
         if user_id is None or not self.roles.has_role(user_id, "dj"):
             await self._list_answer(
                 query, "Solo el admin o un dj pueden hacer eso.", show_alert=True
             )
             return
+        self._historial_borrar_armado = True
+        await self._edit_list_message()
+        await self._list_answer(query)
+
+    async def _historial_borrar_ejecutar(self, query, user_id: int | None) -> None:
+        """Segundo toque (✅) de la confirmacion (solo dj): RECIEN aqui se
+        vacia TODO el historial, porque borrar todo es irreversible.
+
+        Despues de vaciar, la vista del historial quedo sin nada: si hay
+        cola (o un tema sonando) se vuelve a ella, y si no hay nada se
+        cierra el mensaje de lista."""
+        if user_id is None or not self.roles.has_role(user_id, "dj"):
+            await self._list_answer(
+                query, "Solo el admin o un dj pueden hacer eso.", show_alert=True
+            )
+            return
+        self._historial_borrar_armado = False
         self._state.vaciar_historial()
         if self._queue_list_text() is not None:
             self._list_view = "cola"
