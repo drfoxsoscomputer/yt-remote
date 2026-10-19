@@ -36,7 +36,7 @@ logger = logging.getLogger(__name__)
 # "Calidad" de la tarjeta; `bot.py` lo reexporta para no romper sus imports.
 QUALITY_LEVELS = (144, 240, 360, 480, 720, 1080)
 
-# Presets del apagado programado (boton ⏻): minutos fijos, sin campo libre
+# Presets del apagado programado (opcion 💤 de Ajustes): minutos fijos, sin campo libre
 # que en el cel sea tedioso de escribir.
 SLEEP_PRESETS = (15, 30, 45, 60)
 
@@ -92,9 +92,8 @@ class CardManager:
 
         Fila 1: ⏮ anterior | ⏪ atras | ▶/⏸ alternar | ⏩ adelante | ⏭ siguiente | ⏹ detener
         Fila 2: ⬇️🔊 | <volumen actual> | 🔊⬆️ | 📋 lista
-        Fila 3: ⚙️ Calidad: Np | 👥 Usuarios | ⏻ apagado programado
-        (calidad y usuarios solo admin; ⏻ es de dj y se marca ⏰ mientras
-        haya temporizador armado)
+        Fila 3: ⚙️ Ajustes (menu con apagado programado, calidad y usuarios,
+        una opcion por fila y filtrada por rol)
         """
         play_pause = "▶️" if self._app._paused else "⏸️"
         keyboard = [
@@ -113,18 +112,44 @@ class CardManager:
                 InlineKeyboardButton("📋", callback_data="ctl:lista"),
             ],
             [
-                InlineKeyboardButton(
-                    f"⚙️ Calidad: {(self._app._max_height or 1080)}p",
-                    callback_data="ctl:calidad",
-                ),
-                InlineKeyboardButton("👥 Usuarios", callback_data="ctl:usuarios"),
-                InlineKeyboardButton(
-                    "⏻⏰" if self._app._sleep_minutes else "⏻",
-                    callback_data="ctl:apagar",
-                ),
+                InlineKeyboardButton("⚙️ Ajustes", callback_data="ctl:ajustes"),
             ],
         ]
         return InlineKeyboardMarkup(keyboard)
+
+    def ajustes_keyboard(self, es_dj: bool, es_admin: bool) -> InlineKeyboardMarkup:
+        """Menu de Ajustes (boton ⚙️): una opcion por fila, solo las que el
+        rol puede abrir (el handler igual re-chequea; esto es para no ofrecer
+        botones que van a terminar en alerta).
+
+        Con temporizador armado, la opcion de apagado muestra cuanto falta
+        DE VERDAD (minutos restantes contra la hora limite, via
+        _sleep_restante_min del app), no el valor programado que quedaria
+        viejo.
+        """
+        rows: list[list[InlineKeyboardButton]] = []
+        if es_dj:
+            restan = self._app._sleep_restante_min()
+            etiqueta = (
+                f"💤 Para en {restan} min" if restan else "💤 Apagado programado"
+            )
+            rows.append(
+                [InlineKeyboardButton(etiqueta, callback_data="ctl:apagar")]
+            )
+        if es_admin:
+            rows.append(
+                [
+                    InlineKeyboardButton(
+                        f"⚙️ Calidad: {(self._app._max_height or 1080)}p",
+                        callback_data="ctl:calidad",
+                    )
+                ]
+            )
+            rows.append(
+                [InlineKeyboardButton("👥 Usuarios", callback_data="ctl:usuarios")]
+            )
+        rows.append([InlineKeyboardButton("❌", callback_data="aj:cerrar")])
+        return InlineKeyboardMarkup(rows)
 
     def quality_keyboard(self) -> InlineKeyboardMarkup:
         """Grilla de calidades para el admin (el vigente se marca con ✓)."""
@@ -147,7 +172,7 @@ class CardManager:
         return InlineKeyboardMarkup(rows)
 
     def sleep_keyboard(self) -> InlineKeyboardMarkup:
-        """Menu del apagado programado (boton ⏻): presets fijos y apagador.
+        """Menu del apagado programado (opcion 💤 de ⚙️ Ajustes): presets fijos y apagador.
 
         Se abre SOLO cambiando el teclado, el mismo patron que la grilla de
         calidad: texto y miniatura de la card no se tocan. Con un
@@ -156,10 +181,13 @@ class CardManager:
         """
         rows: list[list[InlineKeyboardButton]] = []
         if self._app._sleep_minutes:
+            # Minutos que FALTAN (hora limite), no el valor programado: un
+            # temporizador de 30 con 5 min restantes tiene que decir 5.
+            restan = self._app._sleep_restante_min() or self._app._sleep_minutes
             rows.append(
                 [
                     InlineKeyboardButton(
-                        f"⏰ Para en {self._app._sleep_minutes} min",
+                        f"⏰ Para en {restan} min",
                         callback_data="ap:noop",
                     )
                 ]

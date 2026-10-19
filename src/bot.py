@@ -411,12 +411,15 @@ class YTRemoteBot:
         self._list_view: str = "cola"
         self._history_page: int = 0
         self._historial_borrar_armado: bool = False
-        # Apagado programado (boton ⏻): minutos restantes y tarea asyncio que
+        # Apagado programado (opcion 💤 de Ajustes): minutos restantes y tarea asyncio que
         # lo dispara. Vive SOLO en la sesion: un reinicio lo borra.
         self._sleep_minutes: int | None = None
         self._sleep_task: asyncio.Task | None = None
+        # Hora limite del apagado programado (monotonic): de aca sale el
+        # "Para en N min" con los minutos que FALTAN de verdad.
+        self._sleep_deadline: float | None = None
         # Ultimo stop guardado para /continuar: {"item": item.to_dict(),
-        # "pos": segundos}. Lo escribe cmd_stop (y el ⏻ del temporizador)
+        # "pos": segundos}. Lo escribe cmd_stop (y el 💤 del temporizador)
         # antes de rebobinar; se persiste con el estado comun.
         self._continuar: dict | None = None
         # /radio: la vista abierta (destacadas/buscada/favoritas) vive SOLO
@@ -1639,6 +1642,13 @@ class YTRemoteBot:
     def _sleep_keyboard(self) -> InlineKeyboardMarkup:
         return self.card.sleep_keyboard()
 
+    def _ajustes_keyboard(self, user_id: int | None) -> InlineKeyboardMarkup:
+        """Menu de Ajustes filtrado por rol del que toco el boton."""
+        return self.card.ajustes_keyboard(
+            es_dj=user_id is not None and self.roles.has_role(user_id, "dj"),
+            es_admin=user_id is not None and self.roles.has_role(user_id, "admin"),
+        )
+
     async def _render_card(self, text: str, chat_id=None, item=None) -> None:
         await self.card.render_card(text, chat_id, item)
 
@@ -2408,6 +2418,10 @@ class YTRemoteBot:
             # Menu del apagado programado (ap:N / ap:off / ap:cerrar / ap:noop).
             await self._on_sleep_callback(update, context)
             return
+        if query.data and query.data.startswith("aj:"):
+            # Menu de Ajustes de la tarjeta (por ahora solo aj:cerrar).
+            await self._on_ajustes_callback(update, context)
+            return
         if query.data and query.data.startswith("lst:"):
             # Botones del mensaje de la lista (temas, paginacion, cerrar).
             await self._on_list_callback(update, context)
@@ -2714,7 +2728,7 @@ class YTRemoteBot:
 
         CONTROL_ACTIONS = {
             "pp", "prev", "next", "stop", "vol-10", "vol+10", "vol-info",
-            "seek-10", "seek+10", "apagar",
+            "seek-10", "seek+10", "apagar", "ajustes",
         }
         if action in CONTROL_ACTIONS and user_id is not None and not self.roles.has_role(user_id, "dj"):
             await query.answer("No tiene permiso para eso.", show_alert=True)
@@ -2802,6 +2816,14 @@ class YTRemoteBot:
                     # (mismo patron que el selector de calidad); el estado
                     # de la tarjeta (titulo/pausa) no cambia.
                     await self._swap_card_keyboard(self._sleep_keyboard())
+                    reflect_status = False
+                elif action == "ajustes":
+                    # Menu de Ajustes: solo cambia el teclado, con una
+                    # opcion por fila y solo las que el rol puede abrir
+                    # (dj ve el apagado; admin suma calidad y usuarios).
+                    await self._swap_card_keyboard(
+                        self._ajustes_keyboard(user_id)
+                    )
                     reflect_status = False
                 else:
                     return
@@ -3277,7 +3299,7 @@ class YTRemoteBot:
         await self._reply(update, "⏹️ Detenido. Usa ▶ para reanudar desde el inicio.")
 
     async def _guardar_posicion_actual(self) -> None:
-        """Guarda el instante de la cancion actual antes de parar (⏹ / ⏻).
+        """Guarda el instante de la cancion actual antes de parar (⏹ / 💤).
 
         Es lo que /continuar usa para retomar ahi en vez de volver a 0:00.
         Sin mpv corriendo o sin tiempo consultable no hay nada nuevo que
@@ -3293,7 +3315,7 @@ class YTRemoteBot:
     async def cmd_continuar(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         """Dj: retoma la ultima cancion GUARDADA en la posicion donde se paro.
 
-        cmd_stop (⏹ y el ⏻ del temporizador) guarda el instante antes de
+        cmd_stop (⏹ y el 💤 del temporizador) guarda el instante antes de
         rebobinar; este comando retoma ahi en vez de volver a 0:00. Solo
         aplica si el guardado sigue siendo el tema actual: si se eligio otro
         tema, se descarta (los temas viejos viven en el historial del hub).
@@ -3616,8 +3638,9 @@ class YTRemoteBot:
 
         Dj, igual que el resto de los controles: `ap:N` (re)programa el
         temporizador de la sesion — a los N minutos para la reproduccion como
-        ⏹ y avisa al chat — y vuelve el teclado de control con el ⏻ marcado
-        (⏻⏰). `ap:off` lo apaga, `ap:cerrar` solo cierra el menu (conserva
+        ⏹ y avisa al chat — y vuelve el teclado de control (el estado queda
+        visible como "💤 Para en N min" dentro de ⚙️ Ajustes). `ap:off` lo
+        apaga, `ap:cerrar` solo cierra el menu (conserva
         el temporizador) y `ap:noop` es el encabezado inerte. El temporizador
         vive en la sesion: un reinicio lo borra.
         """
@@ -3659,7 +3682,7 @@ class YTRemoteBot:
                     self._cancelar_apagado()
                     await self._swap_card_keyboard(self._control_keyboard())
                     try:
-                        await query.answer("Temporizador apagado ⏻")
+                        await query.answer("Temporizador apagado 💤")
                     except Exception:
                         pass
                     return
@@ -3678,8 +3701,8 @@ class YTRemoteBot:
                         pass
                     return
                 self._programar_apagado(minutos)
-                # Vuelve el teclado de control con el ⏻ ya marcado (⏻⏰) y
-                # confirma cuanto falta en el toast.
+                # Vuelve el teclado de control (el estado se ve en Ajustes
+                # como "💤 Para en N min") y confirma cuanto falta en el toast.
                 await self._swap_card_keyboard(self._control_keyboard())
                 try:
                     await query.answer(f"⏰ La musica para en {minutos} min.")
@@ -3688,13 +3711,49 @@ class YTRemoteBot:
             finally:
                 self._from_card = False
 
-    # --- Apagado programado (boton ⏻) ------------------------------------
+    async def _on_ajustes_callback(
+        self, update: Update, context: ContextTypes.DEFAULT_TYPE
+    ) -> None:
+        """Menu de Ajustes de la tarjeta (callback `aj:*`).
+
+        Por ahora solo `aj:cerrar`: vuelve al teclado de control. Las
+        opciones internas reusan los callbacks que ya existen (ctl:apagar,
+        ctl:calidad, ctl:usuarios), cada uno con su chequeo de rol. Se
+        serializa con el MISMO `_control_lock` que el resto de los botones.
+        """
+        query = update.callback_query
+        if self._control_lock.locked():
+            try:
+                await query.answer("⏳ Un momento, primero termina...")
+            except Exception:
+                pass
+            return
+
+        async with self._control_lock:
+            self._from_card = True
+            try:
+                accion = (query.data or "").split(":", 1)[1]
+                self._card_chat_id = update.effective_chat.id
+                self._card_message_id = query.message.message_id
+
+                if accion == "cerrar":
+                    try:
+                        await query.answer()
+                    except Exception:
+                        pass
+                    await self._swap_card_keyboard(self._control_keyboard())
+                    return
+            finally:
+                self._from_card = False
+
+    # --- Apagado programado (opcion 💤 de Ajustes) ------------------------
 
     def _programar_apagado(self, minutos: int) -> None:
         """(Re)programa el apagado de la sesion: a los `minutos` para la
         reproduccion. Reprogramar cancela el temporizador anterior."""
         self._cancelar_apagado()
         self._sleep_minutes = minutos
+        self._sleep_deadline = time.monotonic() + minutos * 60
         self._sleep_task = asyncio.create_task(self._dormir_tras(minutos))
 
     def _cancelar_apagado(self) -> None:
@@ -3702,8 +3761,22 @@ class YTRemoteBot:
         tarea = self._sleep_task
         self._sleep_task = None
         self._sleep_minutes = None
+        self._sleep_deadline = None
         if tarea is not None:
             tarea.cancel()
+
+    def _sleep_restante_min(self) -> int | None:
+        """Minutos que FALTAN para el apagado programado (None si no hay).
+
+        Se calcula contra la hora limite guardada al armar; el valor
+        programado es solo el respaldo si por algun motivo no hay deadline.
+        Nunca devuelve 0: a menos de un minuto todavia se muestra 1 (la
+        tarea dispara sola bien antes de que importe el redondeo)."""
+        if not self._sleep_minutes:
+            return None
+        if self._sleep_deadline is None:
+            return self._sleep_minutes
+        return max(1, round((self._sleep_deadline - time.monotonic()) / 60))
 
     async def _dormir_tras(self, minutos: int) -> None:
         """Espera `minutos` y dispara el apagado. Reprogramar o apagar
@@ -3717,6 +3790,7 @@ class YTRemoteBot:
         avisa al chat de la tarjeta."""
         self._sleep_task = None
         self._sleep_minutes = None
+        self._sleep_deadline = None
         # Como ⏹: guarda el instante antes de rebobinar por si luego se
         # quiere retomar con /continuar.
         await self._guardar_posicion_actual()

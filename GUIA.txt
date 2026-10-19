@@ -145,7 +145,12 @@ Fila 2:
   📋     — muestra la lista de canciones
 
 Fila 3:
-  ⚙️ Calidad: 1080p  — elige la resolución de los videos (solo admin)
+  ⚙️ Ajustes — abre el menú de configuración, una opción por fila:
+    💤 Apagado programado (dj; con temporizador arma­do muestra los
+       minutos que faltan, p. ej. "💤 Para en 12 min")
+    ⚙️ Calidad: 1080p — elige la resolución de los videos (solo admin)
+    👥 Usuarios — gestión de roles (solo admin)
+    ❌ — vuelve a los controles
 
 La tarjeta queda siempre como el último mensaje del chat: cuando usted
 escribe un comando o un mensaje, la tarjeta se desvanece y reaparece
@@ -154,7 +159,7 @@ abajo, al final de la conversación.
 
 CALIDAD DE VIDEO
 ----------------
-El botón ⚙️ Calidad de la tarjeta muestra la resolución actual (por
+En ⚙️ Ajustes, el botón ⚙️ Calidad muestra la resolución actual (por
 defecto 1080p). Todos lo ven, pero solo un admin puede tocarlo: abre
 una lista de niveles (144, 240, 360, 480, 720, 1080) y basta tocar
 uno para aplicarlo de inmediato: la canción recarga con la nueva
@@ -188,14 +193,14 @@ Solo dj y admin:
   /buscar <artista> - <canción>  busca y reproduce de un artista
   /buscar <artista>              busca un artista (sin canción)
   /buscar <link>                 reproduce un link de YouTube directo
-  /continuar                     retoma donde se paró el ⏹ o el ⏻
+  /continuar                     retoma donde se paró el ⏹ o el 💤
   /mezclar                       baraja la cola
 
 Solo admin:
   /reglas                            re-envía y fija (pin) el mensaje de reglas
   /salud                             estado del bot: reproductor, versión y conexión
   /actualizar                        renueva el extractor de YouTube (yt-dlp)
-  (los roles se gestionan con el botón 👥 Usuarios de la tarjeta: la lista
+  (los roles se gestionan con ⚙️ Ajustes → 👥 Usuarios de la tarjeta: la lista
    llega al chat privado del admin, se toca al usuario para alternar dj/user
    y ❌ aplica los cambios. En el grupo no aparece nada)
 
@@ -212,13 +217,13 @@ admin que le dé acceso; al admin le llega el aviso por privado.
 
 ROLES Y PERMISOS
 ----------------
-  admin  — puede hacer todo + gestionar usuarios (👥) + cambiar la calidad (⚙️)
+  admin  — puede hacer todo + gestionar usuarios + cambiar la calidad (⚙️ Ajustes)
   dj     — buscar, controlar música (tarjeta y comandos)
   user   — solo puede ver la lista con el botón 📋 (sin elegir temas) y pedir
            el acceso con /solicitar
 
 Por defecto solo el dueño es admin. Para darle acceso a otros, abra la
-lista con el botón 👥 Usuarios de la tarjeta y toque al usuario en su
+lista con ⚙️ Ajustes → 👥 Usuarios de la tarjeta y toque al usuario en su
 chat privado.
 
 EXPULSIÓN AUTOMÁTICA DE INVITADOS

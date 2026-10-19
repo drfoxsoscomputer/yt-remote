@@ -156,7 +156,7 @@ Cuando suena algo aparece una tarjeta con botones:
 | ⏹ | Detiene todo |
 | ⬇️🔊 / 🔊⬆️ | Bajar o subir volumen 10 puntos |
 | 📋 | Ver la lista |
-| ⚙️ Calidad: N | Elegir la resolución de los videos (solo admin) |
+| ⚙️ Ajustes | Abre el menú de configuración: 💤 apagado programado (dj), ⚙️ Calidad y 👥 Usuarios (solo admin), una opción por fila |
 
 La radio pasa automáticamente a la siguiente canción del mismo artista cuando
 termina. Use `/buscar` con otro nombre para cambiar de cantante.
@@ -181,7 +181,7 @@ y prometer "lo más parecido" sería mentir.
 
 ## Calidad de video
 
-El botón `⚙️ Calidad` de la tarjeta muestra la resolución actual (por
+En ⚙️ Ajustes, el botón `⚙️ Calidad` muestra la resolución actual (por
 defecto **1080p**). Todos lo ven, pero solo un **admin** puede tocarlo: abre
 una lista de niveles (144, 240, 360, 480, 720, 1080) y basta tocar uno para
 aplicarlo de inmediato: la canción recarga con la nueva resolución.
@@ -190,7 +190,7 @@ La calidad es un **tope máximo**: si un video no tiene la resolución elegida,
 usa la mayor que no la supere (1080 es el máximo soportado). El cambio queda
 **guardado** en la PC (estado del bot) y sobrevive a reinicios.
 
-El botón `👥 Usuarios` de la tarjeta abre la gestión de roles. Todos lo ven,
+En ⚙️ Ajustes, el botón `👥 Usuarios` abre la gestión de roles. Todos lo ven,
 pero solo un **admin** puede tocarlo: la lista de usuarios llega a su **chat
 privado** (en el grupo no aparece nada). Tocar un usuario alterna su rol entre
 `user` y `dj` (se ve en vivo en la botonera); el botón `❌` aplica todos los
@@ -206,7 +206,7 @@ desde la lista.
 | `/buscar <link>` | dj, admin | Reproduce un link de YouTube directo |
 | `/solicitar` | user | Solicitar acceso de dj al admin |
 | `/reglas` | admin | Re-envía y fija (pin) el mensaje de reglas del grupo |
-| `/continuar` | dj, admin | Retoma donde lo dejaron el ⏹ o el ⏻ |
+| `/continuar` | dj, admin | Retoma donde lo dejaron el ⏹ o el 💤 |
 | `/mezclar` | dj, admin | Baraja la cola |
 | `/radio` | todos (elegir es de dj) | Abre el listado de emisoras y favoritas |
 | `/letra` | todos | Letra de lo que está sonando |
@@ -214,8 +214,9 @@ desde la lista.
 | `/actualizar` | admin | Renueva el extractor de YouTube (yt-dlp) |
 
 **Todos los roles** pueden tocar el botón 📋 (ver lista). Los demás
-botones de la tarjeta (▶ ⏮ ⏭ ⏹ 🔊) son solo para dj y admin; los botones
-⚙️ Calidad y 👥 Usuarios son exclusivos de **admin**.
+botones de la tarjeta (▶ ⏮ ⏭ ⏹ 🔊) son solo para dj y admin; ⚙️ Ajustes
+abre el menú de configuración: 💤 apagado programado para **dj** y
+⚙️ Calidad con 👥 Usuarios exclusivos de **admin**.
 
 ## Roles
 
