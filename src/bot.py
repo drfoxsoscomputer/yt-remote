@@ -104,6 +104,9 @@ _SEARCH_BATCH_CON_ARTISTA = _SEARCH_BATCH * 2
 # nombres para no cambiar las 40 referencias internas ni las pruebas.
 from constants import (  # noqa: E402
     EXPAND_TIMEOUT,
+    GITHUB_META_TIMEOUT,
+    GITHUB_RELEASE_JSON,
+    GITHUB_ZIP_TIMEOUT,
     HISTORY_PAGE_SIZE,
     LIST_PAGE_SIZE,
     MAX_PLAYLIST,
@@ -117,12 +120,15 @@ from constants import (  # noqa: E402
     QUICK_TRACKS,
     RADIO_BATCH,
     RADIO_PAGE_SIZE,
+    RELEASE_ZIP_PATRON,
     RESOLVE_TIMEOUT,
     SEARCH_BATCH,
     SEARCH_BATCH_CON_ARTISTA,
     SEARCH_PAGE_SIZE,
     SEARCH_TIMEOUT,
     TOPE_LETRA,
+    UPDATE_DIR,
+    VERSION,
 )
 
 _RESOLVE_TIMEOUT = RESOLVE_TIMEOUT
@@ -160,7 +166,7 @@ _COMANDOS_PUBLICOS = [
 _COMANDOS_ADMIN = [
     BotCommand("reglas", "Re-envia y fija (pin) las reglas del grupo"),
     BotCommand("salud", "Version y estado del bot"),
-    BotCommand("actualizar", "Actualizar el extractor de YouTube (yt-dlp)"),
+    BotCommand("actualizar", "Buscar y aplicar actualizaciones del bot"),
 ]
 
 
@@ -245,7 +251,7 @@ def _instalar_wheel_ytdlp(wheel: bytes, destino: Path) -> None:
             ) from exc
         nuevo = Path(tmp) / "yt_dlp"
         if not (nuevo / "__init__.py").is_file() or not (nuevo / "version.py").is_file():
-            raise ActualizacionError("el wheel no trae una carpeta yt_dlp/ valida")
+            raise ActualizacionError("el archivo descargado no trae la pieza esperada")
         viejo = raiz / "yt_dlp.viejo"
         shutil.rmtree(viejo, ignore_errors=True)
         if destino.exists():
@@ -282,7 +288,7 @@ async def _pedir_meta_ytdlp() -> tuple[str, str, str]:
         None,
     )
     if not version or wheel is None:
-        raise ActualizacionError("PyPI no devolvio version o wheel de yt-dlp")
+        raise ActualizacionError("PyPI no devolvio version ni archivo instalable")
     return str(version), wheel["url"], wheel["digests"]["sha256"]
 
 
@@ -297,10 +303,207 @@ async def _bajar_wheel_ytdlp(url: str, sha256: str) -> bytes:
             r = await cli.get(url)
             r.raise_for_status()
     except Exception as exc:  # noqa: BLE001
-        raise ActualizacionError(f"no se pudo bajar el wheel ({exc})") from exc
+        raise ActualizacionError(f"no se pudo bajar el archivo nuevo ({exc})") from exc
     datos = r.content
     _verificar_sha256(datos, sha256)
     return datos
+
+
+# Carpeta de componentes internos DENTRO del ZIP portable: el prefijo que
+# /actualizar salta cuando lo instalado ya es tan nuevo como el release.
+_RUTA_COMPONENTES_EN_ZIP = "runtime/python/Lib/site-packages/yt_dlp"
+
+
+def _base_instalacion() -> Path:
+    """Carpeta de la instalacion: la RAIZ portable, padre de src\\.
+
+    En el deploy es dist\\ytremote (donde estan el exe y runtime\\); en
+    desarrollo es la raiz del repo. De ahi se derivan el disco del runtime
+    y donde queda el ZIP de la actualizacion.
+    """
+    return Path(__file__).resolve().parent.parent
+
+
+def _ruta_zip_instalacion(version_rel: str) -> Path:
+    """Donde queda el ZIP del release: data\\update\\ (misma letra que la
+    instalacion y FUERA de todo lo que se reemplaza)."""
+    return _base_instalacion() / "data" / UPDATE_DIR / f"yt-remote-{version_rel}-portable.zip"
+
+
+def _version_interna_instalada() -> str | None:
+    """Version de los componentes internos instalados, o None si el paquete
+    no existe/esta roto (se critica en el flujo, no aca)."""
+    try:
+        import yt_dlp.version
+
+        return yt_dlp.version.__version__
+    except Exception:  # noqa: BLE001 - sin pieza no hay version que comparar
+        return None
+
+
+def _leer_interna_del_zip(ruta_zip: Path, prefijo: str) -> str | None:
+    """Version de los componentes internos que TRAE el release.
+
+    Sirve para no retrocederlos con el reemplazo: None = el ZIP no la
+    expone y el flujo decide sin ella (cmd_actualizar manda
+    `interna_puesta` para ese caso).
+    """
+    import re
+    import zipfile
+
+    miembro = prefijo + _RUTA_COMPONENTES_EN_ZIP + "/version.py"
+    try:
+        with zipfile.ZipFile(ruta_zip) as zf:
+            with zf.open(miembro) as f:
+                texto = f.read().decode("utf-8", errors="replace")
+    except (OSError, KeyError):
+        return None
+    m = re.search(r'__version__\s*=\s*["\']([^"\']+)["\']', texto)
+    return m.group(1) if m else None
+
+
+def _validar_zip_paquete(ruta_zip: Path) -> str:
+    """Abre el ZIP y verifica que SEA el paquete de YT-Remote de verdad
+    (ytremote.exe, runtime\\python\\python.exe y src\\main.py). Devuelve el
+    prefijo de carpeta contenedora cuando el release empaqueta todo dentro
+    de una ("yt-remote-1.2.0/..."); "" si va sin ella. Un ZIP que no sea
+    el paquete NUNCA llega al ayudante: se extraeria basura sobre la
+    instalacion viva."""
+    import zipfile
+
+    import updater
+
+    try:
+        with zipfile.ZipFile(ruta_zip) as zf:
+            nombres = [n.replace("\\", "/") for n in zf.namelist()]
+    except zipfile.BadZipFile as exc:
+        raise ActualizacionError(
+            f"el archivo bajado no es un ZIP valido ({exc})"
+        ) from exc
+    prefijo = updater.detectar_prefijo(nombres)
+    if not updater.es_paquete(nombres, prefijo):
+        raise ActualizacionError(
+            "el ZIP no es el paquete de YT-Remote (le faltan piezas clave)"
+        )
+    return prefijo
+
+
+async def _pedir_meta_release() -> tuple[str, str, int, str | None]:
+    """(version, url_del_zip, bytes_del_zip, sha256 publicado) del ULTIMO
+    release estable en GitHub.
+
+    La version sale del tag (v1.2.0 -> 1.2.0). El sha256 es el `digest`
+    del asset cuando GitHub lo publica; si no viene, la defensa es el
+    tamanio publicado + validar que el ZIP sea el paquete (nunca se
+    descomprime algo desconocido sobre la instalacion).
+    """
+    import httpx
+
+    try:
+        async with httpx.AsyncClient(
+            timeout=GITHUB_META_TIMEOUT, follow_redirects=True
+        ) as cli:
+            r = await cli.get(
+                GITHUB_RELEASE_JSON,
+                headers={
+                    "Accept": "application/vnd.github+json",
+                    "User-Agent": "yt-remote-updater",
+                },
+            )
+            r.raise_for_status()
+            datos = r.json()
+    except Exception as exc:  # noqa: BLE001 - el motivo honesto va al admin
+        raise ActualizacionError(f"GitHub no respondio ({exc})") from exc
+    return _parsear_release_json(datos)
+
+
+def _parsear_release_json(datos: object) -> tuple[str, str, int, str | None]:
+    """Del JSON de releases/latest: (version, url, bytes, sha256).
+
+    Funcion PURA, probada sin red. Rechaza releases sin tag legible, sin
+    assets, sin ZIP portable o con asset sin URL/tamanio: cada caso con
+    su motivo honesto para el admin.
+    """
+    import fnmatch
+
+    if not isinstance(datos, dict):
+        raise ActualizacionError("GitHub devolvio un release con formato raro")
+    tag = str(datos.get("tag_name") or "").strip()
+    version = tag.lstrip("vV")
+    if not version or _version_num(version) == (0,):
+        raise ActualizacionError(f"el tag {tag!r} no trae una version legible")
+    assets = datos.get("assets")
+    if not isinstance(assets, list) or not assets:
+        raise ActualizacionError(f"el release {version} no publico archivos")
+    asset = None
+    for pieza in assets:
+        if not isinstance(pieza, dict):
+            continue
+        if fnmatch.fnmatch(str(pieza.get("name", "")), RELEASE_ZIP_PATRON):
+            asset = pieza
+            break
+    if asset is None:
+        raise ActualizacionError(f"el release {version} no publico el ZIP portable")
+    url = str(asset.get("browser_download_url") or "")
+    size = int(asset.get("size") or 0)
+    if not url or size <= 0:
+        raise ActualizacionError(
+            "el ZIP del release esta incompleto (sin URL o sin tamanio)"
+        )
+    sha: str | None = None
+    digest = str(asset.get("digest") or "")
+    if digest.startswith("sha256:"):
+        sha = digest.split(":", 1)[1].strip().lower()
+    return version, url, size, sha
+
+
+def _verificar_sha256_archivo(ruta: Path, esperado: str) -> None:
+    """El ZIP recien bajado tiene que ser EXACTAMENTE el asset publicado."""
+    import hashlib
+
+    h = hashlib.sha256()
+    with ruta.open("rb") as f:
+        for bloque in iter(lambda: f.read(1 << 20), b""):
+            h.update(bloque)
+    if h.hexdigest() != esperado.lower():
+        raise ActualizacionError(
+            "el archivo bajado no coincide con el sha256 publicado"
+        )
+
+
+async def _bajar_zip_release(
+    url: str, size: int, sha256: str | None, ruta_destino: Path
+) -> tuple[Path, str]:
+    """Baja el ZIP del release al destino y lo valida TODO ahi antes de
+    confirmarlo: tamanio publicado, sha256 si GitHub lo expone y
+    estructura real del paquete. Va a un .parcial y se confirma con
+    rename: nunca queda un ZIP a medias con nombre de verdad.
+    """
+    import httpx
+
+    ruta_destino.parent.mkdir(parents=True, exist_ok=True)
+    parcial = ruta_destino.with_suffix(ruta_destino.suffix + ".parcial")
+    try:
+        async with httpx.AsyncClient(
+            timeout=GITHUB_ZIP_TIMEOUT, follow_redirects=True
+        ) as cli:
+            async with cli.stream("GET", url) as r:
+                r.raise_for_status()
+                with parcial.open("wb") as f:
+                    async for trozo in r.aiter_bytes():
+                        f.write(trozo)
+    except Exception as exc:  # noqa: BLE001
+        raise ActualizacionError(f"no se pudo bajar el archivo ({exc})") from exc
+    bajado = parcial.stat().st_size
+    if size > 0 and bajado != size:
+        raise ActualizacionError(
+            f"el archivo bajo incompleto ({bajado} de {size} bytes)"
+        )
+    if sha256:
+        _verificar_sha256_archivo(parcial, sha256)
+    prefijo = _validar_zip_paquete(parcial)
+    parcial.replace(ruta_destino)
+    return ruta_destino, prefijo
 
 
 def _radio_parsear(texto: str) -> tuple[str, str]:
@@ -1110,11 +1313,13 @@ class YTRemoteBot:
             )
 
     async def cmd_salud(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-        """Admin: reproductor, version del extractor y estado en una pantalla.
+        """Admin: reproductor, version de YT-Remote y estado en una pantalla.
 
         Nada se consulta afuera: es lo que el propio proceso ve. La linea
         de estado es honesta a proposito — si este mensaje te llego, hay
-        conexion; un ping extra solo podria mentir.
+        conexion; un ping extra solo podria mentir. La version es la de
+        YT-Remote (constants.VERSION), la misma del release de GitHub:
+        las piezas internas no son asunto del usuario.
         """
         lineas = ["🩺 YT-Remote — estado:"]
 
@@ -1123,40 +1328,129 @@ class YTRemoteBot:
         else:
             lineas.append("⚠️ Reproductor: apagado (arranca al reproducir)")
 
-        try:
-            import yt_dlp
-
-            lineas.append(f"✅ Version: {yt_dlp.version.__version__}")
-        except Exception as exc:  # noqa: BLE001 - el detalle va al reporte
-            lineas.append(f"❌ Version: no se pudo leer ({exc})")
+        lineas.append(f"✅ Version: {VERSION}")
 
         lineas.append("✅ Estado: conectado")
 
         await self._reply(update, "\n".join(lineas))
 
     async def cmd_actualizar(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-        """Admin: renueva el yt-dlp empaquetado (la carpeta yt_dlp/ que
-        importa search.py) con el ultimo wheel de PyPI.
+        """Admin: trae YT-Remote y sus componentes internos a la version
+        publicada mas nueva, en UNA pasada.
 
-        El portable no trae pip, asi que no hay `pip install`: se pide la
-        metadata de PyPI, se verifica el sha256 publicado y se reemplaza
-        el paquete con rollback. La version NUEVA la carga el proximo
-        reinicio del bot (el modulo ya importado sigue vivo en memoria);
-        por eso el aviso lo dice.
+        Revisa el ULTIMO release del repo en GitHub (la version del bot es
+        constants.VERSION) y los componentes internos; actualiza lo que
+        este atrasado. Los mensajes NUNCA nombran piezas internas (regla
+        del usuario): el admin solo ve YT-Remote, las versiones publicas y
+        el motivo honesto si algo fallo. La app no puede pisar su propio
+        exe: baja el ZIP, deja el ayudante corriendo (src/updater.py con el
+        runtime incluido), deja la marca salir_total.flag y se apaga; el
+        ayudante espera el cierre, cambia los archivos conservando la
+        carpeta data y abre YT-Remote otra vez.
         """
+        avisos: list[str] = []
+
+        # 1) Hay release nuevo de YT-Remote? (GitHub = la verdad publica)
+        release = None
         try:
-            actual, nueva = await self._actualizar_ytdlp()
+            release = await _pedir_meta_release()
         except ActualizacionError as exc:
-            await self._reply(update, f"⚠️ No se pudo actualizar yt-dlp: {exc}")
-            return
-        if nueva is None:
-            await self._reply(update, f"✅ yt-dlp ya está en la última versión ({actual}).")
-            return
-        await self._reply(
-            update,
-            f"✅ yt-dlp actualizado: {actual} → {nueva}.\n"
-            "Reinicia el bot para que cargue la nueva versión.",
+            avisos.append(f"No se pudo revisar la version de YT-Remote ({exc})")
+
+        # 2) Hay componentes internos nuevos? (regla del usuario: ni su
+        # nombre ni su existencia se ven en los mensajes del chat)
+        interna = None
+        try:
+            interna = await _pedir_meta_ytdlp()
+        except ActualizacionError as exc:
+            avisos.append(f"No se pudieron revisar los componentes internos ({exc})")
+        nueva_interna: tuple[str, str, str] | None = None
+        instalada_interna = _version_interna_instalada()
+        if (
+            interna is not None
+            and instalada_interna is not None
+            and _version_num(instalada_interna) < _version_num(interna[0])
+        ):
+            nueva_interna = interna
+
+        hay_app = release is not None and _version_num(VERSION) < _version_num(
+            release[0]
         )
+
+        if not hay_app and nueva_interna is None:
+            if avisos:
+                await self._reply(update, f"⚠️ {' '.join(avisos)}")
+                return
+            await self._reply(update, f"✅ YT-Remote {VERSION} ya está al día.")
+            return
+
+        # Se aplica la pieza interna PRIMERO: si sale bien queda mas nueva
+        # que la que el release trae dentro y el reemplazo la preserva (los
+        # saltos de _actualizar_aplicacion). Si falla, el aviso va honesto
+        # y el release se trae la suya.
+        interna_hecha: tuple[str, str] | None = None
+        if nueva_interna is not None:
+            try:
+                antes, despues = await self._actualizar_ytdlp()
+                interna_hecha = (antes, despues or nueva_interna[0])
+            except ActualizacionError as exc:
+                avisos.append(f"No se pudo actualizar los componentes internos ({exc})")
+
+        if hay_app:
+            if not self._ayudante_disponible():
+                lineas_dev = [f"🚀 YT-Remote {VERSION} → {release[0]} disponible."]
+                if interna_hecha is not None:
+                    lineas_dev.append(
+                        f"✅ Componentes internos: {interna_hecha[0]} → {interna_hecha[1]}."
+                    )
+                    lineas_dev.append(
+                        "Reinicia YT-Remote para tomar los componentes nuevos."
+                    )
+                lineas_dev.append(
+                    "Esta instalación no permite el cambio automático: se hace desde la carpeta portable de YT-Remote."
+                )
+                await self._reply(update, "\n".join(lineas_dev))
+                return
+            anuncio = [f"🚀 Actualizando YT-Remote {VERSION} → {release[0]}."]
+            if interna_hecha is not None:
+                anuncio.append(
+                    f"✅ Componentes internos: {interna_hecha[0]} → {interna_hecha[1]}."
+                )
+            anuncio.append("YT-Remote se cierra solo y vuelve al rato.")
+            try:
+                ruta_zip, saltos = await self._actualizar_aplicacion(
+                    release, interna_hecha is not None
+                )
+            except ActualizacionError as exc:
+                final = f"⚠️ No se pudo bajar la versión {release[0]}: {exc}"
+                if interna_hecha is not None:
+                    final += (
+                        "\n✅ Componentes internos: "
+                        f"{interna_hecha[0]} → {interna_hecha[1]}.\n"
+                        "Van a servir al reiniciar YT-Remote."
+                    )
+                await self._reply(update, final)
+                return
+            # El aviso es lo ULTIMO que se manda: despues se deja el
+            # ayudante corriendo, se marca la salida y el proceso se apaga.
+            await self._reply(update, "\n".join(anuncio))
+            self._lanzar_ayudante(ruta_zip, saltos)
+            await self._apagar_y_salir("actualizacion")
+            return
+
+        # Solo componentes internos (no hay YT-Remote nuevo).
+        if interna_hecha is None:
+            await self._reply(update, f"⚠️ {' '.join(avisos)}")
+            return
+        texto = (
+            f"✅ Componentes internos actualizados: {interna_hecha[0]} → {interna_hecha[1]}."
+        )
+        if self._ayudante_disponible():
+            await self._reply(update, texto + "\nYT-Remote se reinicia solo.")
+            self._lanzar_ayudante(None, [])
+            await self._apagar_y_salir("componentes")
+            return
+        await self._reply(update, texto + "\nReinicia YT-Remote para aplicarlos.")
 
     async def _actualizar_ytdlp(self) -> tuple[str, str | None]:
         """(version actual, version nueva o None si ya estaba al dia).
@@ -1171,7 +1465,7 @@ class YTRemoteBot:
             destino = Path(yt_dlp.__file__).resolve().parent
         except Exception as exc:  # noqa: BLE001
             raise ActualizacionError(
-                f"no se pudo leer el yt-dlp instalado ({exc})"
+                f"no se pudo leer la version instalada ({exc})"
             ) from exc
         nueva, url, sha256 = await _pedir_meta_ytdlp()
         if _version_num(actual) >= _version_num(nueva):
@@ -1182,6 +1476,85 @@ class YTRemoteBot:
         if leido is None:
             raise ActualizacionError("el paquete quedo sin version legible")
         return actual, leido
+
+    async def _actualizar_aplicacion(
+        self,
+        release: tuple[str, str, int, str | None],
+        interna_puesta: bool,
+    ) -> tuple[Path, list[str]]:
+        """Baja el ZIP del release, verificado pieza por pieza, listo para
+        el ayudante; devuelve (ruta_del_zip, prefijos_que_NO_se_extraen).
+
+        Los prefijos son para preservar los componentes internos: si lo
+        instalado ya es tan nuevo como lo maximo publicado, extraer el ZIP
+        encima los haria RETROCEDER. `interna_puesta` (el comando recien
+        los instalo) tambien pide preservarlos aunque el ZIP no exponga
+        version legible.
+        """
+        import updater
+
+        version_rel, url, size, sha = release
+        ruta_zip, prefijo = await _bajar_zip_release(
+            url, size, sha, _ruta_zip_instalacion(version_rel)
+        )
+        zip_interna = _leer_interna_del_zip(ruta_zip, prefijo)
+        saltos: list[str] = []
+        instalada = _version_interna_instalada()
+        if interna_puesta or (
+            zip_interna is not None
+            and instalada is not None
+            and _version_num(instalada) >= _version_num(zip_interna)
+        ):
+            saltos = [_RUTA_COMPONENTES_EN_ZIP]
+        return ruta_zip, saltos
+
+    def _ayudante_disponible(self) -> bool:
+        """El ayudante del reinicio existe SOLO en la instalacion portable:
+        runtime\\python\\python.exe y ytremote.exe viven al lado de src\\.
+        En desarrollo no hay exe que reabrir: los mensajes explicitan la
+        salida manual. Sin esta puerta, /actualizar en desarrollo podria
+        dejar la PC sin bot y sin forma de volverlo a abrir."""
+        base = _base_instalacion()
+        return (base / "runtime" / "python" / "python.exe").is_file() and (
+            base / "ytremote.exe"
+        ).is_file()
+
+    def _lanzar_ayudante(self, ruta_zip: str | None, saltos: list[str]) -> None:
+        """Deja el ayudante corriendo APARTE, sin consola y sin depender de
+        este proceso: espera a que TODO YT-Remote (bot + launcher) termine,
+        aplica los cambios y reabre. Por que aparte: el proceso que corre
+        no puede reemplazarse a si mismo."""
+        import subprocess
+
+        base = _base_instalacion()
+        args = [
+            "-X",
+            "utf8",
+            str(Path(__file__).resolve().parent / "updater.py"),
+            "--dest",
+            str(base),
+            "--pid",
+            str(os.getpid()),
+            "--ppid",
+            str(os.getppid()),
+            "--exe",
+            str(base / "ytremote.exe"),
+            "--log",
+            str(base / "data" / "actualizacion.log"),
+        ]
+        if ruta_zip:
+            args += ["--zip", str(ruta_zip)]
+        for salto in saltos:
+            args += ["--skip", salto]
+        subprocess.Popen(
+            [str(base / "runtime" / "python" / "python.exe")] + args,
+            cwd=str(base),
+            creationflags=subprocess.CREATE_NEW_PROCESS_GROUP
+            | subprocess.CREATE_NO_WINDOW,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            close_fds=True,
+        )
 
     async def cmd_radio(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         """Emisoras de internet (radio-browser): el 📻 del salon.
@@ -3736,28 +4109,35 @@ class YTRemoteBot:
         """Disparo del temporizador: cierra todo en silencio.
 
         Guarda el instante del tema para que al volver a abrir y dar ▶ siga
-        donde quedo, flushea el estado a disco, cierra el mpv y SALE del
-        proceso sin avisar en el chat (ni de dia ni de noche) y sin tocar la
-        card: queda como esta y se re-renderiza sola cuando el bot vuelva a
-        arrancar. Antes de irse deja la marca salir_total.flag para que el
-        launcher, al detectar la salida del bot, cierre la app completa
-        (ventana + tray): cero procesos abiertos.
+        donde quedo, y sale de la app completa con la marca
+        "temporizador" (ver _apagar_y_salir). Igual que en /actualizar: el
+        chat no recibe despedidas, la card se re-renderiza sola al volver.
+        """
+        await self._apagar_y_salir("temporizador")
+
+    async def _apagar_y_salir(self, marca: str) -> None:
+        """Cierra TODO en orden (instante guardado, estado a disco, mpv
+        apagado) y deja la marca salir_total.flag para que el launcher, al
+        ver salir al bot, cierre la app completa (ventana + tray): cero
+        procesos abiertos. La marca dice QUE motiva la salida
+        ("temporizador" o "actualizacion") para el log del ayudante.
+
+        El instante se guarda ANTES de cerrar el mpv (necesita responder
+        time-pos); al volver a abrir, el ▶ lo retoma y lo consume. El
+        cierre es os._exit: atexit no corre, asi que el flush y el cierre
+        de mpv van EXPLICITOS aca.
         """
         self._sleep_task = None
         self._sleep_minutes = None
         self._sleep_deadline = None
-        # El instante se guarda ANTES de cerrar el mpv (necesita responder
-        # time-pos); al volver a abrir, el ▶ lo retoma y lo consume.
         await self._guardar_posicion_actual()
-        # El cierre es os._exit: atexit no corre, asi que el flush y el
-        # cierre de mpv van EXPLICITOS aca.
         self._persist_flush()
         await self.player.quit()
         try:
             import persistence as _persistence
 
-            marca = _persistence.STATE_PATH.parent / "salir_total.flag"
-            marca.write_text("temporizador", encoding="utf-8")
+            salida = _persistence.STATE_PATH.parent / "salir_total.flag"
+            salida.write_text(marca, encoding="utf-8")
         except Exception as exc:  # noqa: BLE001 - marque donde se pueda
             logger.warning("No se pudo dejar la marca de salida total: %s", exc)
         self._salir_del_proceso()

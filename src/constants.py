@@ -11,6 +11,12 @@ telegram.
 internas y para las pruebas.
 """
 
+# Version de YT-Remote, la unica de cara al usuario. Es la misma que el
+# release de GitHub y la que muestra /salud; el test la comparara contra
+# release_rules.json (--release_rules_version_match) para que los dos
+# sitios no se desincronicen al publicar.
+VERSION = "1.1.4"
+
 # Timeout para cada resolucion de stream (yt-dlp en thread): si tarda mas,
 # se corta y se trata como fallo de resolucion. Sin esto, un yt-dlp colgado
 # congelaria el polling entero (los handlers de python-telegram-bot corren
@@ -63,6 +69,20 @@ MEMBERS_PAGE_SIZE = 10
 PYPI_YTDLP_JSON = "https://pypi.org/pypi/yt-dlp/json"
 PYPI_META_TIMEOUT = 30.0
 PYPI_WHEEL_TIMEOUT = 60.0
+
+# El release de YT-Remote en GitHub: /actualizar pregunta el ULTIMO release
+# estable y baja el ZIP portable publicado. Sin token: el repo es publico y
+# el limite de GitHub (60/hora por IP) sobra para un comando de admin.
+GITHUB_RELEASE_JSON = (
+    "https://api.github.com/repos/drfoxsoscomputer/yt-remote/releases/latest"
+)
+GITHUB_META_TIMEOUT = 30.0
+GITHUB_ZIP_TIMEOUT = 300.0
+# Patron del asset portable dentro del release (fnmatch sobre el nombre).
+RELEASE_ZIP_PATRON = "yt-remote-*-portable.zip"
+# Carpeta (dentro de data/) donde queda el ZIP bajado hasta que el
+# ayudante lo aplica.
+UPDATE_DIR = "update"
 
 # /radio (radio-browser): lote de emisoras por consulta y emisoras por
 # pagina del listado. El lote es mayor que la pagina para que ◀ ▶ paginen

@@ -388,8 +388,12 @@ async def test_player_seek_emite_comando_mpv():
 
 
 async def test_salud_diagnostico_admin():
-    """/salud entrega REPRODUCTOR, VERSION del extractor y ESTADO en UN
-    mensaje de 3 lineas; solo admin (el user ni ve el encabezado)."""
+    """/salud entrega REPRODUCTOR, VERSION de YT-Remote (constants.VERSION,
+    la misma del release de GitHub) y ESTADO en UN mensaje de 3 lineas; solo
+    admin (el user ni ve el encabezado). Regla del usuario: NINGUNA pieza
+    interna se menciona en el chat."""
+    import constants
+
     b = make_bot()
     h = b._require("admin", b.cmd_salud)
 
@@ -407,11 +411,13 @@ async def test_salud_diagnostico_admin():
     texto = upd_admin.sent[0][0]
     assert texto.startswith("🩺 YT-Remote — estado:"), texto
     assert "Reproductor:" in texto, texto
-    assert "Version:" in texto, texto
+    assert f"Version: {constants.VERSION}" in texto, texto
     assert "Estado: conectado" in texto, texto
     assert "disco" not in texto, texto
     assert "si ves esto" not in texto, texto
     assert texto.count("\n") == 3, texto  # encabezado + 3 lineas
+    # La version mostrada NUNCA puede ser la de una pieza interna.
+    assert "yt-dlp" not in texto and "2026.08.19" not in texto, texto
 
 
 async def test_menu_cubre_todos_los_comandos():
@@ -1671,6 +1677,7 @@ async def test_actualizar_solo_admin():
         return "1", None
 
     b._actualizar_ytdlp = trampa
+    b._actualizar_aplicacion = trampa  # type: ignore[method-assign]
     h = b._require("admin", b.cmd_actualizar)
 
     upd_user = FakeMessageUpdate("/actualizar", user_id=50)
@@ -1679,55 +1686,262 @@ async def test_actualizar_solo_admin():
     assert llamado == [], "el user no debe disparar la actualizacion"
 
 
-async def test_actualizar_reporta_antes_y_despues():
-    """El exito nombra las DOS versiones y dice que el nuevo modulo entra
-    con el proximo reinicio (el importado en memoria sigue siendo el viejo)."""
+@contextmanager
+def meta_de_actualizacion(release, pypi, instalada):
+    """El mundo externo de /actualizar en stub, con restauracion: el
+    release de GitHub, la version pypi y la pieza interna instalada."""
+
+    import bot as bot_mod
+
+    async def da_release():
+        if isinstance(release, Exception):
+            raise bot_mod.ActualizacionError(str(release))
+        return release
+
+    async def da_pypi():
+        if isinstance(pypi, Exception):
+            raise bot_mod.ActualizacionError(str(pypi))
+        return pypi
+
+    def da_instalada():
+        return instalada
+
+    viejos = (
+        bot_mod._pedir_meta_release,
+        bot_mod._pedir_meta_ytdlp,
+        bot_mod._version_interna_instalada,
+    )
+    bot_mod._pedir_meta_release = da_release  # type: ignore[assignment]
+    bot_mod._pedir_meta_ytdlp = da_pypi  # type: ignore[assignment]
+    bot_mod._version_interna_instalada = da_instalada  # type: ignore[assignment]
+    try:
+        yield
+    finally:
+        (
+            bot_mod._pedir_meta_release,
+            bot_mod._pedir_meta_ytdlp,
+            bot_mod._version_interna_instalada,
+        ) = viejos
+
+
+# Releases de figura: (version, url, bytes, sha256_publicado)
+RELEASE_1_1_4 = ("1.1.4", "https://x/yt-remote-1.1.4-portable.zip", 10, None)
+RELEASE_1_2_0 = ("1.2.0", "https://x/yt-remote-1.2.0-portable.zip", 1_000, None)
+# Versiones de la pieza interna: (version_publicada, url, sha)
+PYPI_2026_08 = ("2026.08.19", "https://u/w", "sha")
+PYPI_2026_10 = ("2026.10.01", "https://u/w2", "sha2")
+SALTO_INTERNA = "runtime/python/Lib/site-packages/yt_dlp"
+
+
+def _ayudante_y_marcas(b, disponible: bool):
+    """Stub del ayudante con registro de llamadas y marcas de salida."""
+    b._ayudante_disponible = lambda: disponible  # type: ignore[method-assign]
+    lanzados: list[tuple[object, list[str]]] = []
+    marcas: list[str] = []
+
+    def lanza(ruta, saltos):
+        lanzados.append((ruta, saltos))
+
+    async def salir(marca):
+        marcas.append(marca)
+
+    b._lanzar_ayudante = lanza  # type: ignore[method-assign]
+    b._apagar_y_salir = salir  # type: ignore[method-assign]
+    return lanzados, marcas
+
+
+async def test_actualizar_nada_nuevo():
+    """Con las dos piezas al dia, la respuesta es 'ya esta al dia', sin
+    lanzamiento, sin marca y sin mencionar piezas internas."""
     b = make_bot()
+    lanzados, marcas = _ayudante_y_marcas(b, disponible=False)
+    with meta_de_actualizacion(RELEASE_1_1_4, PYPI_2026_08, "2026.08.19"):
+        upd = FakeMessageUpdate("/actualizar")
+        await b.cmd_actualizar(upd, SimpleNamespace(args=[]))
+    assert len(upd.sent) == 1, upd.sent
+    texto = upd.sent[0][0]
+    assert "✅ YT-Remote 1.1.4 ya está al día." in texto, texto
+    assert "yt-dlp" not in texto and "PyPI" not in texto, texto
+    assert lanzados == [] and marcas == [], (lanzados, marcas)
+
+
+async def test_actualizar_chequeos_rotos_aviso_honesto():
+    """GitHub y PyPI caidos: un solo mensaje con los dos motivos, y NADA
+    lanzado ni cambiado."""
+    b = make_bot()
+    lanzados, marcas = _ayudante_y_marcas(b, disponible=False)
+    with meta_de_actualizacion(
+        Exception("GitHub no respondio (timeout)"),
+        Exception("PyPI no responde (te)"),
+        "x",
+    ):
+        upd = FakeMessageUpdate("/actualizar")
+        await b.cmd_actualizar(upd, SimpleNamespace(args=[]))
+    assert len(upd.sent) == 1, upd.sent
+    texto = upd.sent[0][0]
+    assert texto.startswith("⚠️ "), texto
+    assert "GitHub no respondio (timeout)" in texto, texto
+    assert "PyPI no responde (te)" in texto, texto
+    assert lanzados == [] and marcas == [], (lanzados, marcas)
+
+
+async def test_actualizar_interna_no_se_nombra():
+    """El aviso de la pieza interna habla de 'componentes internos' con
+    versiones, PERO el nombre y la procedencia JAMAS aparecen (regla del
+    usuario: herramientas internas no son asunto del usuario)."""
+    b = make_bot()
+    b._ayudante_disponible = lambda: True  # type: ignore[method-assign]
+    lanzados, marcas = _ayudante_y_marcas(b, disponible=True)
 
     async def ok():
         return "2026.08.19", "2026.10.01"
 
-    b._actualizar_ytdlp = ok
-    upd = FakeMessageUpdate("/actualizar")
-    await b.cmd_actualizar(upd, SimpleNamespace(args=[]))
+    b._actualizar_ytdlp = ok  # type: ignore[method-assign]
+    with meta_de_actualizacion(RELEASE_1_1_4, PYPI_2026_10, "2026.08.19"):
+        upd = FakeMessageUpdate("/actualizar")
+        await b.cmd_actualizar(upd, SimpleNamespace(args=[]))
     assert len(upd.sent) == 1, upd.sent
     texto = upd.sent[0][0]
-    assert "2026.08.19 → 2026.10.01" in texto, texto
-    assert "Reinicia el bot" in texto, texto
+    assert "✅ Componentes internos actualizados: 2026.08.19 → 2026.10.01." in texto, texto
+    assert "YT-Remote se reinicia solo." in texto, texto
+    for prohibida in ("yt-dlp", "PyPI", "whl", "wheel"):
+        assert prohibida not in texto, (prohibida, texto)
+    assert lanzados == [(None, [])], lanzados
+    assert marcas == ["componentes"], marcas
 
 
-async def test_actualizar_ya_ultimo():
-    """Si PyPI no trae nada nuevo (nueva=None) el aviso es de al dia, sin
-    flecha ni error."""
+async def test_actualizar_interna_sin_ayudante_pide_reinicio_manual():
+    """En desarrollo no hay exe que reabrir: los mismos cambios van con
+    instrucciones MANUALES; no se toca el runtime del repo."""
     b = make_bot()
+    lanzados, marcas = _ayudante_y_marcas(b, disponible=False)
 
-    async def al_dia():
-        return "2026.08.19", None
+    async def ok():
+        return "2026.08.19", "2026.10.01"
 
-    b._actualizar_ytdlp = al_dia
-    upd = FakeMessageUpdate("/actualizar")
-    await b.cmd_actualizar(upd, SimpleNamespace(args=[]))
+    b._actualizar_ytdlp = ok  # type: ignore[method-assign]
+    with meta_de_actualizacion(RELEASE_1_1_4, PYPI_2026_10, "2026.08.19"):
+        upd = FakeMessageUpdate("/actualizar")
+        await b.cmd_actualizar(upd, SimpleNamespace(args=[]))
     texto = upd.sent[0][0]
-    assert "ya está en la última versión" in texto and "2026.08.19" in texto, texto
-    assert "⚠️" not in texto, texto
+    assert "Componentes internos actualizados" in texto, texto
+    assert "Reinicia YT-Remote para aplicarlos." in texto, texto
+    assert lanzados == [] and marcas == [], (lanzados, marcas)
 
 
-async def test_actualizar_fallo_honesto():
-    """Cualquier motivo (PyPI caido, sha raro) llega tal cual al admin, en
-    un solo mensaje, sin reventar el handler."""
+async def test_actualizar_interna_fallida_aviso_y_nada_mas():
+    """Si la pieza interna no se pudo instalar, aviso honesto y NO hay
+    reinicio ni mensaje de exito."""
     import bot as bot_mod
 
     b = make_bot()
+    lanzados, marcas = _ayudante_y_marcas(b, disponible=True)
 
     async def raya():
-        raise bot_mod.ActualizacionError("PyPI no responde (timeout)")
+        raise bot_mod.ActualizacionError("PyPI no responde (te)")
 
-    b._actualizar_ytdlp = raya
-    upd = FakeMessageUpdate("/actualizar")
-    await b.cmd_actualizar(upd, SimpleNamespace(args=[]))
+    b._actualizar_ytdlp = raya  # type: ignore[method-assign]
+    with meta_de_actualizacion(RELEASE_1_1_4, PYPI_2026_10, "2026.08.19"):
+        upd = FakeMessageUpdate("/actualizar")
+        await b.cmd_actualizar(upd, SimpleNamespace(args=[]))
+    assert len(upd.sent) == 1, upd.sent
     texto = upd.sent[0][0]
-    assert texto.startswith("⚠️ No se pudo actualizar yt-dlp:"), texto
-    assert "PyPI no responde" in texto, texto
+    assert texto.startswith("⚠️ "), texto
+    assert "No se pudo actualizar los componentes internos" in texto, texto
+    assert "PyPI no responde (te)" in texto, texto
+    assert lanzados == [] and marcas == [], (lanzados, marcas)
+
+
+async def test_actualizar_app_nueva_reinicia_solo():
+    """Hay YT-Remote nuevo: un mensaje lo anuncia, el ayudante se deja
+    corriendo con el ZIP y el bot se apaga con la marca 'actualizacion'.
+    El texto NO menciona piezas internas ni GitHub en webview del msg."""
+    b = make_bot()
+    lanzados, marcas = _ayudante_y_marcas(b, disponible=True)
+
+    async def lista(release, interna_puesta):
+        return (Path("paquete.zip"), [])
+
+    b._actualizar_aplicacion = lista  # type: ignore[method-assign]
+    with meta_de_actualizacion(RELEASE_1_2_0, PYPI_2026_08, "2026.08.19"):
+        upd = FakeMessageUpdate("/actualizar")
+        await b.cmd_actualizar(upd, SimpleNamespace(args=[]))
+    assert len(upd.sent) == 1, upd.sent
+    texto = upd.sent[0][0]
+    assert "🚀 Actualizando YT-Remote 1.1.4 → 1.2.0." in texto, texto
+    assert "YT-Remote se cierra solo y vuelve al rato." in texto, texto
+    assert "yt-dlp" not in texto, texto
+    assert lanzados == [(Path("paquete.zip"), [])], lanzados
+    assert marcas == ["actualizacion"], marcas
+
+
+async def test_actualizar_app_y_componentes_una_pasada():
+    """YT-Remote nuevo + componente nuevo: UNA sola reinicion y el aviso
+    marca las dos lineas; el salto del componente viaja el ayudante."""
+    b = make_bot()
+    lanzados, marcas = _ayudante_y_marcas(b, disponible=True)
+
+    async def ok():
+        return "2026.08.19", "2026.10.01"
+
+    b._actualizar_ytdlp = ok  # type: ignore[method-assign]
+
+    async def lista(release, interna_puesta):
+        return (Path("z.zip"), [SALTO_INTERNA])
+
+    b._actualizar_aplicacion = lista  # type: ignore[method-assign]
+    with meta_de_actualizacion(RELEASE_1_2_0, PYPI_2026_10, "2026.08.19"):
+        upd = FakeMessageUpdate("/actualizar")
+        await b.cmd_actualizar(upd, SimpleNamespace(args=[]))
+    texto = upd.sent[0][0]
+    assert "🚀 Actualizando YT-Remote 1.1.4 → 1.2.0." in texto, texto
+    assert "✅ Componentes internos: 2026.08.19 → 2026.10.01." in texto, texto
+    assert "YT-Remote se cierra solo y vuelve al rato." in texto, texto
+    assert lanzados == [(Path("z.zip"), [SALTO_INTERNA])], lanzados
+    assert marcas == ["actualizacion"], marcas
+
+
+async def test_actualizar_app_sin_ayudante_manual():
+    """Sin el ayudante (instalacion sin portable), NO se baja nada ni se
+    apaga nada: el aviso remite a la carpeta portable de YT-Remote."""
+    b = make_bot()
+    lanzados, marcas = _ayudante_y_marcas(b, disponible=False)
+    baja: list = []
+
+    async def no_baja(release, interna_puesta):
+        baja.append(True)
+        return (Path("sin_uso.zip"), [])
+
+    b._actualizar_aplicacion = no_baja  # type: ignore[method-assign]
+    with meta_de_actualizacion(RELEASE_1_2_0, PYPI_2026_08, "2026.08.19"):
+        upd = FakeMessageUpdate("/actualizar")
+        await b.cmd_actualizar(upd, SimpleNamespace(args=[]))
+    texto = upd.sent[0][0]
+    assert "🚀 YT-Remote 1.1.4 → 1.2.0 disponible." in texto, texto
+    assert "no permite el cambio automático" in texto, texto
+    assert baja == [] and lanzados == [] and marcas == [], (baja, lanzados, marcas)
+
+
+async def test_actualizar_app_fallo_bajar_zip():
+    """Si la bajada del ZIP falla, aviso con el motivo, sin ayudante
+    corriendo ni salida total."""
+    import bot as bot_mod
+
+    b = make_bot()
+    lanzados, marcas = _ayudante_y_marcas(b, disponible=True)
+
+    async def estalla(release, interna_puesta):
+        raise bot_mod.ActualizacionError("GitHub no respondio (te)")
+
+    b._actualizar_aplicacion = estalla  # type: ignore[method-assign]
+    with meta_de_actualizacion(RELEASE_1_2_0, PYPI_2026_08, "2026.08.19"):
+        upd = FakeMessageUpdate("/actualizar")
+        await b.cmd_actualizar(upd, SimpleNamespace(args=[]))
+    assert len(upd.sent) == 1, upd.sent
+    texto = upd.sent[0][0]
+    assert texto.startswith("⚠️ No se pudo bajar la versión 1.2.0: "), texto
+    assert "GitHub no respondio (te)" in texto, texto
+    assert lanzados == [] and marcas == [], (lanzados, marcas)
 
 
 def test_actualizar_versiones_y_sha():
@@ -1794,11 +2008,330 @@ def test_instalar_wheel_reemplaza_el_paquete():
         ), "un fallo no debe tocar lo instalado"
 
 
+def test_version_de_constants_iguala_release_rules():
+    """La version de YT-Remote vive en DOS sitios (constants.VERSION y
+    release_rules.json) y NUNCA se desincronizan: este test muerde si el
+    release se publica con version distinta a la que el bot muestra."""
+    import json
+
+    import constants as constants_mod
+
+    reglas = Path(__file__).resolve().parent.parent / "release_rules.json"
+    if not reglas.is_file():  # pragma: no cover - fuera del repo
+        return
+    datos = json.loads(reglas.read_text(encoding="utf-8"))
+    assert (
+        constants_mod.VERSION == datos.get("version")
+    ), f"constants.VERSION={constants_mod.VERSION} desincronizada con release_rules.json"
+
+
+def test_parsear_release_json_de_github():
+    """Del JSON de releases/latest: version sin v, URL, bytes y sha256
+    (cuando GitHub publica digest); cada JSON roto con su motivo honesto."""
+    import bot as bot_mod
+
+    datos_ok = {
+        "tag_name": "v1.2.0",
+        "assets": [
+            {
+                "name": "yt-remote-1.2.0-portable.zip",
+                "browser_download_url": "https://github.com/x/yt-remote-1.2.0-portable.zip",
+                "size": 97_000_000,
+                "digest": "sha256:AB12CD34",
+            }
+        ],
+    }
+    version, url, size, sha = bot_mod._parsear_release_json(datos_ok)
+    assert version == "1.2.0", version
+    assert url.endswith("yt-remote-1.2.0-portable.zip"), url
+    assert size == 97_000_000, size
+    assert sha == "ab12cd34", sha
+
+    # Tag sin la v delante tambien pasa.
+    sin_v = {"tag_name": "1.3.0", "assets": [datos_ok["assets"][0]]}
+    assert bot_mod._parsear_release_json(sin_v)[0] == "1.3.0"
+
+    # Casos rotos, cada uno con motivo.
+    casos = [
+        (["no", "soy", "dict"], "formato"),
+        ({"tag_name": "", "assets": []}, "legible"),
+        ({"tag_name": "v2.0.0", "assets": []}, "archivos"),
+        (
+            {
+                "tag_name": "v1.2.0",
+                "assets": [{"name": "otra-cosa.txt", "size": 5}],
+            },
+            "ZIP portable",
+        ),
+        (
+            {
+                "tag_name": "v1.2.0",
+                "assets": [{"name": "yt-remote-1.2.0-portable.zip", "size": 0}],
+            },
+            "incompleto",
+        ),
+    ]
+    for datos, pista in casos:
+        try:
+            bot_mod._parsear_release_json(datos)
+        except bot_mod.ActualizacionError as exc:
+            assert pista in str(exc), (pista, str(exc))
+        else:
+            raise AssertionError(f"debia fallar con {datos!r}")
+
+
+def _paquete_zip_de_figura(prefijo: str, con_version: bool = True) -> bytes:
+    """Un ZIP portable de juguete, con o sin carpeta contenedora."""
+    import io as io_mod
+    import zipfile as zipfile_mod
+
+    piezas = [
+        ("ytremote.exe", "exe"),
+        ("runtime/python/python.exe", "py"),
+        ("src/main.py", "main"),
+        ("runtime/python/Lib/site-packages/yt_dlp/version.py", '__version__ = "2026.10.01"\n'),
+    ]
+    if not con_version:
+        piezas[-1] = ("runtime/python/Lib/site-packages/yt_dlp/__init__.py", "")
+    buf = io_mod.BytesIO()
+    with zipfile_mod.ZipFile(buf, "w") as zf:
+        for nombre, contenido in piezas:
+            zf.writestr(prefijo + nombre, contenido)
+    return buf.getvalue()
+
+
+def test_zip_del_release_valida_y_lee_version_interna():
+    """_validar_zip_paquete: devuelve el prefijo contenedor (o ""), muerde
+    si faltan piezas clave; _leer_interna_del_zip lee la version del ZIP y
+    None si el ZIP no la expone."""
+    import io as io_mod
+    import zipfile as zipfile_mod
+
+    import bot as bot_mod
+    from tempfile import TemporaryDirectory
+
+    with TemporaryDirectory() as tmp:
+        raiz = Path(tmp)
+
+        con_prefijo = raiz / "con_prefijo.zip"
+        con_prefijo.write_bytes(_paquete_zip_de_figura("yt-remote-1.2.0/"))
+        assert bot_mod._validar_zip_paquete(con_prefijo) == "yt-remote-1.2.0/"
+        assert (
+            bot_mod._leer_interna_del_zip(con_prefijo, "yt-remote-1.2.0/")
+            == "2026.10.01"
+        )
+
+        sin_prefijo = raiz / "sin_prefijo.zip"
+        sin_prefijo.write_bytes(_paquete_zip_de_figura(""))
+        assert bot_mod._validar_zip_paquete(sin_prefijo) == ""
+        assert bot_mod._leer_interna_del_zip(sin_prefijo, "") == "2026.10.01"
+
+        # Zip que no es el paquete (le falta src/main.py): muerde.
+        roto = raiz / "roto.zip"
+        buf = io_mod.BytesIO()
+        with zipfile_mod.ZipFile(buf, "w") as zf:
+            zf.writestr("ytremote.exe", "exe")
+        roto.write_bytes(buf.getvalue())
+        try:
+            bot_mod._validar_zip_paquete(roto)
+        except bot_mod.ActualizacionError as exc:
+            assert "paquete" in str(exc) or "piezas" in str(exc), str(exc)
+        else:
+            raise AssertionError("un ZIP sin piezas clave debia fallar")
+
+        # Sin version.py legible -> None (el flujo decide sin ella).
+        sin_version = raiz / "sin_version.zip"
+        sin_version.write_bytes(_paquete_zip_de_figura("", con_version=False))
+        assert bot_mod._leer_interna_del_zip(sin_version, "") is None
+
+
+def test_ayudante_plan_protege_data_config_y_salta():
+    """entradas_a_extraer: data/ NO se toca, config.json NO se pisa, los
+    prefijos de --skip quedan afuera y lo demas va con destino limpio."""
+    import updater
+
+    nombres = [
+        "yt-remote-2.0.0/ytremote.exe",
+        "yt-remote-2.0.0/runtime/python/python.exe",
+        "yt-remote-2.0.0/src/main.py",
+        "yt-remote-2.0.0/src/updater.py",
+        "yt-remote-2.0.0/README.md",
+        "yt-remote-2.0.0/config.json",
+        "yt-remote-2.0.0/data/sesion.txt",
+        "yt-remote-2.0.0/runtime/python/Lib/site-packages/yt_dlp/a.py",
+        "__MACOSX/.grasa",
+    ]
+    plan = updater.entradas_a_extraer(nombres, ["runtime/python/Lib/site-packages/yt_dlp"])
+    destinos = [d for member, d in plan]
+    assert destinos == ["ytremote.exe", "runtime/python/python.exe", "src/main.py", "src/updater.py", "README.md"], destinos
+
+    # Sin --skip: la pieza interna del release SI se extrae.
+    plan_limpio = updater.entradas_a_extraer(nombres, [])
+    assert "runtime/python/Lib/site-packages/yt_dlp/a.py" in [d for member, d in plan_limpio]
+
+    # Rutas trampadas no escapan de la carpeta destino.
+    trampa = updater.entradas_a_extraer(
+        ["../escapado.txt", "C:/absoluto.txt", ""], []
+    )
+    assert trampa == [], trampa
+
+
+def test_ayudante_extrae_conserva_data_y_limpia():
+    """El reemplazo real de juguete: los archivos del release se ponen,
+    data/ y config.json se CONSERVAN tal cual estaban, la chatarra vieja
+    de src/ desaparece (renombre + rebuild) y no queda ningun .viejo."""
+    import updater
+    from tempfile import TemporaryDirectory
+
+    with TemporaryDirectory() as tmp:
+        raiz = Path(tmp)
+
+        def armar_destino(nombre: str) -> Path:
+            dest = raiz / nombre
+            (dest / "runtime/python/Lib/site-packages/yt_dlp").mkdir(parents=True)
+            (dest / "src").mkdir(parents=True)
+            (dest / "data").mkdir(parents=True)
+            (dest / "ytremote.exe").write_text("exe-viejo", encoding="utf-8")
+            (dest / "config.json").write_text("config-viejo", encoding="utf-8")
+            (dest / "runtime/python/python.exe").write_text("py-viejo", encoding="utf-8")
+            (dest / "runtime/python/Lib/site-packages/yt_dlp/version.py").write_text(
+                '__version__ = "2026.08.19"\n', encoding="utf-8"
+            )
+            (dest / "src/main.py").write_text("print('viejo')", encoding="utf-8")
+            (dest / "src/chatarra-vieja.py").write_text("vieja", encoding="utf-8")
+            (dest / "data/sesion.txt").write_text("SESION-USUARIO", encoding="utf-8")
+            return dest
+
+        def zip_de_figura(ruta: Path) -> Path:
+            import io as io_mod
+            import zipfile as zipfile_mod
+
+            buf = io_mod.BytesIO()
+            piezas = [
+                ("ytremote.exe", "exe-nuevo"),
+                ("runtime/python/python.exe", "py-nuevo"),
+                ("src/main.py", "print('nuevo')"),
+                ("runtime/python/Lib/site-packages/yt_dlp/version.py", '__version__ = "2026.10.01"\n'),
+                ("data/NUEVO.txt", "no entres"),
+                ("config.json", "{}"),
+            ]
+            with zipfile_mod.ZipFile(buf, "w") as zf:
+                for nombre, contenido in piezas:
+                    zf.writestr("yt-remote-1.2.0/" + nombre, contenido)
+            ruta.write_bytes(buf.getvalue())
+            return ruta
+
+        # Caso A: reemplazo completo (sin --skip).
+        dest = armar_destino("instal-a")
+        zip_ruta = zip_de_figura(raiz / "paquete-a.zip")
+        updater.extraer_zip(zip_ruta, dest, [], updater.Log(raiz / "log-a.txt"))
+
+        assert (dest / "ytremote.exe").read_text(encoding="utf-8") == "exe-nuevo"
+        assert (dest / "src/main.py").read_text(encoding="utf-8") == "print('nuevo')"
+        assert (
+            (dest / "runtime/python/Lib/site-packages/yt_dlp/version.py")
+            .read_text(encoding="utf-8")
+            .strip()
+            == '__version__ = "2026.10.01"'
+        )
+        # Lo protegido queda tal cual; lo que el release trae de data/ NO entra.
+        assert (dest / "data/sesion.txt").read_text(encoding="utf-8") == "SESION-USUARIO"
+        assert not (dest / "data/NUEVO.txt").exists()
+        assert (dest / "config.json").read_text(encoding="utf-8") == "config-viejo"
+        # Chatarra vieja fuera y sin restos .viejo.
+        assert not (dest / "src/chatarra-vieja.py").exists()
+        assert list(dest.glob("*.viejo")) == []
+
+        # Caso B: con --skip, la pieza interna actual no retrocede.
+        dest_b = armar_destino("instal-b")
+        zip_b = zip_de_figura(raiz / "paquete-b.zip")
+        updater.extraer_zip(
+            zip_b,
+            dest_b,
+            ["runtime/python/Lib/site-packages/yt_dlp"],
+            updater.Log(raiz / "log-b.txt"),
+        )
+        assert (
+            (dest_b / "runtime/python/Lib/site-packages/yt_dlp/version.py")
+            .read_text(encoding="utf-8")
+            .strip()
+            == '__version__ = "2026.08.19"'
+        ), "el --skip debia preservar la pieza interna instalada"
+        assert (dest_b / "src/main.py").read_text(encoding="utf-8") == "print('nuevo')"
+
+
+def test_ayudante_extraccion_rota_se_revierte():
+    """Si la descompresion explota a mitad (destino imponiblemente
+    ocupado), las carpetas renombradas VUELVEN a su lugar: la instalacion
+    queda como estaba, con su version anterior."""
+    import updater
+    from tempfile import TemporaryDirectory
+
+    with TemporaryDirectory() as tmp:
+        raiz = Path(tmp)
+        dest = raiz / "instal"
+        (dest / "runtime/python").mkdir(parents=True)
+        (dest / "src").mkdir(parents=True)
+        (dest / "ytremote.exe").mkdir()  # El sabotaje: es una CARPETA.
+        (dest / "runtime/python/python.exe").write_text("py-viejo", encoding="utf-8")
+        (dest / "src/main.py").write_text("print('viejo')", encoding="utf-8")
+
+        import io as io_mod
+        import zipfile as zipfile_mod
+
+        buf = io_mod.BytesIO()
+        with zipfile_mod.ZipFile(buf, "w") as zf:
+            zf.writestr("ytremote.exe", "exe-nuevo")
+            zf.writestr("runtime/python/python.exe", "py-nuevo")
+            zf.writestr("src/main.py", "print('nuevo')")
+        zip_ruta = raiz / "paquete.zip"
+        zip_ruta.write_bytes(buf.getvalue())
+
+        try:
+            updater.extraer_zip(zip_ruta, dest, [], updater.Log(raiz / "log.txt"))
+        except Exception:
+            pass
+        else:
+            raise AssertionError("escribir sobre una carpeta debia explotar")
+
+        # Todo vuelve a donde estaba y ningun .viejo queda tirado.
+        assert (dest / "runtime/python/python.exe").read_text(encoding="utf-8") == "py-viejo"
+        assert (dest / "src/main.py").read_text(encoding="utf-8") == "print('viejo')"
+        assert list(dest.glob("*.viejo")) == []
+
+
+def test_ayudante_disponible_solo_en_portable():
+    """_ayudante_disponible pide runtime\\python\\python.exe y
+    ytremote.exe JUNTO a src: en el repo (desarrollo) ninguno esta y dice
+    False; en una carpeta con los dos archivos dice True."""
+    import bot as bot_mod
+    from tempfile import TemporaryDirectory
+
+    b = make_bot()
+    # Repo: desarrollo, sin portable.
+    assert bot_mod._base_instalacion() == Path(__file__).resolve().parent.parent
+    assert b._ayudante_disponible() is False, "el repo no es instalacion portable"
+
+    # Una carpeta portable de juguete: los dos archivos y dice True.
+    with TemporaryDirectory() as tmp:
+        portable = Path(tmp)
+        (portable / "runtime" / "python").mkdir(parents=True)
+        (portable / "runtime" / "python" / "python.exe").write_text("x", encoding="utf-8")
+        (portable / "ytremote.exe").write_text("x", encoding="utf-8")
+        original = bot_mod._base_instalacion
+        bot_mod._base_instalacion = lambda: portable  # type: ignore[assignment]
+        try:
+            assert b._ayudante_disponible() is True
+        finally:
+            bot_mod._base_instalacion = original  # type: ignore[assignment]
+
+
 def test_radio_parsea_argumentos():
     """Los argumentos de /radio: sin nada, destacadas; texto suelto =
     nombre; genero:/género:/g: = tag; pais:/país:/p: = pais; y
     favoritas/fav/❤️ = la lista propia."""
     import bot as bot_mod
+
 
     assert bot_mod._radio_parsear("") == ("top", "")
     assert bot_mod._radio_parsear("  salsa  ") == ("name", "salsa")

@@ -200,7 +200,7 @@ Solo dj y admin:
 Solo admin:
   /reglas                            re-envía y fija (pin) el mensaje de reglas
   /salud                             estado del bot: reproductor, versión y conexión
-  /actualizar                        renueva el extractor de YouTube (yt-dlp)
+  /actualizar                        busca actualizaciones de YT-Remote y las aplica (reinicia solo)
   (los roles se gestionan con ⚙️ Ajustes → 👥 Usuarios de la tarjeta: la lista
    llega al chat privado del admin, se toca al usuario para alternar dj/user
    y ❌ aplica los cambios. En el grupo no aparece nada)

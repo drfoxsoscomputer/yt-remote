@@ -208,8 +208,8 @@ desde la lista.
 | `/reglas` | admin | Re-envía y fija (pin) el mensaje de reglas del grupo |
 | `/radio` | todos (elegir es de dj) | Abre el listado de emisoras y favoritas |
 | `/letra` | todos | Letra de lo que está sonando |
-| `/salud` | admin | Estado del bot: reproductor, versión del extractor y conexión |
-| `/actualizar` | admin | Renueva el extractor de YouTube (yt-dlp) |
+| `/salud` | admin | Estado del bot: reproductor, versión de YT-Remote y conexión |
+| `/actualizar` | admin | Trae YT-Remote y sus componentes a la versión publicada más nueva (reinicia solo) |
 
 **Todos los roles** pueden tocar el botón 📋 (ver lista). Los demás
 botones de la tarjeta (▶ ⏮ ⏭ ⏹ 🔊) son solo para dj y admin; ⚙️ Ajustes
