@@ -134,6 +134,7 @@ class FakePlayer:
         self.running = True
         self.fail_loads = fail_loads
         self.loaded = []
+        self.commands = []
         self.starts = 0
         self.rewinds = 0
         self.quits = 0
@@ -154,6 +155,9 @@ class FakePlayer:
         if self.fail_loads > 0:
             self.fail_loads -= 1
             raise RuntimeError("load rejected")
+
+    async def command(self, command, *args):
+        self.commands.append((command, *args))
 
     async def set_volume(self, vol):
         self.volume = vol
@@ -5018,6 +5022,367 @@ def test_la_tarjeta_vive_en_card_py_y_no_duplicada_en_bot():
     assert "InputMediaPhoto" not in fuente_bot, "el render de foto volvio a bot.py"
     assert "edit_message_caption" not in fuente_bot, "el render de la tarjeta volvio a bot.py"
     assert "_card_lock" not in fuente_bot, "el lock de la tarjeta volvio a bot.py"
+
+
+async def test_favicon_raster_acepta_y_svg_html_acechua_rechaza():
+    """La validacion de bytes magicos de radio._es_imagen_raster: mpv
+    decodifica raster (PNG/JPEG/GIF/BMP/ICO/WEBP) y RECHAZA SVG, HTML y
+    vacios (un favicon SVG rechazado antes mataba la emisora con
+    'mpv rechazo el stream')."""
+    import radio as radio_mod
+
+    buenos = [
+        b"\x89PNG\r\n\x1a\n" + b"\x00" * 40,
+        b"\xff\xd8\xff\xe0" + b"\x00" * 40,
+        b"GIF89a" + b"\x00" * 40,
+        b"GIF87a" + b"\x00" * 40,
+        b"BM" + b"\x00" * 43,
+        b"\x00\x00\x01\x00" + b"\x00" * 21,
+        b"RIFF" + b"\x00" * 4 + b"WEBP" + b"\x00" * 18,
+    ]
+    for datos in buenos:
+        assert radio_mod._es_imagen_raster(datos), datos[:12]
+
+    malos = [
+        b"",
+        b"\x89PNG",  # firma correcta pero recortada
+        b"<?xml version=\"1.0\"?" + b" " * 30,
+        b"<svg xmlns=\"http://www.w3.org/2000/svg\"" + b" " * 30,
+        b"<html><body>404</body>" + b" " * 20,
+        b"GIF87a" + b"\x00" * 10,  # firma GIF pero corto
+        b"RIFF" + b"\x00" * 4 + b"WAVF" + b"\x00" * 18,  # RIFF pero no WEBP
+    ]
+    for datos in malos:
+        assert not radio_mod._es_imagen_raster(datos), datos[:12]
+
+
+async def test_logo_rechazado_por_mpv_deja_sonar_el_stream_solo():
+    """LA IMAGEN NUNCA DECIDE: si mpv rechaza la carga del logo, la emisora
+    entra con el stream solo (nada de 'mpv rechazo el stream' para el
+    usuario) y video-unscaled vuelve a 'no' para el audio solo."""
+    import radio as radio_mod
+    from queue_manager import QueueItem
+
+    b = make_bot(fail_loads=1)
+    viejo_bajar = radio_mod.bajar_logo
+
+    async def _logo_falso(url):
+        return "C:/tmp/logo.png" if url == "https://logo.png" else None
+
+    radio_mod.bajar_logo = _logo_falso
+    try:
+        ok = await b._play_item(
+            FakeMessageUpdate("/radio"),
+            QueueItem(
+                url="https://stream.example/live",
+                title="Mango Radio",
+                thumbnail="https://logo.png",
+                directo=True,
+            ),
+        )
+    finally:
+        radio_mod.bajar_logo = viejo_bajar
+    assert ok is True
+    # Primer intento con el logo, segundo con el stream solo.
+    assert b.player.loaded == [
+        ("C:/tmp/logo.png", "https://stream.example/live"),
+        ("https://stream.example/live", None),
+    ], b.player.loaded
+    # video-unscaled: downscale-big solo mientras el logo estaba en pley;
+    # el reintentto vuelve a 'no' (el stream no es una imagen).
+    assert ("set", "video-unscaled", "downscale-big") in b.player.commands
+    assert ("set", "video-unscaled", "no") in b.player.commands
+
+
+async def test_logo_usa_unscaled_big_y_un_video_vuelve_a_no():
+    """video-unscaled va POR CARGA: con logo 'downscale-big' (el favicon
+    chico escalado a 4K se veia pixelado a pantalla completa) y en la
+    siguiente carga de un VIDEO normal vuelve a 'no' (pantalla llena)."""
+    import radio as radio_mod
+    from queue_manager import QueueItem
+
+    b = make_bot()
+    viejo_bajar = radio_mod.bajar_logo
+
+    async def _logo_falso(url):
+        return "C:/tmp/logo.png" if url == "https://logo.png" else None
+
+    resolver = playback_mod.resolve_stream_url
+
+    def _resolver_falso(url):
+        return ("https://video.example/1.mp4", None)
+
+    radio_mod.bajar_logo = _logo_falso
+    playback_mod.resolve_stream_url = _resolver_falso
+    try:
+        await b._play_item(
+            FakeMessageUpdate("/radio"),
+            QueueItem(
+                url="https://stream.example/live",
+                title="Mango Radio",
+                thumbnail="https://logo.png",
+                directo=True,
+            ),
+        )
+        await b._play_item(
+            FakeMessageUpdate("/buscar"),
+            QueueItem(url="https://v/1", title="Tema"),
+        )
+    finally:
+        radio_mod.bajar_logo = viejo_bajar
+        playback_mod.resolve_stream_url = resolver
+    assert b.player.commands == [
+        ("set", "video-unscaled", "downscale-big"),
+        ("set", "video-unscaled", "no"),
+    ], b.player.commands
+    assert b.player.loaded == [
+        ("C:/tmp/logo.png", "https://stream.example/live"),
+        ("https://video.example/1.mp4", None),
+    ], b.player.loaded
+
+
+async def test_radio_next_prev_rotan_por_el_listado_ancla():
+    """⏭/⏮ en modo emisora: la vecina SIGUIENTE/ANTERIOR del listado desde
+    el que se eligio la emisora (el ancla), no radio de YouTube por
+    artista (el semillero ponia al PAIS como artista)."""
+    from queue_manager import QueueItem
+
+    b = make_bot()
+    e1 = _emisora(nombre="Uno", stream="https://s/1")
+    e2 = _emisora(nombre="Dos", stream="https://s/2")
+    e3 = _emisora(nombre="Tres", stream="https://s/3")
+    b._radio_ancla = [e1, e2, e3]
+    b.queue.set_current(
+        QueueItem(url="https://s/2", title="Dos", directo=True)
+    )
+    sonadas = []
+
+    async def fake_play(update, item, **kwargs):
+        sonadas.append((item.url, item.directo))
+        return True
+
+    b._play_item = fake_play
+
+    # ⏭ desde la emisora 2 -> la 3.
+    await b.cmd_next(FakeMessageUpdate("/next"), SimpleNamespace(args=[]))
+    assert sonadas == [("https://s/3", True)], sonadas
+
+    # ⏮ desde la emisora 2 (bot fresco) -> la 1.
+    b2 = make_bot()
+    b2._radio_ancla = [e1, e2, e3]
+    b2.queue.set_current(
+        QueueItem(url="https://s/2", title="Dos", directo=True)
+    )
+    sonadas2 = []
+    b2._play_item = fake_play_alias(sonadas2)
+    await b2.cmd_prev(FakeMessageUpdate("/prev"), SimpleNamespace(args=[]))
+    assert sonadas2 == [("https://s/1", True)], sonadas2
+
+
+def fake_play_alias(destino):
+    async def _f(update, item, **kwargs):
+        destino.append((item.url, item.directo))
+        return True
+
+    return _f
+
+
+async def test_radio_next_wrap_y_aviso_de_nueva_vuelta():
+    """El ancla repite con wrap: desde la ULTIMA emisora, ⏭ vuelve a la
+    primera Y avisa una vez que la lista volvio a empezar."""
+    from queue_manager import QueueItem
+
+    b = make_bot()
+    b._radio_ancla = [
+        _emisora(nombre="Unica", stream="https://s/1"),
+        _emisora(nombre=" Ultima", stream="https://s/9"),
+    ]
+    b.queue.set_current(
+        QueueItem(url="https://s/9", title="Ultima", directo=True)
+    )
+    sonadas = []
+    b._play_item = fake_play_alias(sonadas)
+    upd = FakeMessageUpdate("/next")
+    await b.cmd_next(upd, SimpleNamespace(args=[]))
+    assert sonadas == [("https://s/1", True)], sonadas
+    # El aviso del wrap viaja como respuesta del comando (upd.sent) UNA vez.
+    assert len(upd.sent) == 1 and "volvió a empezar" in upd.sent[0][0], upd.sent
+
+
+async def test_radio_next_sin_ancla_avisa_y_no_improvisa_youtube():
+    """⏭ con una emisora sonando pero SIN listado ancla (sesion nueva) o
+    con la emisora fuera del listado: aviso honesto de abrir /radio, NADA
+    de canciones de YouTube de la nada."""
+    from queue_manager import QueueItem
+
+    b = make_bot()
+    b.queue.set_current(
+        QueueItem(url="https://s/x", title="X", directo=True)
+    )
+    sonadas = []
+    b._play_item = fake_play_alias(sonadas)
+    upd = FakeMessageUpdate("/next")
+    await b.cmd_next(upd, SimpleNamespace(args=[]))
+    assert sonadas == [], sonadas
+    # El aviso honesto es la UNICA respuesta del comando: abierto /radio,
+    # nada de canciones de YouTube de la nada.
+    assert len(upd.sent) == 1, upd.sent
+    assert "/radio" in upd.sent[0][0], upd.sent
+    assert "ya no está en el listado" not in upd.sent[0][0], upd.sent
+
+    # Emisora que ya no esta en el listado: mismo aviso.
+    b2 = make_bot()
+    b2._radio_ancla = [_emisora(nombre="Otra", stream="https://s/otra")]
+    b2.queue.set_current(
+        QueueItem(url="https://s/extraña", title="Otra cosa", directo=True)
+    )
+    sonadas2 = []
+    b2._play_item = fake_play_alias(sonadas2)
+    upd2 = FakeMessageUpdate("/next")
+    await b2.cmd_next(upd2, SimpleNamespace(args=[]))
+    assert sonadas2 == [], sonadas2
+    assert "ya no está en el listado" in upd2.sent[0][0], upd2.sent
+
+
+async def test_radio_autoavance_gira_por_el_ancla_y_sin_ancla_para():
+    """El fin de stream de una emisora AUTO-AVANZA a la vecina del ancla
+    (rotacion de emisoras, jamas canciones de YouTube); sin ancla, la
+    radio de emisoras se detiene con un aviso honesto. El aviso va al chat
+    de la card (en autoplay no hay update de usuario)."""
+    from queue_manager import QueueItem
+
+    b = make_bot()
+    b._card_chat_id = 44
+    b._radio_ancla = [
+        _emisora(nombre="Uno", stream="https://s/1"),
+        _emisora(nombre="Dos", stream="https://s/2"),
+    ]
+    b.queue.set_current(
+        QueueItem(url="https://s/2", title="Dos", directo=True)
+    )
+    sonadas = []
+    b._play_item = fake_play_alias(sonadas)
+    b.playback.play_item = fake_play_alias(sonadas)
+    await b.playback.advance_after_end(None)
+    assert sonadas == [("https://s/1", True)], sonadas
+    textos = [t[1] for t in b._app.bot.sent]
+    assert any("Siguiente emisora: Uno" in t for t in textos), textos
+
+    # Sin ancla: se detiene y lo dice (honesto, no silencio).
+    b2 = make_bot()
+    b2._card_chat_id = 44
+    b2.queue.set_current(
+        QueueItem(url="https://s/x", title="X", directo=True)
+    )
+    sonadas2 = []
+    b2._play_item = fake_play_alias(sonadas2)
+    b2.playback.play_item = fake_play_alias(sonadas2)
+    await b2.playback.advance_after_end(None)
+    assert sonadas2 == [], sonadas2
+    textos2 = [t[1] for t in b2._app.bot.sent]
+    assert any("se detuvo" in t for t in textos2), textos2
+
+
+async def test_radio_cancion_corta_el_ancla():
+    """Cuando suena una CANCION (no emisora) el ancla muere: el ⏭ vuelve a
+    comportarse como antes (radio por artista / cola)."""
+    from queue_manager import QueueItem
+
+    b = make_bot()
+    b._radio_ancla = [_emisora(nombre="Uno", stream="https://s/1")]
+    b.queue.set_current(
+        QueueItem(url="https://s/1", title="Uno", directo=True)
+    )
+
+    resolver = playback_mod.resolve_stream_url
+
+    def _resolver_falso(url):
+        return ("https://v/1.mp4", None)
+
+    playback_mod.resolve_stream_url = _resolver_falso
+    try:
+        await b._play_item(
+            FakeMessageUpdate("/buscar"),
+            QueueItem(url="https://v/1", title="Tema"),
+        )
+    finally:
+        playback_mod.resolve_stream_url = resolver
+    assert b._radio_ancla is None, b._radio_ancla
+
+
+async def test_radio_list_pending_nace_con_el_listado_y_muere_al_cerrar():
+    """El flag de listado de /radio: True mientras el listado esta en
+    pantalla (la card no se mueve), False al cerrar con ❌ y al elegir
+    emisora; el ❌ ademas deja la card al final como en /buscar."""
+    import radio as radio_mod
+
+    b = make_bot()
+    viejo_destacadas = radio_mod.destacadas
+    viejo_bajar = radio_mod.bajar_logo
+
+    async def _destacadas_falso(cantidad):
+        return [_emisora()]
+
+    async def _logo_falso(url):
+        return None
+
+    radio_mod.destacadas = _destacadas_falso
+    radio_mod.bajar_logo = _logo_falso
+    try:
+        # Abrir listado: flag prendido (la card queda quieta).
+        await b.cmd_radio(FakeMessageUpdate("/radio"), SimpleNamespace(args=[]))
+        assert b._radio_chat_id is not None
+        assert b._radio_list_pending is True
+
+        # Elegir emisora: listado cerrado y flag apagado (card al final).
+        async def play_ok(update, item, preserve_current=False):
+            return True
+
+        b._play_item = play_ok
+        upd = FakeUpdate("rad:play:0", user_id=77)
+        await b._on_radio_callback(upd, None)
+        assert b._radio_list_pending is False, b._radio_list_pending
+        assert (b._radio_chat_id, b._radio_message_id) == (None, None)
+
+        # ❌ Cancelar: mismo cierre honesto del listado.
+        await b.cmd_radio(FakeMessageUpdate("/radio"), SimpleNamespace(args=[]))
+        assert b._radio_list_pending is True
+        b._radio_message_id = None  # el delete del fake ya-viejo no importa
+        upd2 = FakeUpdate("rad:close", user_id=77)
+        msg = SimpleNamespace(message_id=999)
+
+        async def _delete():
+            pass
+
+        msg.delete = _delete
+        upd2.callback_query.message = msg
+        b._radio_chat_id, b._radio_message_id = 44, 999
+        await b._on_radio_callback(upd2, None)
+        assert b._radio_list_pending is False
+        assert (b._radio_chat_id, b._radio_message_id) == (None, None)
+    finally:
+        radio_mod.destacadas = viejo_destacadas
+        radio_mod.bajar_logo = viejo_bajar
+
+
+async def test_con_listado_radio_abierto_la_card_no_se_reposiciona():
+    """El wrapper de comandos no toca la card mientras el listado de /radio
+    sigue en pantalla (misma norma que el listado de /buscar: la card
+    queda quietecita arriba del listado)."""
+    b = make_bot()
+    b._card_chat_id = 44
+    b._card_message_id = 7
+    b._radio_list_pending = True
+    ran = []
+
+    async def handler(update, context):
+        ran.append(1)
+
+    wrapped = b._with_card_reposition(handler)
+    await wrapped(FakeMessageUpdate("/x"), SimpleNamespace(args=[]))
+    assert ran == [1]
+    assert b._app.bot.deleted == [], b._app.bot.deleted
+    assert b._app.bot.sent == [], b._app.bot.sent
 
 
 def run():

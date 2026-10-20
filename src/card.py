@@ -474,9 +474,10 @@ class CardManager:
         la tarjeta pasa a ser la ultima visualizacion. Si el handler creo la
         tarjeta desde cero (no existia), no se reposiciona (ya quedo de ultima).
 
-        Excepcion: mientras el listado de resultados de /buscar sigue en
-        pantalla (_search_list_pending), NO se reposiciona: la card queda
-        donde esta, arriba del listado, y elegir/cancelar la gestiona el pick.
+        Excepcion: mientras un listado de resultados sigue en pantalla
+        (/buscar o /radio), NO se reposiciona: la card queda donde esta,
+        arriba del listado, y elegir/cancelar la gestiona el flujo
+        correspondiente.
         """
 
         async def wrapper(update, context) -> None:
@@ -484,8 +485,11 @@ class CardManager:
             existia = await self.exists_in(chat_id)
             await handler(update, context)
             if existia and await self.exists_in(chat_id):
-                if self._app._search_list_pending:
-                    # Listado de /buscar visible: la card no se mueve.
+                if (
+                    self._app._search_list_pending
+                    or self._app._radio_list_pending
+                ):
+                    # Listado visible: la card no se mueve.
                     return
                 await self.reposition(chat_id)  # type: ignore[arg-type]
 

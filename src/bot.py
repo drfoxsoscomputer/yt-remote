@@ -573,6 +573,21 @@ class YTRemoteBot:
         self._search_chat_id: int | None = None
         self._search_message_id: int | None = None
         self._search_sin_mas: bool = False
+        # Espejo del flag de /buscar para el listado de /radio: mientras el
+        # listado de emisoras sigue en pantalla la card tampoco se mueve
+        # (misma norma: la card se mueve solo cuando el estado de
+        # reproduccion cambia). Se apaga al cerrar el listado (elegir, X,
+        # close del mesonero o del bot).
+        self._radio_list_pending: bool = False
+        # Ancla de rotacion de emisoras: el listado de la vista de /radio
+        # desde la que SAELIO la emisora. ⏭/⏮ y el auto-avance rotan ahi
+        # (siguiente/anterior emisora, wrap) en vez de caer en la radio de
+        # YouTube por artista. Se re-coloca en cada rad:play y se aborta
+        # cuando suena algo que no es emisora (una cancion de /buscar).
+        self._radio_ancla: "list | None" = None
+        # True la UNA vez que la rotacion da la vuelta (p. ej. del final
+        # de la lista vuelve a la primera): un solo aviso "empezo de nuevo".
+        self._radio_ancla_wrap: bool = False
         # Candado anti-colision de botones: una sola accion de control a la
         # vez. Si ya hay una en curso (p.ej. resolviendo el stream de un
         # salto), los toques extra se descartan al instante en vez de
@@ -1615,6 +1630,10 @@ class YTRemoteBot:
             return
         self._radio_chat_id = chat_id
         self._radio_message_id = msg.message_id
+        # Listado en pantalla: la card no se reposiciona mientras se
+        # navega (estra norma de /buscar; con el API caido y el comando
+        # fallido la card TAMPOCO se mueve, porque no paso nada).
+        self._radio_list_pending = True
 
     def _radio_pagina(self) -> list:
         """La pagina activa de la vista de /radio (emisoras del lote)."""
@@ -1717,6 +1736,9 @@ class YTRemoteBot:
         msg = self._radio_message_id
         self._radio_chat_id = None
         self._radio_message_id = None
+        # El listado ya no esta en pantalla: la card vuelve a poder
+        # reposicionarse con el wrapper de comandos.
+        self._radio_list_pending = False
         if msg is not None and chat is not None:
             try:
                 await self._app.bot.delete_message(chat, msg)
@@ -1750,7 +1772,10 @@ class YTRemoteBot:
             return
         if accion == "close":
             await self._list_answer(query)
+            chat_fin = self._radio_chat_id
             await self._close_radio_message()
+            if chat_fin is not None:
+                await self._dejar_card_al_final(chat_fin)
             return
         if accion in ("prev", "next"):
             self._radio_page += -1 if accion == "prev" else 1
@@ -1793,6 +1818,90 @@ class YTRemoteBot:
         except (ValueError, IndexError):
             return None
 
+    def _radio_ancla_indice(self) -> int | None:
+        """Posicion de la emisora ACTUAL dentro del ancla de rotacion.
+        None si no hay ancla, si lo que suena no es emisora, o si la
+        emisora ya no esta en el listado."""
+        actual = self.queue.current
+        if actual is None or not actual.directo or not self._radio_ancla:
+            return None
+        for i, e in enumerate(self._radio_ancla):
+            if e.stream == actual.url:
+                return i
+        return None
+
+    def _radio_vecina(self, delta: int):
+        """La emisora siguiente (delta=1) o anterior (delta=-1) del listado
+        ancla: es como ⏭/⏮ y el auto-avance rotan en modo emisora. None si
+        no hay ancla o la emisora actual no sale de ella. Marca
+        `_radio_ancla_wrap` cuando la rotacion da la vuelta, para que el
+        aviso de "empezo de nuevo" se mande UNA vez."""
+        indice = self._radio_ancla_indice()
+        if indice is None:
+            return None
+        total = len(self._radio_ancla)
+        self._radio_ancla_wrap = (
+            delta > 0 and indice + 1 >= total
+        ) or (delta < 0 and indice == 0)
+        return self._radio_ancla[(indice + delta) % total]
+
+    def _radio_item_de(self, emisora) -> QueueItem:
+        """La emisora como QueueItem directo (lo que rad:play arma)."""
+        return QueueItem(
+            url=emisora.stream,
+            title=emisora.nombre,
+            thumbnail=emisora.logo,
+            channel=emisora.pais,
+            directo=True,
+        )
+
+    async def _radio_candidata_vecina(self, delta: int) -> QueueItem | None:
+        """La vecina del ancla como item para el AUTO-AVANCE del motor;
+        None si no hay ancla (el motor avisa 'se detuvo' con el chat de la
+        card). `_radio_ancla_wrap` queda prendida para que el CONSUMIDOR
+        mande el aviso de 'empezo de nuevo' y la apague (aqui no hay chat
+        disponible: el update es None)."""
+        vecina = self._radio_vecina(delta)
+        if vecina is None:
+            return None
+        return self._radio_item_de(vecina)
+
+    async def _radio_sonar_vecina(self, update, delta: int) -> None:
+        """⏭/⏮ en modo emisora: reproduce la vecina del listado ancla
+        (y la card anuncia cual entra). Sin ancla o con la emisora fuera
+        del listado: aviso honesto en vez de improvisar."""
+        vecina = self._radio_vecina(delta)
+        if vecina is None:
+            if self._radio_ancla is None:
+                mensaje = (
+                    "📻 Para rotar emisoras con "
+                    + ("⏭" if delta > 0 else "⏮")
+                    + " abrí /radio y elegí una desde un listado."
+                )
+            else:
+                mensaje = (
+                    "📻 Esa emisora ya no está en el listado con el que la "
+                    "elegiste: abrí /radio para seguir rotando."
+                )
+            await self._reply(update, mensaje)
+            return
+        item = self._radio_item_de(vecina)
+        ok = await self._play_item(update, item)
+        if not ok:
+            return
+        if self._radio_ancla_wrap:
+            self._radio_ancla_wrap = False
+            await self._reply(
+                update,
+                "🔁 La lista de emisoras volvió a empezar desde el principio.",
+            )
+        await self._send_track_card(
+            update,
+            ("📻 Siguiente emisora: " if delta > 0 else "📻 Emisora anterior: ")
+            + vecina.nombre,
+            item,
+        )
+
     async def _radio_play(self, query, update, user_id, accion: str) -> None:
         """Elegir emisora (dj): suena ya con el stream DIRECTO (sin yt-dlp)
         y el listado se cierra. Si no arranca, el listado queda en pie."""
@@ -1818,7 +1927,16 @@ class YTRemoteBot:
                 await self._list_answer(query)
                 ok = await self._play_item(update, item)
                 if ok:
+                    # Ancla de rotacion: desde ACA ⏭/⏮ y el auto-avance
+                    # giran dentro de ESTE listado. El current-item no-
+                    # emisora (una cancion de /buscar) aborta el ancla.
+                    self._radio_ancla = [
+                        e for e in self._radio_items if e.stream
+                    ] or None
+                    chat_fin = self._radio_chat_id
                     await self._close_radio_message()
+                    if chat_fin is not None:
+                        await self._dejar_card_al_final(chat_fin)
             finally:
                 self._from_card = False
 
@@ -2996,6 +3114,34 @@ class YTRemoteBot:
     def _schedule_prefetch(self, current: QueueItem) -> None:
         self.playback.schedule_prefetch(current)
 
+    async def _reproducir_directo_manual(
+        self, update, item: QueueItem, origen: str
+    ) -> bool:
+        """Camino manual (/prev, /next con pila, recarga de calidad) para
+        un item DIRECTO (emisora): su URL YA es el stream — sin yt-dlp
+        (antes iba por _stream_for y le aplicaba resolver a un stream icy)
+        — y la carga va por el helper comun del motor (logo + video-
+        unscaled + la imagen que nunca decide). False si no arranco."""
+        try:
+            await self.player.start()
+        except RuntimeError as exc:
+            if update is not None:
+                await self._reply(
+                    update, f"Problema al iniciar el reproductor: {exc}"
+                )
+            await self._notify_admin(f"mpv no arranco en {origen}: {exc}")
+            return False
+        fallo = await self.playback.cargar_stream_del_item(item, item.url, None)
+        if fallo is not None:
+            if update is not None:
+                await self._reply(update, f"No se pudo reproducir: {fallo}")
+            await self._notify_admin(
+                f"Fallo al reproducir {item.title} en {origen}: {fallo}"
+            )
+            return False
+        self._paused = False
+        return True
+
     async def _advance_after_end(self, context) -> None:
         await self.playback.advance_after_end(context)
 
@@ -3303,26 +3449,28 @@ class YTRemoteBot:
                 current = self.queue.current
                 if current is not None:
                     try:
-                        resolved = await self._stream_for(current.url)
-                        if not resolved:
-                            await self._notify_admin(
-                                f"No se pudo recargar '{current.title}' con calidad {level}p."
+                        if current.directo:
+                            # Emisora: su URL ya es el stream (sin yt-dlp) y
+                            # la carga va por el helper comun (logo y
+                            # video-unscaled intactos tras el salto).
+                            fallo = await self.playback.cargar_stream_del_item(
+                                current, current.url, None
                             )
-                        else:
-                            stream_url, audio_url = resolved
-                            await self.player.start()
-                            # Radio al recargar calidad: conserva el logo en
-                            # la ventana (sin imagen, mpv queda en negro).
-                            if current.directo:
-                                logo = await self.playback.logo_para_mpv(current)
-                                if logo:
-                                    await self.player.load(logo, stream_url)
-                                else:
-                                    await self.player.load(stream_url, audio_url)
-                            else:
-                                await self.player.load(stream_url, audio_url)
-                            await self.player.play()
+                            if fallo is not None:
+                                raise RuntimeError(fallo)
                             self._paused = False
+                        else:
+                            resolved = await self._stream_for(current.url)
+                            if not resolved:
+                                await self._notify_admin(
+                                    f"No se pudo recargar '{current.title}' con calidad {level}p."
+                                )
+                            else:
+                                stream_url, audio_url = resolved
+                                await self.player.start()
+                                await self.player.load(stream_url, audio_url)
+                                await self.player.play()
+                                self._paused = False
                     except Exception as exc:  # noqa: BLE001 - no romper la card
                         logger.warning("Fallo la recarga tras cambiar calidad: %s", exc)
                         await self._notify_admin(
@@ -3347,6 +3495,13 @@ class YTRemoteBot:
         """
         if self.queue.current is None:
             await self._reply(update, "No hay ninguna cancion reproduciendose.")
+            return
+
+        # ⏭ en modo emisora: rota por el listado ancla. El flujo estandar
+        # era radio de YouTube por artista (el semillero ponia al PAIS como
+        # artista y metia canciones de la nada).
+        if self.queue.current.directo:
+            await self._radio_sonar_vecina(update, +1)
             return
 
         # Modo playlist: cursor con wrap (logica previa).
@@ -3414,6 +3569,21 @@ class YTRemoteBot:
             # de "ya reproducidos" de la radio.
             self._cancel_prefetch()
             await self._render_pending(item.title, item)
+            if item.directo:
+                # Emisora que volvia por la pila: sin yt-dlp (su URL YA es
+                # el stream) y con el logo/unscaled del helper comun.
+                if not await self._reproducir_directo_manual(update, item, "/next (forward)"):
+                    return
+                self._registrar_historial(item)
+                self.queue._current = item
+                self.queue._items = []
+                self.queue._cursor = 0
+                if update is not None:
+                    await self._show_card(update.effective_chat.id)
+                await self._send_track_card(
+                    update, f"⏭️ Siguiente: {item.title}", item
+                )
+                return
             resolved = await self._stream_for(item.url)
             if not resolved:
                 await self._reply(update, "No se pudo resolver el video. Espera un momento e intenta de nuevo.")
@@ -3500,6 +3670,22 @@ class YTRemoteBot:
         # tema anterior. La miniatura del candidato va por _render_pending
         # (item explicito) sin tocar el estado del dominio.
         await self._render_pending(candidate.title, candidate)
+        if candidate.directo:
+            # Emisora por el salto: sin yt-dlp (su URL YA es el stream) y
+            # con el logo/unscaled del helper comun (es EMISORA solo si el
+            # candidato lo es — la radio de canciones nunca genera directos).
+            if not await self._reproducir_directo_manual(update, candidate, "/next"):
+                return
+            self._registrar_historial(candidate)
+            self.queue._current = candidate
+            self.queue._items = []
+            self.queue._cursor = 0
+            if update is not None:
+                await self._show_card(update.effective_chat.id)
+            await self._send_track_card(
+                update, f"⏭️ Siguiente: {candidate.title}", candidate
+            )
+            return
         resolved = await self._stream_for(candidate.url)
         if not resolved:
             await self._reply(update, "No se pudo resolver el video. Espera un momento e intenta de nuevo.")
@@ -3514,14 +3700,7 @@ class YTRemoteBot:
             return
         for attempt in range(2):
             try:
-                # Radio (desde el stack de /next): conserva el logo de la
-                # emisora en la ventana (sin imagen mpv queda en negro).
-                carga_url, carga_audio = stream_url, audio_url
-                if candidate.directo:
-                    logo = await self.playback.logo_para_mpv(candidate)
-                    if logo:
-                        carga_url, carga_audio = logo, stream_url
-                await self.player.load(carga_url, carga_audio)
+                await self.player.load(stream_url, audio_url)
                 await self.player.play()
                 self._paused = False
                 break
@@ -3563,6 +3742,12 @@ class YTRemoteBot:
             await self._reply(update, "No hay ninguna cancion reproduciendose.")
             return
 
+        # ⏮ en modo emisora: la emisora ANTERIOR del listado ancla
+        # (simetrica al ⏭; el flujo estandar de navegacion es de canciones).
+        if self.queue.current.directo:
+            await self._radio_sonar_vecina(update, -1)
+            return
+
         # Modo playlist: cursor con wrap (logica previa).
         if self.queue.has_playlist:
             item = self.queue.previous()
@@ -3600,6 +3785,21 @@ class YTRemoteBot:
             # extra a back, duplicando el item). Manejo manual.
             self._cancel_prefetch()
             await self._render_pending(item.title, item)
+            if item.directo:
+                # Emisora que volvia por la pila: sin yt-dlp (su URL YA es
+                # el stream) y con el logo/unscaled del helper comun.
+                if not await self._reproducir_directo_manual(update, item, "/prev (back)"):
+                    return
+                self.queue._current = item
+                self.queue._items = []
+                self.queue._cursor = 0
+                self._registrar_historial(item)
+                if update is not None:
+                    await self._show_card(update.effective_chat.id)
+                await self._send_track_card(
+                    update, f"⏮️ Anterior: {item.title}", item
+                )
+                return
             resolved = await self._stream_for(item.url)
             if not resolved:
                 await self._reply(update, "No se pudo resolver el video. Espera un momento e intenta de nuevo.")
@@ -3654,6 +3854,21 @@ class YTRemoteBot:
         # hacemos el manejo manual directo para preservar los stacks de navegacion.
         self._cancel_prefetch()
         await self._render_pending(item.title, item)
+        if item.directo:
+            # Emisora desde el historial: sin yt-dlp y con el logo mediante
+            # el helper comun (una emisora NUNCA pasa por resolucion).
+            if not await self._reproducir_directo_manual(update, item, "/prev"):
+                return
+            self.queue._current = item
+            self.queue._items = []
+            self.queue._cursor = 0
+            self._registrar_historial(item)
+            if update is not None:
+                await self._show_card(update.effective_chat.id)
+            await self._send_track_card(
+                update, f"⏮️ Anterior: {item.title}", item
+            )
+            return
         resolved = await self._stream_for(item.url)
         if not resolved:
             await self._reply(update, "No se pudo resolver el video. Espera un momento e intenta de nuevo.")

@@ -159,6 +159,26 @@ async def paises() -> "dict[str, dict]":
     return _POR_PAIS
 
 
+def _es_imagen_raster(datos: bytes) -> bool:
+    """True si los bytes parecen una imagen raster que mpv puede
+    decodificar (PNG, JPEG, GIF, BMP, ICO, WEBP). Rechaza SVG y HTML:
+    hay favicons del API que son SVG y mpv los rechaza (antes un logo
+    SVG rechazado MATABA la emisora entera con 'mpv rechazo el stream')."""
+    if not datos or len(datos) < 24:
+        return False
+    if datos[:4] == b"RIFF":
+        return datos[8:12] == b"WEBP"
+    cabeceras = (
+        b"\x89PNG\r\n\x1a\n",  # PNG
+        b"\xff\xd8\xff",  # JPEG
+        b"GIF87a",
+        b"GIF89a",  # GIF
+        b"BM",  # BMP
+        b"\x00\x00\x01\x00",  # ICO
+    )
+    return datos.startswith(cabeceras)
+
+
 async def bajar_logo(url: str) -> str | None:
     """Baja el logo de una emisora a data/radio/logo.png para que mpv lo
     muestre a pantalla completa mientras suena el stream (los directos de
@@ -180,6 +200,15 @@ async def bajar_logo(url: str) -> str | None:
             r.raise_for_status()
             datos = r.content
         if not datos or len(datos) > 8 * 1024 * 1024:
+            return None
+        if not _es_imagen_raster(datos):
+            # SVG, HTML de error, basura: sin imagen usable. El audio
+            # sigue; NUNCA se deja un logo podrido en el archivo de mpv.
+            import logging
+
+            logging.getLogger(__name__).info(
+                "Logo de emisora no es una imagen raster para mpv: %s", url
+            )
             return None
         destino.parent.mkdir(parents=True, exist_ok=True)
         destino.write_bytes(datos)

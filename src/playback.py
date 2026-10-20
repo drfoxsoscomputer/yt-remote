@@ -355,7 +355,40 @@ class PlaybackEngine:
         Si el prefetch ya resuelto el stream -> reproduce cacheado (cero
         silencio). Si no (duracion desconocida), reproduce por Fase A/B
         directo.
+
+        En modo EMISORA (item directo de /radio): el "siguiente" es la
+        vecina del listado ancla, no la radio de YouTube por artista (con
+        una emisora sonando el semillero ponia al PAIS como artista y el
+        avance metia canciones de la nada). Sin ancla, la radio de
+        emisoras se detiene con un aviso honesto.
         """
+        current_ahora = self._app.queue.current
+        if current_ahora is not None and current_ahora.directo:
+            self.cancel_prefetch()
+            chat_id = self._app._card_chat_id
+            vecina = await self._app._radio_candidata_vecina(+1)
+            if vecina is None:
+                if chat_id is not None:
+                    await self._app._enviar_al_chat(
+                        chat_id,
+                        "📻 La radio de emisoras se detuvo: no hay listado "
+                        "del que rotar. Abrí /radio para elegir otra.",
+                    )
+                return
+            if self._app._radio_ancla_wrap:
+                self._app._radio_ancla_wrap = False
+                if chat_id is not None:
+                    await self._app._enviar_al_chat(
+                        chat_id,
+                        "🔁 La lista de emisoras volvió a empezar desde el "
+                        "principio.",
+                    )
+            arranco = await self.play_item(None, vecina, preserve_current=False)
+            if arranco and chat_id is not None:
+                await self._app._enviar_al_chat(
+                    chat_id, f"📻 Siguiente emisora: {vecina.title}"
+                )
+            return
         if self.prefetch_resolved is not None:
             (candidate, from_queue), (stream_url, audio_url) = self.prefetch_resolved
             self.prefetch_resolved = None
@@ -437,19 +470,48 @@ class PlaybackEngine:
         si arranco, o el motivo real del ultimo fallo.
 
         Para los resueltos de YouTube usa load_with_retry (re-resolve una
-        vez ante URL vencida). Para un DIRECTO (emisora de /radio): baja el
-        logo y lo usa como imagen con el stream como pista de audio externa
-        (--image-display-duration=inf lo mantiene a pantalla completa),
-        porque el stream de radio no trae video y la ventana quedaria negra.
+        vez ante URL vencida). Para un DIRECTO (emisora de /radio):
+
+        - baja el logo y lo usa como imagen con el stream como pista de
+          audio externa (--image-display-duration=inf lo mantiene a
+          pantalla completa), porque el stream de radio no trae video y
+          la ventana quedaria negra;
+        - `video-unscaled` VA POR CARGA: con el logo asido
+          ('downscale-big', el favicon suele ser chico y escalado a 4K
+          quedaba pixelado), en cualquier otra carga vuelve a 'no' para
+          que los videos sigan llenando la pantalla;
+        - LA IMAGEN NUNCA DECIDE: si mpv rechaza el logo, el stream
+          entra solo (antes un favicon SVG rechazado mataba la emisora
+          entera con 'mpv rechazo el stream').
+
         Sin logo disponible el stream va solo, como siempre."""
-        if not item.directo:
+        es_radio = bool(item.directo)
+        if not es_radio:
+            await self._app.player.command("set", "video-unscaled", "no")
             return await self.load_with_retry(item.url, stream_url, audio_url)
         logo = await self.logo_para_mpv(item)
         try:
             if logo:
+                await self._app.player.command(
+                    "set", "video-unscaled", "downscale-big"
+                )
                 await self._app.player.load(logo, stream_url)
             else:
+                await self._app.player.command("set", "video-unscaled", "no")
                 await self._app.player.load(stream_url, audio_url)
+            await self._app.player.play()
+            return None
+        except RuntimeError as exc:
+            ultimo = str(exc)
+        if not logo:
+            return ultimo
+        logger.info(
+            "Logo rechazado por mpv; la emisora entra con el stream solo: %s",
+            item.title,
+        )
+        try:
+            await self._app.player.command("set", "video-unscaled", "no")
+            await self._app.player.load(stream_url, audio_url)
             await self._app.player.play()
             return None
         except RuntimeError as exc:
@@ -552,6 +614,11 @@ class PlaybackEngine:
         # Si sonó, queda en el historial guardado: cola, busqueda, radio o
         # siguiente automatico — TODOS los caminos de arranque pasan por aca.
         self._app._registrar_historial(item)
+        if not item.directo and self._app._radio_ancla is not None:
+            # Sueno una CANCION (no emisora): la radio de emisoras quedo
+            # cortada y su ancla muere — el ⏭ vuelve a comportarse como
+            # siempre para canciones (radio por artista / cola).
+            self._app._radio_ancla = None
         self._app._paused = False
         # Un tema DISTINTO al guardado descarta el instante del temporizador:
         # no debe resucitar la posicion de un tema que ya no es el actual. (El
