@@ -259,6 +259,12 @@ class Player:
             # force-window mantiene la ventana base siempre visible.
             "--keep-open=yes",
             "--force-window=yes",
+            # Un DIRECTO de radio es solo audio: el logo de la emisora entra
+            # como imagen (--image-display-duration=inf lo deja a pantalla
+            # completa mientras suena el stream). El valor SOLO afecta a
+            # imagenes, no a videos, y si la emisora no tiene logo no pasa
+            # nada (venta negra de siempre).
+            "--image-display-duration=inf",
             # Siempre arranca en pantalla completa (desde Telegram).
             # Si el usuario en la PC la cambia, no se fuerza de vuelta.
             "--fullscreen=yes",

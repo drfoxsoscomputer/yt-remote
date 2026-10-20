@@ -68,6 +68,15 @@ def _normalizar(filas: list) -> list:
     return salida
 
 
+def _motivo_red(exc: Exception) -> str:
+    """El motivo de una falla de red, SIEMPRE con el tipo de excepcion
+    incluido: hay excepciones de httpx cuyo str() sale VACIO (p. ej.
+    ConnectError de un servidor que corta), y el aviso quedaba
+    'radio-browser no responde ()', que no diagnostica nada."""
+    texto = str(exc).strip()
+    return f"{type(exc).__name__}: {texto}" if texto else type(exc).__name__
+
+
 async def _get(path: str, params: dict) -> list:
     """GET al API de radio-browser. Cualquier falla se devuelve honesta:
     RadioError con el motivo, para que el usuario vea QUE fallo."""
@@ -81,7 +90,7 @@ async def _get(path: str, params: dict) -> list:
             r.raise_for_status()
             datos = r.json()
     except Exception as exc:  # noqa: BLE001 - el motivo honesto va al usuario
-        raise RadioError(f"radio-browser no responde ({exc})") from exc
+        raise RadioError(f"radio-browser no responde ({_motivo_red(exc)})") from exc
     if not isinstance(datos, list):
         raise RadioError("radio-browser devolvió algo raro (no es una lista)")
     return datos
@@ -120,13 +129,117 @@ async def buscar_genero(termino: str, cantidad: int) -> list:
     return _normalizar(filas)
 
 
+def _normalizar_clave(texto: str) -> str:
+    """Clave para matchear nombres paises: minusculas SIN acentos y
+    espacios aplastados ('México' == 'mexico' == 'me  xico')."""
+    import unicodedata
+
+    sin_acento = "".join(
+        c
+        for c in unicodedata.normalize("NFD", texto)
+        if unicodedata.category(c) != "Mn"
+    )
+    return " ".join(sin_acento.casefold().split())
+
+
+_POR_PAIS: "dict[str, dict] | None" = None  # cache del catalogo de paises
+
+
+async def paises() -> "dict[str, dict]":
+    """Catalogo de paises del API, por nombre normalizado. Una sola
+    consulta por proceso (/json/countries son unos cientos de filas)."""
+    global _POR_PAIS  # noqa: PLW0603
+    if _POR_PAIS is None:
+        filas = await _get("/json/countries", {})
+        catalogo: dict[str, dict] = {}
+        for fila in filas:
+            if isinstance(fila, dict) and fila.get("iso_3166_1"):
+                catalogo[_normalizar_clave(str(fila.get("name") or ""))] = fila
+        _POR_PAIS = catalogo
+    return _POR_PAIS
+
+
+async def bajar_logo(url: str) -> str | None:
+    """Baja el logo de una emisora a data/radio/logo.png para que mpv lo
+    muestre a pantalla completa mientras suena el stream (los directos de
+    radio son solo audio: sin imagen, mpv no tiene mas que una ventana
+    negra). Devuelve la ruta o None si no hay logo / no se pudo bajar:
+    la imagen NUNCA frena el audio. El tamaño queda topado por si la
+    'favicon' es en realidad un album entero."""
+    url = (url or "").strip()
+    if not url.lower().startswith(("http://", "https://")):
+        return None
+    import httpx
+
+    from bot_process import data_dir
+
+    destino = data_dir() / "radio" / "logo.png"
+    try:
+        async with httpx.AsyncClient(timeout=10.0, follow_redirects=True) as cli:
+            r = await cli.get(url)
+            r.raise_for_status()
+            datos = r.content
+        if not datos or len(datos) > 8 * 1024 * 1024:
+            return None
+        destino.parent.mkdir(parents=True, exist_ok=True)
+        destino.write_bytes(datos)
+    except Exception as exc:  # noqa: BLE001 - sin imagen no pasa nada
+        import logging
+
+        logging.getLogger(__name__).info(
+            "Logo de emisora no disponible (%s): %s", url, _motivo_red(exc)
+        )
+        return None
+    return str(destino)
+
+
 async def buscar_pais(termino: str, cantidad: int) -> list:
-    """Busqueda por pais: dos letras (VE, MX) = countrycode oficial; lo
-    demas = nombre del pais tal como lo escribio el usuario."""
-    clave = "countrycode" if len(termino) == 2 and termino.isalpha() else "country"
-    valor = termino.upper() if clave == "countrycode" else termino
+    """Busqueda por pais. El API pide el nombre del pais EXACTO (es
+    case-sensitive: country=venezuela devuelve 0 emisores, country=Venezuela
+    funciona), asi que el nombre se RESUELVE contra el catalogo oficial
+    (/json/countries, se pide una vez y queda en cache) y el filtro sale
+    del codigo ISO de dos letras. Con 2 letras va directo como countrycode.
+    Sin match: motivo honesto en vez del 'no encontre emisoras' que no
+    diagnostica nada."""
+    if len(termino) == 2 and termino.isalpha():
+        filas = await _get(
+            "/json/stations/search",
+            _params(
+                countrycode=termino.upper(),
+                limit=str(cantidad),
+                order="votes",
+                reverse="true",
+            ),
+        )
+        return _normalizar(filas)
+    catalogo = await paises()
+    clave = _normalizar_clave(termino)
+    fila = catalogo.get(clave)
+    if fila is None:
+        # Match parcial: el API nombra a los paises por su nombre OFICIAL
+        # ('Bolivarian Republic Of Venezuela'), asi que 'venezuela' no
+        # iguala exacto pero SI esta DENTRO del nombre. Entre varios
+        # candidatos gana el que mas emisoras tiene (el que la gente
+        # realmente escucha); sin candidatos ahi si se avisa honesto.
+        candidatas = [
+            (fila_c, int(fila_c.get("stationcount") or 0))
+            for nombre_clave, fila_c in catalogo.items()
+            if clave and (clave in nombre_clave or nombre_clave in clave)
+        ]
+        if candidatas:
+            fila = max(candidatas, key=lambda par: par[1])[0]
+    if fila is None or not fila.get("iso_3166_1"):
+        raise RadioError(
+            f"no reconozco «{termino}» como país; usá el nombre completo "
+            "(Venezuela, Colombia...) o el código de dos letras (VE, MX)"
+        )
     filas = await _get(
         "/json/stations/search",
-        _params(**{clave: valor}, limit=str(cantidad), order="votes", reverse="true"),
+        _params(
+            countrycode=str(fila["iso_3166_1"]),
+            limit=str(cantidad),
+            order="votes",
+            reverse="true",
+        ),
     )
     return _normalizar(filas)

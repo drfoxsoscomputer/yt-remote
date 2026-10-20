@@ -34,6 +34,7 @@ from queue_manager import QueueItem
 from search import last_resolve_error, resolve_stream_url, search
 
 import artist_match
+import radio as radio_mod
 
 logger = logging.getLogger(__name__)
 
@@ -416,6 +417,45 @@ class PlaybackEngine:
 
     # --- Reproducir --------------------------------------------------------
 
+
+    async def logo_para_mpv(self, item: QueueItem) -> str | None:
+        """El logo de la emisora como archivo local para mpv (None si no
+        hay o no se pudo bajar): las radios de /radio son solo audio y sin
+        imagen mpv muestra una ventana negra. La imagen NUNCA frena el
+        audio: cualquier falla del logo se devuelve como None."""
+        try:
+            return await radio_mod.bajar_logo(item.thumbnail)
+        except Exception as exc:  # noqa: BLE001 - la imagen no pasa nada
+            logger.info("Logo de emisora no disponible: %s", exc)
+            return None
+
+
+    async def cargar_stream_del_item(
+        self, item: QueueItem, stream_url: str, audio_url: str | None
+    ) -> str | None:
+        """Carga en mpv el stream YA resuelto y lo reproduce. Devuelve None
+        si arranco, o el motivo real del ultimo fallo.
+
+        Para los resueltos de YouTube usa load_with_retry (re-resolve una
+        vez ante URL vencida). Para un DIRECTO (emisora de /radio): baja el
+        logo y lo usa como imagen con el stream como pista de audio externa
+        (--image-display-duration=inf lo mantiene a pantalla completa),
+        porque el stream de radio no trae video y la ventana quedaria negra.
+        Sin logo disponible el stream va solo, como siempre."""
+        if not item.directo:
+            return await self.load_with_retry(item.url, stream_url, audio_url)
+        logo = await self.logo_para_mpv(item)
+        try:
+            if logo:
+                await self._app.player.load(logo, stream_url)
+            else:
+                await self._app.player.load(stream_url, audio_url)
+            await self._app.player.play()
+            return None
+        except RuntimeError as exc:
+            return str(exc)
+
+
     async def load_with_retry(
         self, candidate_url: str, stream_url: str, audio_url: str | None
     ) -> str | None:
@@ -502,7 +542,7 @@ class PlaybackEngine:
             await self._app._notify_admin(f"mpv no arranco: {exc}")
             return False
 
-        fallo = await self.load_with_retry(item.url, stream_url, audio_url)
+        fallo = await self.cargar_stream_del_item(item, stream_url, audio_url)
         if fallo is not None:
             await self._app._reply(update, f"No se pudo reproducir: {fallo}")
             await self._app._notify_admin(

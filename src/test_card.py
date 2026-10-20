@@ -2548,6 +2548,230 @@ async def test_radio_reproduce_directo_sin_yt_dlp():
     assert prefetch == [], prefetch
 
 
+async def test_radio_logo_entra_como_video_con_audio_externo():
+    """Emisora CON logo: la imagen se carga como 'video' de mpv y el stream
+    suena como pista de audio externa (los directos de radio no tienen
+    video: sin esto la ventana del reproductor es negra)."""
+    import radio as radio_mod
+    from queue_manager import QueueItem
+
+    b = make_bot()
+    viejo_bajar = radio_mod.bajar_logo
+
+    async def _logo_falso(url):
+        return "C:/tmp/logo.png" if url == "https://logo.png" else None
+
+    radio_mod.bajar_logo = _logo_falso
+    try:
+        ok = await b._play_item(
+            FakeMessageUpdate("/radio"),
+            QueueItem(
+                url="https://stream.example/live",
+                title="Mango Radio",
+                thumbnail="https://logo.png",
+                directo=True,
+            ),
+        )
+    finally:
+        radio_mod.bajar_logo = viejo_bajar
+    assert ok is True
+    assert b.player.loaded == [
+        ("C:/tmp/logo.png", "https://stream.example/live")
+    ], b.player.loaded
+
+
+async def test_radio_sin_logo_carga_el_stream_solo():
+    """Emisora SIN logo (o con logo no bajable): el stream entra como el
+    tema principal, como siempre — la imagen nunca frena el audio."""
+    import radio as radio_mod
+    from queue_manager import QueueItem
+
+    b = make_bot()
+    viejo_bajar = radio_mod.bajar_logo
+
+    async def _logo_nulo(url):
+        return None
+
+    radio_mod.bajar_logo = _logo_nulo
+    try:
+        ok = await b._play_item(
+            FakeMessageUpdate("/radio"),
+            QueueItem(
+                url="https://stream.example/live",
+                title="Mango Radio",
+                thumbnail="https://logo.png",
+                directo=True,
+            ),
+        )
+    finally:
+        radio_mod.bajar_logo = viejo_bajar
+    assert ok is True
+    assert b.player.loaded == [("https://stream.example/live", None)], b.player.loaded
+
+
+async def test_buscar_pais_nombre_resuelve_codigo_iso():
+    """'venezuela' en minusculas ya no muere: el nombre se resuelve contra
+    /json/countries (catalogo del API) y el filtro sale con el codigo ISO
+    (el API es case-sensitive con el nombre: country=venezuela => 0)."""
+    import radio as radio_mod
+
+    viejo_get = radio_mod._get
+    viejo_cache = radio_mod._POR_PAIS
+    capturas = []
+
+    async def _get_falso(path, params):
+        capturas.append((path, dict(params)))
+        if path == "/json/countries":
+            return [
+                {"name": "Venezuela", "iso_3166_1": "VE"},
+                {"name": "México", "iso_3166_1": "MX"},
+            ]
+        return [
+            {
+                "name": "Unión Radio 90.3 FM Caracas\n",
+                "url_resolved": "https://s/1",
+                "country": "Venezuela",
+                "favicon": "https://f/1",
+            }
+        ]
+
+    radio_mod._get = _get_falso
+    radio_mod._POR_PAIS = None
+    try:
+        emisoras = await radio_mod.buscar_pais("venezuela", 20)
+    finally:
+        radio_mod._get = viejo_get
+        radio_mod._POR_PAIS = viejo_cache
+
+    assert capturas[0][0] == "/json/countries", capturas
+    assert capturas[1] == (
+        "/json/stations/search",
+        {
+            "hidebroken": "true",
+            "countrycode": "VE",
+            "limit": "20",
+            "order": "votes",
+            "reverse": "true",
+        },
+    ), capturas
+    assert [e.nombre for e in emisoras] == ["Unión Radio 90.3 FM Caracas"], emisoras
+
+
+async def test_buscar_pais_ignora_acentos_y_dos_letras_va_directo():
+    """'méxico' matchea 'México' del catalogo (sin acentos) => MX; y con
+    dos letras ('Ve') va DIRECTO como countrycode, sin catalogo."""
+    import radio as radio_mod
+
+    viejo_get = radio_mod._get
+    viejo_cache = radio_mod._POR_PAIS
+    capturas = []
+
+    async def _get_falso(path, params):
+        capturas.append((path, dict(params)))
+        if path == "/json/countries":
+            return [{"name": "México", "iso_3166_1": "MX"}]
+        return []
+
+    radio_mod._get = _get_falso
+    radio_mod._POR_PAIS = None
+    try:
+        await radio_mod.buscar_pais("méxico ", 20)
+        assert capturas[-1][1]["countrycode"] == "MX", capturas
+        capturas.clear()
+        await radio_mod.buscar_pais("Ve", 5)
+    finally:
+        radio_mod._get = viejo_get
+        radio_mod._POR_PAIS = viejo_cache
+
+    assert len(capturas) == 1, capturas  # 'Ve': sin consulta de catalogo
+    assert capturas[0][0] == "/json/stations/search", capturas
+    assert capturas[0][1]["countrycode"] == "VE", capturas
+
+
+async def test_buscar_pais_desconocido_avisa_honesto():
+    """Pais que no esta en el catalogo: RadioError con EL MOTIVO (y la
+    sugerencia del codigo de dos letras), no el 'no encontre emisoras'
+    que no diagnostica nada."""
+    import radio as radio_mod
+
+    viejo_get = radio_mod._get
+    viejo_cache = radio_mod._POR_PAIS
+
+    async def _get_falso(path, params):
+        return [{"name": "Venezuela", "iso_3166_1": "VE"}]
+
+    radio_mod._get = _get_falso
+    radio_mod._POR_PAIS = None
+    try:
+        await radio_mod.buscar_pais("atlantis", 20)
+    except radio_mod.RadioError as exc:
+        aviso = str(exc)
+    else:
+        raise AssertionError("debia fallar con RadioError")
+    finally:
+        radio_mod._get = viejo_get
+        radio_mod._POR_PAIS = viejo_cache
+
+    assert "no reconozco «atlantis» como país" in aviso, aviso
+    assert "código de dos letras" in aviso, aviso
+
+
+async def test_buscar_pais_nombre_oficial_del_api_matchea_parcial():
+    """El API nombra a los paises por su nombre OFICIAL ('Bolivarian
+    Republic Of Venezuela'): 'venezuela' no iguala exacto pero SI matchea
+    por subcadena, y el filtro sale con el codigo ISO correcto."""
+    import radio as radio_mod
+
+    viejo_get = radio_mod._get
+    viejo_cache = radio_mod._POR_PAIS
+    capturas = []
+
+    async def _get_falso(path, params):
+        capturas.append((path, dict(params)))
+        if path == "/json/countries":
+            return [
+                {
+                    "name": "Bolivarian Republic Of Venezuela",
+                    "iso_3166_1": "VE",
+                    "stationcount": 200,
+                },
+                {
+                    "name": "Saint Vincent And The Grenadines",
+                    "iso_3166_1": "VC",
+                    "stationcount": 3,
+                },
+            ]
+        return [
+            {
+                "name": "Unión Radio\n",
+                "url_resolved": "https://s/1",
+                "country": "Venezuela",
+                "favicon": "",
+            }
+        ]
+
+    radio_mod._get = _get_falso
+    radio_mod._POR_PAIS = None
+    try:
+        emisoras = await radio_mod.buscar_pais("venezuela", 10)
+    finally:
+        radio_mod._get = viejo_get
+        radio_mod._POR_PAIS = viejo_cache
+
+    assert capturas[1][1]["countrycode"] == "VE", capturas
+    assert [e.nombre for e in emisoras] == ["Unión Radio"], emisoras
+
+
+def test_motivo_red_incluye_tipo_de_excepcion():
+    """El aviso de caida de radio-browser nunca sale con el parentesis
+    vacio: hay excepciones de httpx con str() vacio y el tipo es lo unico
+    que diagnostica ('no responde (ConnectError)')."""
+    import radio as radio_mod
+
+    assert radio_mod._motivo_red(ValueError("")) == "ValueError"
+    assert radio_mod._motivo_red(ValueError("boom")) == "ValueError: boom"
+
+
 def _stub_letra(valor=None, error=None):
     """Reemplaza lyrics.buscar_letra por un stub que registra la llamada y
     devuelve `valor` (o lanza `error`). Se restaura con el viejo que

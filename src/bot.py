@@ -3311,7 +3311,16 @@ class YTRemoteBot:
                         else:
                             stream_url, audio_url = resolved
                             await self.player.start()
-                            await self.player.load(stream_url, audio_url)
+                            # Radio al recargar calidad: conserva el logo en
+                            # la ventana (sin imagen, mpv queda en negro).
+                            if current.directo:
+                                logo = await self.playback.logo_para_mpv(current)
+                                if logo:
+                                    await self.player.load(logo, stream_url)
+                                else:
+                                    await self.player.load(stream_url, audio_url)
+                            else:
+                                await self.player.load(stream_url, audio_url)
                             await self.player.play()
                             self._paused = False
                     except Exception as exc:  # noqa: BLE001 - no romper la card
@@ -3505,7 +3514,14 @@ class YTRemoteBot:
             return
         for attempt in range(2):
             try:
-                await self.player.load(stream_url, audio_url)
+                # Radio (desde el stack de /next): conserva el logo de la
+                # emisora en la ventana (sin imagen mpv queda en negro).
+                carga_url, carga_audio = stream_url, audio_url
+                if candidate.directo:
+                    logo = await self.playback.logo_para_mpv(candidate)
+                    if logo:
+                        carga_url, carga_audio = logo, stream_url
+                await self.player.load(carga_url, carga_audio)
                 await self.player.play()
                 self._paused = False
                 break
@@ -3598,7 +3614,14 @@ class YTRemoteBot:
                 return
             for attempt in range(2):
                 try:
-                    await self.player.load(stream_url, audio_url)
+                    # Radio (/prev): conserva el logo de la emisora en la
+                    # ventana (sin imagen mpv queda en negro).
+                    carga_url, carga_audio = stream_url, audio_url
+                    if item.directo:
+                        logo = await self.playback.logo_para_mpv(item)
+                        if logo:
+                            carga_url, carga_audio = logo, stream_url
+                    await self.player.load(carga_url, carga_audio)
                     await self.player.play()
                     self._paused = False
                     self.queue._current = item
