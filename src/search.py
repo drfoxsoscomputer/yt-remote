@@ -80,14 +80,34 @@ def is_youtube_link(text: str) -> bool:
     return bool(_LINK_RE.match(text.strip()))
 
 
+# (nombre, opts extra) de la tanda de intentos de player client, en orden:
+# 1. visionos: a este client NO le aplican el bloqueo intermitente
+#    "Sign in to confirm you're not a bot" del client web y expone los
+#    formatos de alta resolucion.
+# 2. android: ABRE el contenido marcado "hecho para ninos" (coritos,
+#    canciones infantiles) que visionos y el web rechazan con
+#    "This video is not available". Su techo es 360p combinado
+#    (formato 18), pero es infinitamente mejor que no poder reproducir
+#    NADA de esa familia. Verificado en vivo (20/oct/2026) con el video
+#    UGs5uPiFbCY: visionos/default -> no available; android -> OK.
+# 3. default: ultima rueda (hay redes/ISP que rechazan los otros).
+_ESTRATEGIAS_CLIENT: "list[tuple[str, dict]]" = [
+    ("visionos", {"extractor_args": {"youtube": {"player_client": ["visionos"]}}}),
+    ("android", {"extractor_args": {"youtube": {"player_client": ["android"]}}}),
+    ("default", {}),
+]
+
+
 def search(query: str, max_results: int = 5) -> list[SearchResult]:
     """Busca videos en YouTube y devuelve los resultados.
 
-    Usa el mismo player client 'visionos' que resolve_stream_url (con
-    fallback al client por defecto): al client visionos no le aplican el
+    Usa el mismo player client que resolve_stream_url (visionos -> android
+    -> default, ver _ESTRATEGIAS_CLIENT): a visionos no le aplican el
     bloqueo intermitente "Sign in to confirm you're not a bot" del client
-    web. Si ambos fallan, el motivo queda en _SEARCH_LAST_ERROR (que el bot
-    expone por Telegram) en lugar de perderse en silencio.
+    web, y android rescata el contenido "hecho para ninos" que en la web
+    responde "This video is not available". Si todos fallan, el motivo
+    queda en _SEARCH_LAST_ERROR (que el bot expone por Telegram) en lugar
+    de perderse en silencio.
     """
     global _SEARCH_LAST_ERROR  # noqa: PLW0603
     _SEARCH_LAST_ERROR = ""
@@ -101,11 +121,9 @@ def search(query: str, max_results: int = 5) -> list[SearchResult]:
         "noplaylist": True,
     }
 
-    # (nombre, opts extra). Primer intento: visionos. Fallback: client default.
-    strategies: "list[tuple[str, dict]]" = [
-        ("visionos", {"extractor_args": {"youtube": {"player_client": ["visionos"]}}}),
-        ("default", {}),
-    ]
+    # (nombre, opts extra): una sola tanda en _ESTRATEGIAS_CLIENT
+    # (visionos -> android -> default), compartida con resolve_stream_url.
+    strategies = _ESTRATEGIAS_CLIENT
 
     info: "dict[str, Any] | None" = None
     for _client_name, extra in strategies:
@@ -304,13 +322,16 @@ def quick_playlist(url: str, max_results: int = 15) -> tuple[list[SearchResult],
 def resolve_stream_url(youtube_url: str) -> tuple[str, str | None] | None:
     """Resuelve un link de YouTube a una URL de stream directo que mpv puede reproducir.
 
-    Usa el player client 'visionos' de yt-dlp: no le aplican el bloqueo de
-    "Sign in to confirm you're not a bot" (a diferencia del client web) y
-    expone los formatos de alta resolucion. Con 'android' el bot quedaba
-    limitado a 360p.
+    Usa los player clients de _ESTRATEGIAS_CLIENT en orden: 'visionos' no
+    le aplican el bloqueo de "Sign in to confirm you're not a bot" (a
+    diferencia del client web) y expone los formatos de alta resolucion;
+    'android' abre el contenido marcado "hecho para ninos" que el resto
+    rechaza con "This video is not available" (con el techo de 360p
+    combinado: mejor que poder reproducir nada).
 
-    Si 'visionos' falla (hay redes/ISP que lo rechazan), se reintenta UNA vez
-    con el client por defecto de yt-dlp. El ultimo error real queda expuesto
+    Si 'visionos' falla (hay redes/ISP que lo rechazan, o el contenido
+    esta hecho para ninos), se reintenta con 'android' y despues con el
+    client por defecto de yt-dlp. El ultimo error real queda expuesto
     en last_resolve_error para que el bot pueda diagnosticar por Telegram.
 
     La resolucion se limita al tope MAX_HEIGHT (configurable con
@@ -332,11 +353,9 @@ def resolve_stream_url(youtube_url: str) -> tuple[str, str | None] | None:
     global _RESOLVE_LAST_ERROR  # noqa: PLW0603
     _RESOLVE_LAST_ERROR = ""
 
-    # (nombre, opts extra). Primer intento: visionos. Fallback: client default.
-    strategies: "list[tuple[str, dict]]" = [
-        ("visionos", {"extractor_args": {"youtube": {"player_client": ["visionos"]}}}),
-        ("default", {}),
-    ]
+    # (nombre, opts extra): una sola tanda en _ESTRATEGIAS_CLIENT
+    # (visionos -> android -> default), compartida con search().
+    strategies = _ESTRATEGIAS_CLIENT
 
     for client_name, extra in strategies:
         info = _extract_info(client_name, extra, youtube_url)

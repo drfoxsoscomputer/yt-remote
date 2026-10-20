@@ -4493,6 +4493,52 @@ def test_resolve_explica_video_sin_formatos():
         search_mod._extract_info = original
 
 
+def test_estrategias_client_orden_y_kids_fallback():
+    """El orden de players es visionos -> android -> default, con android
+    ANTES del default: es el que abre el contenido 'hecho para ninos'
+    (coritos, infantiles) que visionos y el web rechazan con
+    'This video is not available'. Si alguien vuelve a dejar android
+    afuera, esta prueba avisa (el contenido Corito quedo muerto otra
+    vez, detectado en vivo el 20/oct/2026)."""
+    import search as search_mod
+
+    nombres = [n for n, _ in search_mod._ESTRATEGIAS_CLIENT]
+    assert nombres == ["visionos", "android", "default"], nombres
+    estrategias = dict(search_mod._ESTRATEGIAS_CLIENT)
+    assert (
+        estrategias["android"]["extractor_args"]["youtube"]["player_client"]
+        == ["android"]
+    )
+    assert estrategias["default"] == {}
+
+
+def test_resolucion_kids_cae_de_visionos_a_android():
+    """visionos acusa 'This video is not available' (contenido hecho para
+    ninos) -> se sigue con android Y SE RESUELVE; el client default ni se
+    consulta (si android abrio, no hay tercer intento)."""
+    import search as search_mod
+
+    original = search_mod._extract_info
+    usados: "list[str]" = []
+
+    def _extrae(client_name, extra, youtube_url):
+        usados.append(client_name)
+        if client_name == "visionos":
+            search_mod._RESOLVE_LAST_ERROR = (
+                "ERROR: [youtube] abc: This video is not available"
+            )
+            return None
+        return {"url": "https://stream/ok.mp4", "format_id": "18"}
+
+    search_mod._extract_info = _extrae  # type: ignore[assignment]
+    try:
+        r = search_mod.resolve_stream_url("https://www.youtube.com/watch?v=abc")
+    finally:
+        search_mod._extract_info = original
+    assert r == ("https://stream/ok.mp4", None), r
+    assert usados == ["visionos", "android"], usados
+
+
 async def test_search_keyboard_has_cancel_button():
     """El listado de /buscar muestra 5 canciones por pagina, cada una con su
     nombre y su duracion, y termina con la fila [◀ ❌ ▶]: en la primera pagina el
