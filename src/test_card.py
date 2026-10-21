@@ -367,7 +367,7 @@ async def test_dispatch_seek():
     upd = FakeUpdate("ctl:seek+10", user_id=99)
     b.player.running = True
     await b._on_control(upd, SimpleNamespace(args=[]), "seek+10")
-    assert upd.answered == ("No tiene permiso para eso.",), upd.answered
+    assert upd.answered == ("🔒 El bot es solo para dj/admin.",), upd.answered
     assert b.player.seeks == [-10, 10], "el seek denegado no debe llegar al player"
 
 
@@ -401,10 +401,10 @@ async def test_salud_diagnostico_admin():
     b = make_bot()
     h = b._require("admin", b.cmd_salud)
 
-    # No-admin: denegado, sin diagnostico.
+    # No-admin: denegado con el aviso unico, sin diagnostico.
     upd_user = FakeMessageUpdate("/salud", user_id=50)
     await h(upd_user, SimpleNamespace(args=[]))
-    assert any("denegado" in t for t, _ in upd_user.sent), upd_user.sent
+    assert "🔒 El bot es solo para dj/admin." == upd_user.sent[0][0], upd_user.sent
     assert not any("🩺" in t for t, _ in upd_user.sent), "el user no ve nada"
 
     # Admin: una sola pantalla con encabezado + las 3 lineas.
@@ -532,7 +532,7 @@ async def test_ajustes_menu_roles_y_cierre():
     upd_user = FakeUpdate("ctl:ajustes", user_id=50, chat_id=44, message_id=7)
     b._app.bot.edited.clear()
     await b._on_control(upd_user, SimpleNamespace(args=[]), "ajustes")
-    assert upd_user.answered and "permiso" in str(upd_user.answered[0]), upd_user.answered
+    assert upd_user.answered and "El bot es solo para dj/admin" in str(upd_user.answered[0]), upd_user.answered
     assert b._app.bot.edited == [], "el user no abre Ajustes"
 
     # dj (77, rol por defecto de make_bot): una opcion por fila, solo 💤 + ❌.
@@ -581,7 +581,7 @@ async def test_sleep_permisos_y_disparo():
     b._app.bot.edited.clear()
     upd = FakeUpdate("ctl:apagar", user_id=50, chat_id=44, message_id=7)
     await b._on_control(upd, SimpleNamespace(args=[]), "apagar")
-    assert upd.answered and "permiso" in str(upd.answered[0]), upd.answered
+    assert upd.answered and "El bot es solo para dj/admin" in str(upd.answered[0]), upd.answered
     assert b._app.bot.edited == [], "el user no abre el menu"
 
     upd2 = FakeUpdate("ap:30", user_id=50, chat_id=44, message_id=7)
@@ -1686,7 +1686,7 @@ async def test_actualizar_solo_admin():
 
     upd_user = FakeMessageUpdate("/actualizar", user_id=50)
     await h(upd_user, SimpleNamespace(args=[]))
-    assert any("denegado" in t for t, _ in upd_user.sent), upd_user.sent
+    assert "🔒 El bot es solo para dj/admin." == upd_user.sent[0][0], upd_user.sent
     assert llamado == [], "el user no debe disparar la actualizacion"
 
 
@@ -2467,7 +2467,7 @@ async def test_radio_elegir_es_dj_y_sonar():
 
     upd_user = FakeUpdate("rad:play:0", user_id=50)
     await b._on_radio_callback(upd_user, None)
-    assert "Solo el admin o un dj pueden elegir." == upd_user.answered_kwargs.get(
+    assert "🔒 El bot es solo para dj/admin." == upd_user.answered_kwargs.get(
         "text"
     ), upd_user.answered_kwargs
     assert registro == [] and b._radio_message_id == 7
@@ -3584,8 +3584,8 @@ async def test_list_button_opens_separate_message():
 
 
 async def test_list_open_for_user_no_track_buttons():
-    """Un user ve la lista pero NO recibe botones de tema: solo 🕘 historial
-    y navegacion."""
+    """Regla de B: un sin rol NI SIQUIERA abre el 📋: aviso unico y nada
+    en pantalla (la lista ya no tiene modo delectura para user)."""
     from queue_manager import QueueItem
 
     b = make_bot()
@@ -3593,17 +3593,11 @@ async def test_list_open_for_user_no_track_buttons():
     b.queue.set_playlist(
         [QueueItem(url=f"u{i}", title=f"Tema {i}") for i in range(3)]
     )
-    await b._on_control(
-        FakeUpdate("ctl:lista", user_id=50, chat_id=44),
-        SimpleNamespace(args=[]),
-        "lista",
-    )
-    assert b._list_can_select is False
-    kb = b._app.bot.sent[0][2]["reply_markup"]
-    rows = kb.inline_keyboard
-    assert len(rows) == 2, "user: sin botones de tema, solo 🕘 + navegacion"
-    assert [btn.text for btn in rows[0]] == ["🕘 Historial"]
-    assert [btn.text for btn in rows[1]] == ["·", "❌", "·"]
+    upd = FakeUpdate("ctl:lista", user_id=50, chat_id=44)
+    await b._on_control(upd, SimpleNamespace(args=[]), "lista")
+    assert upd.answered == ("🔒 El bot es solo para dj/admin.",), upd.answered
+    assert b._list_message_id is None, "el user no abre la lista"
+    assert b._app.bot.sent == [], "nada se envia a un user"
 
 
 async def test_list_radio_shows_current():
@@ -3616,7 +3610,7 @@ async def test_list_radio_shows_current():
     b.roles.set_role(50, "user")
     b.queue.set_current(QueueItem(url="u0", title="Tema Sonando"))
     await b._on_control(
-        FakeUpdate("ctl:lista", user_id=50, chat_id=44),
+        FakeUpdate("ctl:lista", user_id=77, chat_id=44),
         SimpleNamespace(args=[]),
         "lista",
     )
@@ -3629,7 +3623,7 @@ async def test_list_radio_shows_current():
 
     list_id = b._list_message_id
     await b._on_list_callback(
-        FakeUpdate("lst:close", user_id=50, chat_id=44), SimpleNamespace(args=[])
+        FakeUpdate("lst:close", user_id=77, chat_id=44), SimpleNamespace(args=[])
     )
     assert b._list_message_id is None, "tocar el tema en radio cierra la lista"
     assert (44, list_id) in b._app.bot.deleted, "se desvanece al cerrar"
@@ -3777,7 +3771,7 @@ async def test_list_user_cannot_select():
     upd = FakeUpdate("lst:3", user_id=50, chat_id=44)
     await b._on_list_callback(upd, SimpleNamespace(args=[]))
     assert upd.answered_kwargs.get("show_alert") is True
-    assert "Solo el admin o un dj" in upd.answered_kwargs.get("text", "")
+    assert "🔒 El bot es solo para dj/admin." == upd.answered_kwargs.get("text", "")
     assert b._list_message_id == list_id, "la lista sigue abierta"
     assert b._app.bot.deleted == [], "nada se borra"
     assert b.player.loaded == [], "nada se reproduce"
@@ -3794,11 +3788,17 @@ async def test_list_close_deletes_for_anyone():
         b.queue.set_playlist(
             [QueueItem(url=f"u{i}", title=f"Tema {i}") for i in range(3)]
         )
+        upd = FakeUpdate("ctl:lista", user_id=77, chat_id=44)
         await b._on_control(
-            FakeUpdate("ctl:lista", user_id=77, chat_id=44),
+            upd,
             SimpleNamespace(args=[]),
             "lista",
         )
+        if role == "user":
+            # Regla de B: el sin rol ni abre; el aviso unico responde.
+            assert upd.answered == ("🔒 El bot es solo para dj/admin.",), upd.answered
+            assert b._list_message_id is None
+            continue
         list_id = b._list_message_id
         await b._on_list_callback(
             FakeUpdate("lst:close", user_id=77, chat_id=44), SimpleNamespace(args=[])
@@ -3957,8 +3957,8 @@ async def test_list_historial_rep_link_del():
     assert b._list_message_id is None, "repetir cierra la lista"
     assert (44, list_id) in b._app.bot.deleted
 
-    # 🔗 enlace: cualquiera lo pide; el bot manda el URL al chat y la lista
-    # sigue abierta.
+    # 🔗 enlace: dj lo pide (regla de B: sin rol no toca nada); el bot manda
+    # el URL al chat y la lista sigue abierta.
     await b._on_control(
         FakeUpdate("ctl:lista", user_id=77, chat_id=44), SimpleNamespace(args=[]), "lista"
     )
@@ -3966,7 +3966,7 @@ async def test_list_historial_rep_link_del():
         FakeUpdate("lst:histm", user_id=77, chat_id=44), SimpleNamespace(args=[])
     )
     enviados_antes = len(b._app.bot.sent)
-    upd = FakeUpdate("lst:link:1", user_id=50, chat_id=44)
+    upd = FakeUpdate("lst:link:1", user_id=77, chat_id=44)
     await b._on_list_callback(upd, SimpleNamespace(args=[]))
     assert b._app.bot.sent[enviados_antes][1] == "ub", b._app.bot.sent
     assert b._list_message_id is not None, "copiar el enlace no cierra"
@@ -3985,28 +3985,26 @@ async def test_list_historial_rep_link_del():
 
 
 async def test_list_historial_permisos():
-    """Ver el historial es de cualquiera; 🔄 y 🗑 son del dj (alerta si no)."""
+    """Regla de B: el sin rol no abre ni el hub (aviso unico); el dj si
+    navega del hub al historial de canciones."""
     from queue_manager import QueueItem
 
     b = make_bot()
-    b.roles.set_role(50, "user")
     b._state.marcar_historial(QueueItem(url="ua", title="Cancion A"))
+    upd = FakeUpdate("ctl:lista", user_id=50, chat_id=44)
+    await b._on_control(upd, SimpleNamespace(args=[]), "lista")
+    assert upd.answered == ("🔒 El bot es solo para dj/admin.",), upd.answered
+    assert b._list_message_id is None, "el user no abre el hub"
+    assert b.player.loaded == [], "el user no reproduce"
+
     await b._on_control(
-        FakeUpdate("ctl:lista", user_id=50, chat_id=44), SimpleNamespace(args=[]), "lista"
+        FakeUpdate("ctl:lista", user_id=77, chat_id=44), SimpleNamespace(args=[]), "lista"
     )
     assert b._list_view == "hub"
     await b._on_list_callback(
-        FakeUpdate("lst:histm", user_id=50, chat_id=44), SimpleNamespace(args=[])
+        FakeUpdate("lst:histm", user_id=77, chat_id=44), SimpleNamespace(args=[])
     )
     assert b._list_view == "historial"
-    upd = FakeUpdate("lst:rep:0", user_id=50, chat_id=44)
-    await b._on_list_callback(upd, SimpleNamespace(args=[]))
-    assert upd.answered_kwargs.get("show_alert") is True
-    assert b.player.loaded == [], "el user no reproduce"
-    upd = FakeUpdate("lst:del:0", user_id=50, chat_id=44)
-    await b._on_list_callback(upd, SimpleNamespace(args=[]))
-    assert upd.answered_kwargs.get("show_alert") is True
-    assert len(b._historial()) == 1, "el user no borra"
 
 
 async def test_reproducir_registra_el_historial():
@@ -4084,23 +4082,23 @@ async def test_list_historial_borrar_todo():
     from queue_manager import QueueItem
 
     b = make_bot()
-    b.roles.set_role(50, "user")
     b._state.marcar_historial(QueueItem(url="ua", title="Cancion A"))
     b._state.marcar_historial(QueueItem(url="ub", title="Cancion B"))
+    # Sin rol: ni siquiera abre el hub, la base queda igual.
+    upd = FakeUpdate("ctl:lista", user_id=50, chat_id=44)
+    await b._on_control(upd, SimpleNamespace(args=[]), "lista")
+    assert upd.answered == ("🔒 El bot es solo para dj/admin.",), upd.answered
+    assert len(b._historial()) == 2, "el user no borra nada"
+
+    # El dj abre el hub y entra al historial de canciones.
     await b._on_control(
-        FakeUpdate("ctl:lista", user_id=50, chat_id=44), SimpleNamespace(args=[]), "lista"
+        FakeUpdate("ctl:lista", user_id=77, chat_id=44), SimpleNamespace(args=[]), "lista"
     )
     assert b._list_view == "hub"
     await b._on_list_callback(
-        FakeUpdate("lst:histm", user_id=50, chat_id=44), SimpleNamespace(args=[])
+        FakeUpdate("lst:histm", user_id=77, chat_id=44), SimpleNamespace(args=[])
     )
     assert b._list_view == "historial"
-
-    # El user no puede ni armar: alerta y la base queda igual.
-    upd = FakeUpdate("lst:delall", user_id=50, chat_id=44)
-    await b._on_list_callback(upd, SimpleNamespace(args=[]))
-    assert upd.answered_kwargs.get("show_alert") is True
-    assert len(b._historial()) == 2, "el user no borra nada"
 
     # Primer toque del dj: ARMA la confirmacion pero no borra nada.
     upd = FakeUpdate("lst:delall", user_id=77, chat_id=44)

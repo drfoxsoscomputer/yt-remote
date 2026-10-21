@@ -4,7 +4,7 @@ Valida toda la matriz de permisos:
 - _require("dj") bloquea user, permite dj y admin
 - _require("admin") bloquea user y dj, permite admin
 - _on_control: 7 acciones de control solo para dj/admin
-- cmd_solicitar: user puede pedir, dj/admin recibe denegado
+- regla sin rol: /start solo recibe el aviso unico y /solicitar ya no existe
 - help_for_role: contenido correcto por nivel
 - get_all_with_role: filtro exacto por rol
 
@@ -153,7 +153,8 @@ def test_get_all_with_role_exact_match():
 
 
 def test_require_dj_blocks_user():
-    """_require("dj") rechaza user con mensaje de denegacion."""
+    """_require("dj") rechaza user con el AVISO UNICO (regla del usuario:
+    sin rol no hay ningun derecho y un solo mensaje)."""
     b = make_bot()
     b.roles.set_role(50, "user")
     upd = FakeMessageUpdate("/buscar GP Band", user_id=50)
@@ -166,8 +167,7 @@ def test_require_dj_blocks_user():
     asyncio.run(run())
     assert len(upd.sent) == 1, f"se esperaba 1 reply, got {upd.sent}"
     reply_text = upd.sent[0][0]
-    assert "Acceso denegado" in reply_text
-    assert "dj" in reply_text
+    assert reply_text == "🔒 El bot es solo para dj/admin.", reply_text
     print("  OK  test_require_dj_blocks_user")
 
 
@@ -233,7 +233,7 @@ async def test_on_control_blocks_user_toast_all_actions():
         await b._on_control(upd_user, SimpleNamespace(args=[]), action)
         assert upd_user.answered is not None, f"user no recibio toast en '{action}'"
         toast_text = upd_user.answered[0] if upd_user.answered else ""
-        assert "No tiene permiso" in toast_text, f"toast incorrecto en '{action}': {toast_text!r}"
+        assert "El bot es solo para dj/admin" in toast_text, f"toast incorrecto en '{action}': {toast_text!r}"
         assert b.player.resumed == 0
         assert b.player.paused == 0
 
@@ -263,9 +263,9 @@ async def test_on_control_allows_dj():
     print("  OK  test_on_control_allows_dj")
 
 
-async def test_on_control_lista_works_for_user():
-    """El boton 📋 no se bloquea para un user: puede ver la lista, que se
-    ENVIA como mensaje aparte (la card no se pisa)."""
+async def test_on_control_lista_blocked_for_user():
+    """Regla de B: el boton 📋 TAMBIEN se bloquea para un sin rol (aviso
+    unico, nada se envia: quien no es dj/admin no tiene ningun derecho)."""
     from queue_manager import QueueItem
 
     b = make_bot()
@@ -275,53 +275,27 @@ async def test_on_control_lista_works_for_user():
     )
     upd = FakeUpdate("ctl:lista", user_id=50, chat_id=44)
     await b._on_control(upd, SimpleNamespace(args=[]), "lista")
-    # Lista enviada como mensaje nuevo; el listado arranca con "Lista:".
-    assert b._list_message_id is not None
-    assert b._app.bot.sent, "deberia enviar el mensaje de la lista"
-    text = b._app.bot.sent[-1][1]
-    assert text.startswith("Lista:"), text
-    # El user abre la lista SIN botones de tema (flag fijo en el mensaje).
-    assert b._list_can_select is False
-    print("  OK  test_on_control_lista_works_for_user")
+    assert b._list_message_id is None, "el user no abre la lista"
+    assert b._app.bot.sent == [], "nada se envia a un user"
+    assert upd.answered == ("🔒 El bot es solo para dj/admin.",), upd.answered
+    print("  OK  test_on_control_lista_blocked_for_user")
 
 
-async def test_cmd_solicitar_blocks_non_user():
-    """dj y admin que escriben /solicitar reciben 'Ya tiene un rol'."""
+async def test_sin_rol_nada_de_nada():
+    """La regla del usuario: quien no es dj/admin no tiene NINGUN derecho:
+    /solicitar ya no existe (la unica puerta a dj es que un admin lo
+    habilite con 👥) y /start solo recibe el aviso unico."""
     b = make_bot()
-    b.roles.set_role(50, "dj")
-    b.roles.set_role(51, "admin")
+    assert not hasattr(b, "cmd_solicitar"), "/solicitar se fue para siempre"
 
-    for uid in [50, 51]:
-        upd = FakeMessageUpdate("/solicitar", user_id=uid)
-        ctx = SimpleNamespace(args=[])
-        await b.cmd_solicitar(upd, ctx)
-        assert len(upd.sent) == 1, f"uid={uid} deberia recibir 1 respuesta, got {upd.sent}"
-        assert "Ya tiene un rol" in upd.sent[0][0], f"texto: {upd.sent[0]}"
-    print("  OK  test_cmd_solicitar_blocks_non_user")
-
-
-async def test_cmd_solicitar_notifies_admins_for_user():
-    """user que escribe /solicitar: mensaje al admin indicando el boton
-    '👥 Usuarios' de la tarjeta (ya no se sugiere /adduser)."""
-    b = make_bot()
-    b.roles.set_role(50, "user")
-    b.roles.set_role(51, "admin")
-    app = b._app
-    app.bot.sent.clear()
-
-    upd = FakeMessageUpdate("/solicitar", user_id=50)
-    upd.effective_user = SimpleNamespace(id=50, full_name="Test User", username="tester")
-    ctx = SimpleNamespace(args=[], bot=app.bot)
-    await b.cmd_solicitar(upd, ctx)
-
-    confirm = [m for m in upd.sent if "solicitud fue enviada" in m[0]]
-    assert confirm, f"no hubo confirmacion al user: {upd.sent}"
-    admin_msg = [m for m in app.bot.sent if "Usuarios" in m[1]]
-    assert admin_msg, f"no hubo mensaje al admin: {app.bot.sent}"
-    assert "👥 Usuarios" in admin_msg[0][1], f"deberia mencionar el boton: {admin_msg[0][1]}"
-    assert str(50) in admin_msg[0][1], f"deberia incluir user ID: {admin_msg[0][1]}"
-    assert "abra la lista con el botón 👥 Usuarios" in admin_msg[0][1], admin_msg[0][1]
-    print("  OK  test_cmd_solicitar_notifies_admins_for_user")
+    # /start de un sin rol: un solo aviso, sin franquicia.
+    b.config.allowed_chat_id = 44
+    upd = FakeMessageUpdate("/start", user_id=50)
+    upd.chat.title = "Grupo de pruebas"
+    await b.cmd_start(upd, SimpleNamespace(args=[]))
+    textos = [m[0] for m in upd.sent]
+    assert textos == ["🔒 El bot es solo para dj/admin."], textos
+    print("  OK  test_sin_rol_nada_de_nada")
 
 
 def test_help_for_role_visibility_matrix():
@@ -361,7 +335,7 @@ async def test_buscar_rejected_before_search_for_user():
     await wrapped(upd, ctx)
     assert len(search_called) == 0, f"search no deberia llamarse para user: {search_called}"
     assert len(upd.sent) == 1
-    assert "Acceso denegado" in upd.sent[0][0]
+    assert "🔒 El bot es solo para dj/admin." == upd.sent[0][0]
     print("  OK  test_buscar_rejected_before_search_for_user")
 
 

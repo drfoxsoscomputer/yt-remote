@@ -205,23 +205,23 @@ Solo admin:
    llega al chat privado del admin, se toca al usuario para alternar dj/user
    y ❌ aplica los cambios. En el grupo no aparece nada)
 
-Todos (user, dj, admin):
-  /radio                             lista de emisoras (elegir es de dj)
+DJ Y ADMIN:
+  /radio                             lista de emisoras (dj y admin)
   /letra                             letra de lo que está sonando
   (la lista se ve con el botón 📋 de la tarjeta: un mensaje aparte,
-   paginado de 10 en 10, que cualquiera cierra con el botón ❌; solo dj o
-   admin pueden elegir un tema tocándolo)
+   paginado de 10 en 10; solo dj o admin la pueden abrir, navegar y
+   cerrar con el botón ❌)
 
-Un user que quiera ser dj puede escribir /solicitar para pedirle al
-admin que le dé acceso; al admin le llega el aviso por privado.
+La única puerta a dj es que un admin lo habilite con 👥 Usuarios de la
+tarjeta.
 
 
 ROLES Y PERMISOS
 ----------------
   admin  — puede hacer todo + gestionar usuarios + cambiar la calidad (⚙️ Ajustes)
   dj     — buscar, controlar música (tarjeta y comandos)
-  user   — solo puede ver la lista con el botón 📋 (sin elegir temas) y pedir
-           el acceso con /solicitar
+  user   — sin rol: no puede usar el bot (ni comandos, ni listados, ni botones);
+           recibe el aviso "El bot es solo para dj/admin"
 
 Por defecto solo el dueño es admin. Para darle acceso a otros, abra la
 lista con ⚙️ Ajustes → 👥 Usuarios de la tarjeta y toque al usuario en su

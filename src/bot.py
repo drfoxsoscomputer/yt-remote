@@ -156,12 +156,11 @@ _TOPE_LETRA = TOPE_LETRA
 # el bot los niega con educacion si no corres.
 # La cobertura la garantiza test_menu_cubre_todos_los_comandos.
 _COMANDOS_PUBLICOS = [
-    BotCommand("start", "Info del bot"),
+    BotCommand("start", "Info del bot (dj+)"),
     BotCommand("buscar", "Buscar artista o link para reproducir (dj+)"),
     BotCommand("play", "Buscar y reproducir (alias de /buscar) (dj+)"),
-    BotCommand("solicitar", "Pedir acceso de dj al admin"),
-    BotCommand("radio", "Elegir emisora o favoritas"),
-    BotCommand("letra", "Letra de lo que esta sonando"),
+    BotCommand("radio", "Elegir emisora o favoritas (dj+)"),
+    BotCommand("letra", "Letra de lo que esta sonando (dj+)"),
 ]
 _COMANDOS_ADMIN = [
     BotCommand("reglas", "Re-envia y fija (pin) las reglas del grupo"),
@@ -937,10 +936,9 @@ class YTRemoteBot:
         # _with_card_reposition: al terminar cualquier comando, si la tarjeta
         # ya existia, se re-envia al final del chat (la card queda como ultima
         # visualizacion; los mensajes del comando quedan arriba).
-        app.add_handler(CommandHandler("start", self._with_card_reposition(self._require_chat(self.cmd_start))))
+        app.add_handler(CommandHandler("start", self._with_card_reposition(self._require_chat(self._require("dj", self.cmd_start)))))
         app.add_handler(CommandHandler("buscar", self._with_card_reposition(self._require_chat(self._require("dj", self.cmd_play)))))
         app.add_handler(CommandHandler("play", self._with_card_reposition(self._require_chat(self._require("dj", self.cmd_play)))))
-        app.add_handler(CommandHandler("solicitar", self._with_card_reposition(self._require_chat(self.cmd_solicitar))))
         app.add_handler(
             CommandHandler(
                 "reglas",
@@ -959,20 +957,19 @@ class YTRemoteBot:
                 self._with_card_reposition(self._require_chat(self._require("admin", self.cmd_actualizar))),
             )
         )
-        # /radio abre para cualquiera (como el 📋): ELEGIR emisora o tocar
-        # favoritas es de dj y se exige dentro del handler de callbacks.
+        # /radio y /letra tambien son de dj+: quien no tiene rol no tiene
+        # ningun derecho (regla del usuario); el listado del radio sigue
+        # exigiendo dj DENTRO del handler de callbacks para elegir.
         app.add_handler(
             CommandHandler(
                 "radio",
-                self._with_card_reposition(self._require_chat(self.cmd_radio)),
+                self._with_card_reposition(self._require_chat(self._require("dj", self.cmd_radio))),
             )
         )
-        # /letra es informacion, no reproducecon: la pide cualquiera (como
-        # el 📋) y nunca le avisa al admin si falla.
         app.add_handler(
             CommandHandler(
                 "letra",
-                self._with_card_reposition(self._require_chat(self.cmd_letra)),
+                self._with_card_reposition(self._require_chat(self._require("dj", self.cmd_letra))),
             )
         )
         # Editor de usuarios (boton 👥): los callbacks mem:* viven en el chat
@@ -1161,14 +1158,16 @@ class YTRemoteBot:
                     logger.error("No se pudo reanudar el updater: %s", exc)
 
     def _require(self, role: str, handler):
-        """Envuelve un handler exigiendo un rol minimo."""
+        """Envuelve un handler exigiendo un rol minimo (dj+ en toda la
+        superficie de control: la regla del usuario es que quien no es
+        dj/admin NO tiene ningun derecho en el bot)."""
 
         async def wrapper(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             user = update.effective_user
             if user is None:
                 return
             if not self.roles.has_role(user.id, role):
-                await self._reply(update, f"Acceso denegado: necesita el rol '{role}' para este comando.")
+                await self._reply(update, "🔒 El bot es solo para dj/admin.")
                 return
             await handler(update, context)
 
@@ -1259,9 +1258,10 @@ class YTRemoteBot:
             mention = f"@{member.username}" if getattr(member, "username", None) else name
             text = (
                 f"👋 ¡Bienvenido {mention}!\n"
-                "Eres un usuario invitado. Las reglas del grupo están fijadas arriba ↑.\n"
-                "Para acceder a los controles del bot (ser DJ): escriba /solicitar "
-                "o pida al admin que lo habilite con el botón 👥 Usuarios de la tarjeta."
+                "Las reglas del grupo están fijadas arriba ↑.\n"
+                "🔒 El bot es solo para dj/admin: entra como invitado y quien\n"
+                "no queda habilitado no puede usarlo. Para ser dj, pida a un\n"
+                "admin que lo haga con el botón 👥 Usuarios de la tarjeta."
             )
             if (self.config.kick_after_hours or 0) > 0:
                 horas = int(self.config.kick_after_hours)
@@ -1281,19 +1281,18 @@ class YTRemoteBot:
             "📌 YT-Remote — Reglas del grupo",
             "🎧 Bot que reproduce música (YouTube) en la PC de casa.",
             "",
-            "• Roles: user (espectador), dj (controla la reproducción), admin.",
-            "• Para ser DJ: escriba /solicitar o pida al admin que lo habilite con el botón 👥 Usuarios de la tarjeta.",
+            "• Roles: dj (controla la reproducción) y admin. El bot es solo para dj.",
+            "• Quien no tiene rol no puede usar el bot: ni comandos, ni listados, ni botones.",
+            "• Para ser DJ: un admin debe habilitarlo con el botón 👥 Usuarios de la tarjeta.",
         ]
         horas = int(self.config.kick_after_hours or 0)
         if horas > 0:
             lines.append(
-                f"• Acceso de invitado: {horas} h. Pasado el plazo, si no tiene rol "
-                "dj/admin, se lo retira del grupo; puede volver con el enlace de invitación."
+                f"• Acceso de invitado: {horas} h. Pasado el plazo se lo retira del grupo; puede volver con el enlace de invitación."
             )
         lines += [
-            "• /buscar es solo para dj+: elija un resultado y se reproduce.",
-            "• La tarjeta del reproductor la usan todos; ⚙️ Calidad y 👥 Usuarios son solo del admin.",
-            "• La canción en reproducción se ve en un mensaje aparte con 📋 (lista de la cola).",
+            "• /buscar es solo para dj: elija un resultado y se reproduce.",
+            "• La tarjeta del reproductor (con 📋, ⚙️ y 👥) es de dj/admin.",
         ]
         return "\n".join(lines)
 
@@ -1778,6 +1777,13 @@ class YTRemoteBot:
         if accion in ("", "noop"):
             await self._list_answer(query)
             return
+        # Regla del usuario: sin rol nada de nada en el listado del radio
+        # (ni paginar, ni ver favoritas, ni cerrar el mensaje); un solo aviso.
+        if not (user_id is not None and self.roles.has_role(user_id, "dj")):
+            await self._list_answer(
+                query, "🔒 El bot es solo para dj/admin.", show_alert=True
+            )
+            return
         if accion == "close":
             await self._list_answer(query)
             chat_fin = self._radio_chat_id
@@ -2103,7 +2109,8 @@ class YTRemoteBot:
         else:
             text = (
                 f"👤 {name}, ya no eres DJ.\n"
-                "Puedes pedir el rol de nuevo con /solicitar."
+                "Tu acceso queda de invitado; un admin puede darte el rol de\n"
+                "nuevo desde el botón 👥 Usuarios de la tarjeta."
             )
         await self._dm_or_group(user_id, text)
 
@@ -2377,21 +2384,17 @@ class YTRemoteBot:
             return
 
         if user_role == "user":
-            await self._reply(
-                update,
-                "YT-Remote reproduce música (YouTube) en la PC de casa.\n\n"
-                "Las reglas del grupo están en el mensaje fijado ↑.\n"
-                "Para controlar la reproducción (ser DJ) y usar /buscar: "
-                "escriba /solicitar o pida al admin que lo habilite con el "
-                "botón 👥 Usuarios de la tarjeta.",
-            )
-        else:
-            await self._reply(
-                update,
-                "YT-Remote activo.\n\n"
-                + f"Comandos disponibles para su rol ({user_role}):\n"
-                + self.help_for_role(user_role),
-            )
+            # Regla del usuario: sin rol NO hay ni bienvenida ni nada, un
+            # solo aviso; la unica puerta a dj es que un admin lo habilite
+            # con el boton 👥 Usuarios de la tarjeta.
+            await self._reply(update, "🔒 El bot es solo para dj/admin.")
+            return
+        await self._reply(
+            update,
+            "YT-Remote activo.\n\n"
+            + f"Comandos disponibles para su rol ({user_role}):\n"
+            + self.help_for_role(user_role),
+        )
 
     async def health_check(self) -> bool:
         """Verifica que el bot esté saludable (polling activo, token válido)."""
@@ -3020,6 +3023,18 @@ class YTRemoteBot:
             # Botones del mensaje-lista de /radio (emisoras radio-browser).
             await self._on_radio_callback(update, context)
             return
+        # Regla del usuario: sin rol nada de nada (el listado del buscador
+        # es de dj+ por completo: navegar, cancelar o elegir).
+        if query.data and query.data.startswith("pick:"):
+            pid = query.from_user.id if query.from_user else None
+            if not (pid is not None and self.roles.has_role(pid, "dj")):
+                try:
+                    await query.answer(
+                        "🔒 El bot es solo para dj/admin.", show_alert=True
+                    )
+                except Exception:  # noqa: BLE001
+                    pass
+                return
         if query.data in ("pick:prev", "pick:next", "pick:mas", "pick:noop"):
             await self._on_search_nav(query)
             return
@@ -3377,10 +3392,12 @@ class YTRemoteBot:
 
         CONTROL_ACTIONS = {
             "pp", "prev", "next", "stop", "vol-10", "vol+10", "vol-info",
-            "seek-10", "seek+10", "apagar", "ajustes",
+            "seek-10", "seek+10", "apagar", "ajustes", "lista",
         }
+        # Regla del usuario: sin rol NADA de nada (incluido abrir el 📋):
+        # un solo aviso para todo el bot.
         if action in CONTROL_ACTIONS and user_id is not None and not self.roles.has_role(user_id, "dj"):
-            await query.answer("No tiene permiso para eso.", show_alert=True)
+            await query.answer("🔒 El bot es solo para dj/admin.", show_alert=True)
             return
 
         self._card_chat_id = update.effective_chat.id
@@ -4758,6 +4775,15 @@ class YTRemoteBot:
             await self._list_answer(query)
             return
 
+        # Regla del usuario: sin rol NO tiene ningun derecho. Todo toque
+        # sobre el hub (paginar, cerrar, enlaces, repetir, borrar... ) es de
+        # dj+; el unico aviso permitido es el de siempre.
+        if not (user_id is not None and self.roles.has_role(user_id, "dj")):
+            await self._list_answer(
+                query, "🔒 El bot es solo para dj/admin.", show_alert=True
+            )
+            return
+
         if action == "historial":
             radios, canciones = self._state.contar_historial()
             if not (radios or canciones):
@@ -5369,28 +5395,3 @@ class YTRemoteBot:
             await self._reply(update, "No hay ninguna cancion reproduciendose.")
         else:
             await self._send_track_card(update, f"▶️ Sonando: {cur.title}", cur)
-
-    async def cmd_solicitar(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-        user = update.effective_user
-        if user is None:
-            return
-        self._register_known_user(user)
-        if self.roles.get_role(user.id) != "user":
-            await self._reply(update, "Ya tiene un rol asignado.")
-            return
-        admin_ids = self.roles.get_all_with_role("admin")
-        for admin_id in admin_ids:
-            await context.bot.send_message(
-                chat_id=admin_id,
-                text=(
-                    f"📩 Solicitud de acceso\n"
-                    f"Usuario: {user.full_name} (ID: {user.id})\n"
-                    f"Quiere ser DJ.\n\n"
-                    f"Para darle acceso, abra la lista con el botón 👥 Usuarios "
-                    f"de la tarjeta y toque a {user.full_name}."
-                ),
-            )
-        await self._reply(
-            update,
-            "Tu solicitud fue enviada a los admins. Te avisaran cuando te den acceso.",
-        )

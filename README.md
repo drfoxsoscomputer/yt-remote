@@ -204,10 +204,9 @@ desde la lista.
 | `/buscar <artista> - <canción>` | dj, admin | Busca y reproduce del artista indicado |
 | `/buscar <artista>` | dj, admin | Busca un artista (sin canción específica) |
 | `/buscar <link>` | dj, admin | Reproduce un link de YouTube directo |
-| `/solicitar` | user | Solicitar acceso de dj al admin |
 | `/reglas` | admin | Re-envía y fija (pin) el mensaje de reglas del grupo |
-| `/radio` | todos (elegir es de dj) | Abre el listado de emisoras y favoritas |
-| `/letra` | todos | Letra de lo que está sonando |
+| `/radio` | dj, admin | Abre el listado de emisoras y favoritas |
+| `/letra` | dj, admin | Letra de lo que está sonando |
 | `/salud` | admin | Estado del bot: reproductor, versión de YT-Remote y conexión |
 | `/actualizar` | admin | Trae YT-Remote y sus componentes a la versión publicada más nueva (reinicia solo) |
 
@@ -226,11 +225,9 @@ abre el menú de configuración: 💤 apagado programado para **dj** y
 
 Por defecto solo el dueño es admin. Para dar acceso a otra persona, use el
 botón `👥 Usuarios` de la tarjeta: la lista llega a su chat privado y basta
-tocar al usuario para alternarlo entre dj y user.
-
-Un user puede escribir `/solicitar` para pedir acceso de dj al admin: al
-admin le llega un aviso por privado con la indicación de abrir la lista con
-el botón 👥.
+tocar al usuario para alternarlo entre dj y user. Esa es la única puerta a
+dj: quien no tiene rol no puede usar el bot (ni comandos, ni listados, ni
+botones) y recibe un solo aviso: "🔒 El bot es solo para dj/admin".
 
 ## Variables de entorno
 

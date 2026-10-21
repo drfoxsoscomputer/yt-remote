@@ -72,20 +72,13 @@ async def show_user(b):
 
     upd_cb = FakeUpdate("ctl:lista", user_id=USER_ID)
     await b._on_control(upd_cb, SimpleNamespace(args=[]), "lista")
-    action("boton lista", "(ve la cola de reproduccion)", ok=True)
-
-    app.bot.sent.clear()
-    upd = FakeMessageUpdate("/solicitar", user_id=USER_ID)
-    upd.effective_user = SimpleNamespace(id=USER_ID, full_name="Maria Lopez", username="mlopez")
-    ctx = SimpleNamespace(args=[], bot=app.bot)
-    await b.cmd_solicitar(upd, ctx)
-    confirm = [m for m in upd.sent if "solicitud" in m[0]]
-    action("/solicitar", confirm[0][0] if confirm else "(sin respuesta)", ok=True)
-    admin_msg = [m for m in app.bot.sent if "adduser" in m[1]]
-    if admin_msg:
-        print(f"       {color('Admin recibe:', YELLOW)}")
-        for line in admin_msg[0][1].splitlines():
-            print(f"         {line}")
+    action("boton lista", upd_cb.answered[0] if upd_cb.answered else "(sin respuesta)", ok=False)
+    # Sin rol NO hay puerta de solicitud: /solicitar se fue; el aviso unico
+    # de /start es la unica respuesta que recibe.
+    upd = FakeMessageUpdate("/start", user_id=USER_ID)
+    upd.chat.title = "Grupo de demo"
+    await b.cmd_start(upd, SimpleNamespace(args=[]))
+    action("/start (sin rol)", upd.sent[-1][0] if upd.sent else "(sin respuesta)", ok=False)
 
 
 async def show_dj(b, app):
@@ -119,34 +112,22 @@ async def show_dj(b, app):
 
     b._run_search = original_run_search
 
-    upd = FakeMessageUpdate("/solicitar", user_id=DJ_ID)
-    upd.effective_user = SimpleNamespace(id=DJ_ID, full_name="DJ Test", username="djtest")
-    ctx = SimpleNamespace(args=[], bot=app.bot)
-    await b.cmd_solicitar(upd, ctx)
-    action("/solicitar", upd.sent[-1][0] if upd.sent else "(sin respuesta)", ok=False)
-
-    upd = FakeMessageUpdate("/adduser 50 dj", user_id=DJ_ID)
-    ctx = SimpleNamespace(args=["50", "dj"], bot=app.bot)
-    wrapped = b._require("admin", b.cmd_adduser)
-    await wrapped(upd, ctx)
-    action("/adduser 50 dj", upd.sent[-1][0] if upd.sent else "(sin respuesta)", ok=False)
-
 
 async def show_admin(b):
     app = b._app
     role_header("ADMIN", ADMIN_ID)
 
-    upd = FakeMessageUpdate("/adduser 50 dj", user_id=ADMIN_ID)
-    ctx = SimpleNamespace(args=["50", "dj"], bot=app.bot)
-    wrapped = b._require("admin", b.cmd_adduser)
-    await wrapped(upd, ctx)
-    action("/adduser 50 dj", upd.sent[-1][0] if upd.sent else "(sin respuesta)", ok=True)
+    # La UNICA puerta a dj: el admin habilita con 👥 Usuarios de la tarjeta
+    # (el aviso que recibe el user por DM es el mismo del cambio de rol).
+    b.roles.set_role(USER_ID, "dj")
+    await b._notify_role_change(USER_ID, "dj")
+    dm = [m for m in app.bot.sent if m[0] == USER_ID]
+    action("👥 habilitar dj", dm[-1][1].splitlines()[0] if dm else "(sin DM)", ok=True)
 
-    upd = FakeMessageUpdate("/removeuser 50", user_id=ADMIN_ID)
-    ctx = SimpleNamespace(args=["50"], bot=app.bot)
-    wrapped = b._require("admin", b.cmd_removeuser)
-    await wrapped(upd, ctx)
-    action("/removeuser 50", upd.sent[-1][0] if upd.sent else "(sin respuesta)", ok=True)
+    b.roles.set_role(USER_ID, "user")
+    await b._notify_role_change(USER_ID, "user")
+    dm2 = [m for m in app.bot.sent if m[0] == USER_ID]
+    action("👥 quitar rol", dm2[-1][1].splitlines()[0] if dm2 else "(sin DM)", ok=True)
 
 
 def show_help(b):
@@ -162,15 +143,13 @@ def show_summary():
     print()
     print(color("  --- RESUMEN DE PERMISOS ---", f"{BOLD};{CYAN}"))
     rows = [
-        ("Accion", "user", "dj", "admin"),
+        ("Accion", "sin rol", "dj", "admin"),
         ("-", "-", "-", "-"),
-        ("/start", "si", "si", "si"),
+        ("/start", "aviso", "si", "si"),
         ("/buscar", "NO", "si", "si"),
-        ("/solicitar", "si -> admin", "NO", "NO"),
-        ("/adduser", "NO", "NO", "si"),
-        ("/removeuser", "NO", "NO", "si"),
-        ("boton ⏯⏭⏮⏹🔊", "toast", "si", "si"),
-        ("boton 📋", "si", "si", "si"),
+        ("👥 habilitar/quitar", "DM del bot", "NO", "si"),
+        ("boton ⏯⏭⏮⏹🔊", "NO", "si", "si"),
+        ("boton 📋", "NO", "si", "si"),
     ]
     print()
     for ri, row in enumerate(rows):
@@ -191,6 +170,7 @@ def show_summary():
 
 async def run_demo():
     b = make_bot()
+    b.config.allowed_chat_id = 44
     app = b._app
     b.roles.set_role(USER_ID, "user")
     b.roles.set_role(DJ_ID, "dj")
