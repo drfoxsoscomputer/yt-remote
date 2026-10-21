@@ -22,12 +22,15 @@ class RadioError(Exception):
 @dataclass
 class Emisora:
     """Emisora normalizada: nombre a una linea, UN solo stream (el que el
-    servidor recomienda) y pais/logo opcionales."""
+    servidor recomienda) y pais/logo/tags opcionales."""
 
     nombre: str
     pais: str
     stream: str
     logo: str = ""
+    # Tags del API como una sola cadena 'salsa,vallenato' (la respuesta del
+    # servicio viene separada por comas). Sirven para el ancla por genero.
+    tags: str = ""
 
     def to_dict(self) -> dict:
         return {
@@ -35,6 +38,7 @@ class Emisora:
             "pais": self.pais,
             "stream": self.stream,
             "logo": self.logo,
+            "tags": self.tags,
         }
 
     @classmethod
@@ -44,7 +48,31 @@ class Emisora:
             pais=str(d.get("pais", "")),
             stream=str(d.get("stream", "")),
             logo=str(d.get("logo", "")),
+            tags=str(d.get("tags", "")),
         )
+
+
+def _tags_de(d: dict) -> str:
+    """Los tags de UNA fila del API como cadena plana 'salsa,vallenato'.
+
+    El servicio devuelve `tags` como cadena separada por comas (y a veces
+    con espacios raros o mayusculas): se parte, se limpia, se une SIN
+    espacios y en minuscula para que las comparaciones de genero nunca
+    dependan de como lo escribieron.
+    """
+    crudo = d.get("tags") or []
+    partes = (
+        [crudo] if isinstance(crudo, str) else [str(t) for t in crudo]
+    )
+    limpios: list[str] = []
+    vistos: set[str] = set()
+    for parte in partes:
+        for tag in str(parte).split(","):
+            tag = tag.strip().lower()
+            if tag and tag not in vistos:
+                vistos.add(tag)
+                limpios.append(tag)
+    return ",".join(limpios)
 
 
 def _normalizar(filas: list) -> list:
@@ -63,6 +91,7 @@ def _normalizar(filas: list) -> list:
                 pais=" ".join(str(d.get("country") or "").split()),
                 stream=stream,
                 logo=str(d.get("favicon") or "").strip(),
+                tags=_tags_de(d),
             )
         )
     return salida
@@ -272,3 +301,73 @@ async def buscar_pais(termino: str, cantidad: int) -> list:
         ),
     )
     return _normalizar(filas)
+
+
+_IDIOMA_NOMBRE = {
+    # Codigo de idioma de Telegram -> nombre del idioma en radio-browser.
+    # El catalogo de idiomas del API va por nombre (verificado contra el
+    # servicio: 'language=spanish' trae emisoras en espanol con tags y
+    # votos); el `languagecode` crudo mezcla emisoras ajenas.
+    "es": "spanish",
+    "pt": "portuguese",
+    "en": "english",
+    "fr": "french",
+    "de": "german",
+    "it": "italian",
+}
+
+
+def idioma_del_api(codigo: str) -> str | None:
+    """El nombre del idioma del API para un codigo de Telegram, None si
+    el bot no lo mapea (el home cae a destacadas sin inventar idiomas)."""
+    return _IDIOMA_NOMBRE.get(str(codigo or "").strip().lower().split("-")[0])
+
+
+async def buscar_idioma(termino: str, cantidad: int) -> list:
+    """Emisoras del IDIOMA pedido (name en el API, ej. 'spanish'),
+    ordenadas por votos: la semilla del primer arranque, cuando todavia
+    no hay historial que determine un pais."""
+    filas = await _get(
+        "/json/stations/search",
+        _params(language=termino, limit=str(cantidad), order="votes", reverse="true"),
+    )
+    return _normalizar(filas)
+
+
+_TAGS_POR_STREAM: "dict[str, str | None]" = {}  # cache de la sesion
+
+
+async def tags_por_stream(stream: str) -> str | None:
+    """Los tags de UNA emisora por su stream (`/json/stations/byurl`).
+
+    Para filas del historial guardadas ANTES de la columna tags: el API
+    compara si identifica la emisora y devuelve None si no la conoce. El
+    resultado queda en cache por proceso: se consulta UNA vez por stream.
+    """
+    global _TAGS_POR_STREAM  # noqa: PLW0603
+    clave = str(stream or "").strip()
+    if not clave:
+        return None
+    if clave in _TAGS_POR_STREAM:
+        return _TAGS_POR_STREAM[clave]
+    tags: str | None = None
+    try:
+        filas = await _get(
+            "/json/stations/byurl", _params(url=clave)
+        )
+    except RadioError:
+        _TAGS_POR_STREAM[clave] = None
+        return None
+    if isinstance(filas, list) and filas:
+        objetivo = None
+        # Match por stream exacto primero; si el API devolvio la
+        # url_resolved distinta, se acepta la fila si comparte el stream base.
+        for fila in filas:
+            if str(fila.get("url_resolved") or "").strip() == clave:
+                objetivo = fila
+                break
+        if objetivo is None:
+            objetivo = filas[0]
+        tags = _tags_de(objetivo) or None
+    _TAGS_POR_STREAM[clave] = tags
+    return tags

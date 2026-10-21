@@ -24,6 +24,9 @@ class QueueItem:
     thumbnail: str = ""
     channel: str = ""
     artist: str = ""
+    # Tags de la fuente separados por coma (radio-browser en emisoras;
+    # YouTube en la resolucion). Va a `tracks.tags` con el historial.
+    tags: str = ""
     # True cuando la URL ya ES el stream (emisora de /radio): no se resuelve
     # con yt-dlp ni se le programa prefetch del siguiente.
     directo: bool = False
@@ -38,6 +41,7 @@ class QueueItem:
             "thumbnail": self.thumbnail,
             "channel": self.channel,
             "artist": self.artist,
+            "tags": self.tags,
             "directo": self.directo,
         }
 
@@ -52,6 +56,7 @@ class QueueItem:
             thumbnail=d.get("thumbnail", ""),
             channel=d.get("channel", ""),
             artist=d.get("artist", ""),
+            tags=d.get("tags", ""),
             directo=bool(d.get("directo", False)),
         )
 

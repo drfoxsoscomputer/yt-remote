@@ -50,7 +50,7 @@ from constants import MAX_HISTORY
 
 logger = logging.getLogger("bot")
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 
 
 def data_dir() -> Path:
@@ -128,6 +128,16 @@ _MIGRACIONES: dict[int, tuple[str, list[str]]] = {
             "UPDATE tracks SET directo = 1 "
             "WHERE video_id NOT LIKE '%youtu.be%' "
             "AND video_id NOT LIKE '%youtube.com%'",
+        ],
+    ),
+    3: (
+        "columna tags en tracks (los tags que trae cada fuente, por fila)",
+        [
+            # Los tags viven junto a la fila para que cualquier mecanismo
+            # futuro (ancla por genero, filtros, busquedas) los lea sin
+            # re-migrar: emisoras trae los de radio-browser ('salsa,vallenato')
+            # y canciones los de YouTube en la resolucion del stream.
+            "ALTER TABLE tracks ADD COLUMN tags TEXT NOT NULL DEFAULT ''",
         ],
     ),
 }
@@ -251,8 +261,8 @@ class Store:
             """
             INSERT INTO tracks
                 (video_id, url, title, duration, duration_seconds,
-                 thumbnail, channel, artist, directo)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                 thumbnail, channel, artist, directo, tags)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(video_id) DO UPDATE SET
                 url              = excluded.url,
                 title            = excluded.title,
@@ -261,7 +271,11 @@ class Store:
                 thumbnail        = excluded.thumbnail,
                 channel          = excluded.channel,
                 artist           = excluded.artist,
-                directo          = excluded.directo
+                directo          = excluded.directo,
+                tags             = CASE
+                    WHEN excluded.tags != '' THEN excluded.tags
+                    ELSE tracks.tags
+                END
             """,
             (
                 video_id,
@@ -273,6 +287,7 @@ class Store:
                 track.get("channel", ""),
                 track.get("artist", ""),
                 1 if track.get("directo") else 0,
+                str(track.get("tags", "") or ""),
             ),
         )
 
@@ -387,6 +402,70 @@ class Store:
             """
         ).fetchone()
         return int(fila[0]), int(fila[1])
+
+    def top_paises_uso(self, limite: int = 3) -> list[dict]:
+        """Los paises MAS sonados de emisoras, con usos reales.
+
+        Cada fila del historial es un uso: el conteo nace de la union con
+        `history`, no de lo que existe en `tracks` (una emisora guardada una
+        vez puede haber sonado 30 veces). Solo emisoras con pais anotado.
+        """
+        filas = self.conn.execute(
+            """
+            SELECT t.channel AS clave, COUNT(*) AS usos
+            FROM history h
+            JOIN tracks t ON t.video_id = h.video_id
+            WHERE t.directo = 1 AND t.channel != ''
+            GROUP BY t.channel ORDER BY usos DESC LIMIT ?
+            """,
+            (limite,),
+        ).fetchall()
+        return [dict(f) for f in filas]
+
+    def top_generos_uso(self, limite: int = 3) -> list[dict]:
+        """Los tags MAS sonados de emisoras, agregados desde las filas.
+
+        Cada fila de `tracks` trae sus tags juntos ('salsa,vallenato' en el
+        API de radios: una cadena separada por comas); se separan y se
+        suman usos por tag UNICAMENTE de lo ya sonado. Sin datos devuelve
+        [] y la interfaz lo oculta: nada de chips inventados."""
+        filas = self.conn.execute(
+            """
+            SELECT t.tags FROM history h
+            JOIN tracks t ON t.video_id = h.video_id
+            WHERE t.directo = 1 AND t.tags != ''
+            LIMIT 500
+            """,
+        ).fetchall()
+        conteo: dict[str, int] = {}
+        for fila in filas:
+            for tag in str(fila["tags"]).split(","):
+                tag = tag.strip().lower()
+                if tag:
+                    conteo[tag] = conteo.get(tag, 0) + 1
+        ordenados = sorted(conteo.items(), key=lambda par: (-par[1], par[0]))
+        return [{"clave": clave, "usos": usos} for clave, usos in ordenados[:limite]]
+
+    def top_artistas_uso(
+        self, limite: int = 6, directo: Optional[int] = 0
+    ) -> list[dict]:
+        """Los artistas MAS sonados de canciones, por usos reales.
+
+        `artist` lo escribe la radio de cancion y la sesion del buscador;
+        aqui va por el uso real del historial. Para emisoras (`directo=1`)
+        `artist` casi siempre viene vacio: el filtro deja fuera lo vacio.
+        """
+        filas = self.conn.execute(
+            """
+            SELECT t.artist AS clave, COUNT(*) AS usos
+            FROM history h
+            JOIN tracks t ON t.video_id = h.video_id
+            WHERE t.artist != '' AND t.directo = ?
+            GROUP BY t.artist ORDER BY usos DESC LIMIT ?
+            """,
+            (directo, limite),
+        ).fetchall()
+        return [dict(f) for f in filas]
 
     def borrar_historial(self, video_id: str) -> bool:
         """Quita TODAS las filas de UNA cancion. True si habia algo."""

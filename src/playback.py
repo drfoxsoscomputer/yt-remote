@@ -31,7 +31,12 @@ import logging
 
 from constants import PLAYLIST_ESPERAS, RESOLVE_TIMEOUT
 from queue_manager import QueueItem
-from search import last_resolve_error, resolve_stream_url, search
+from search import (
+    last_resolve_error,
+    last_resolve_tags,
+    resolve_stream_url,
+    search,
+)
 
 import artist_match
 import radio as radio_mod
@@ -601,6 +606,11 @@ class PlaybackEngine:
                 )
                 return False
             stream_url, audio_url = resolved
+            # La resolucion que ACABA de salir es la unica fuente de tags
+            # para canciones (la busqueda trae extract_flat, sin tags). El
+            # item ya resuelto en cache no la repite: conserva los suyos.
+            if not item.tags:
+                item.tags = last_resolve_tags()
         else:
             # Item marcado como directo (emisora de /radio): el stream ES la
             # url, sin yt-dlp.

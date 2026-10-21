@@ -87,7 +87,7 @@ UPDATE_DIR = "update"
 # /radio (radio-browser): lote de emisoras por consulta y emisoras por
 # pagina del listado. El lote es mayor que la pagina para que ◀ ▶ paginen
 # sin volver al API.
-RADIO_BATCH = 20
+RADIO_BATCH = 40
 RADIO_PAGE_SIZE = 5
 
 # Host fijo de radio-browser: si cae, el error es honesto ("radio-browser

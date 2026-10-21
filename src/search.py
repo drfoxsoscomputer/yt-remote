@@ -350,8 +350,9 @@ def resolve_stream_url(youtube_url: str) -> tuple[str, str | None] | None:
     Devuelve (video_url, audio_url) o (url, None) si es un stream combinado.
     Devuelve None si no se pudo resolver.
     """
-    global _RESOLVE_LAST_ERROR  # noqa: PLW0603
+    global _RESOLVE_LAST_ERROR, _RESOLVE_LAST_TAGS  # noqa: PLW0603
     _RESOLVE_LAST_ERROR = ""
+    _RESOLVE_LAST_TAGS = ""
 
     # (nombre, opts extra): una sola tanda en _ESTRATEGIAS_CLIENT
     # (visionos -> android -> default), compartida con search().
@@ -365,6 +366,10 @@ def resolve_stream_url(youtube_url: str) -> tuple[str, str | None] | None:
 
         stream = _stream_from_info(info)
         if stream is not None:
+            # La resolucion salio: los tags de ESTA metadata quedan al
+            # alcance del que reproduce (playback los anota en la fila del
+            # historial). Es una lectura barata y no cambia el stream.
+            _RESOLVE_LAST_TAGS = _tags_de_info(info)
             return stream
         # La extraccion respondio pero SIN formatos ni URL: bloqueo parcial
         # tipico de YouTube (metadata completa, formatos retenidos). Sin
@@ -445,7 +450,37 @@ def _stream_from_info(info: "dict[str, Any]") -> tuple[str, str | None] | None:
 # Ultimo error observado al resolver streams (diagnostico remoto por Telegram).
 _RESOLVE_LAST_ERROR: str = ""
 
+# Tags de la ULTIMA resolucion exitosa ('' si no trajo): la metadata
+# completa de YouTube (extract_info, NO la busqueda extract_flat) si trae
+# `tags` y `categories` a veces; es el UNICO lugar de donde sale un
+# genero para las canciones del historial.
+_RESOLVE_LAST_TAGS: str = ""
+
 
 def last_resolve_error() -> str:
     """Devuelve el motivo del ultimo fallo de resolucion, o vacio si no hubo."""
     return _RESOLVE_LAST_ERROR
+
+
+def last_resolve_tags() -> str:
+    """Los tags de la ultima resolucion exitosa, planos 'salsa,Music'.
+
+    Vacio si YouTube no los provee para ese video: se anota sin genero,
+    cero invencion (la mayoria de canciones puede quedar sin tags)."""
+    return _RESOLVE_LAST_TAGS
+
+
+def _tags_de_info(info: dict) -> str:
+    """Tags + categorias de UNA metadata completa de YouTube en una sola
+    cadena plana. Sin repeticiones y en minuscula, igual que los tags de
+    las emisoras, para que cualquier comparacion futura no dependa de
+    como lo escribieron."""
+    crudos = list(info.get("tags") or []) + list(info.get("categories") or [])
+    limpios: list[str] = []
+    vistos: set[str] = set()
+    for crudo in crudos:
+        tag = str(crudo).strip().lower()
+        if tag and tag not in vistos:
+            vistos.add(tag)
+            limpios.append(tag)
+    return ",".join(limpios)

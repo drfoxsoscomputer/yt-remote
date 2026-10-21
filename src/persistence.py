@@ -244,6 +244,38 @@ class StateStore:
             logger.error("No se pudo contar el historial: %s", exc)
             return (0, 0)
 
+    def top_paises_uso(self, limite: int = 3) -> list[dict]:
+        """Los paises MAS sonados de emisoras (chips del listado /radio)."""
+        if self._store is None or self._solo_lectura:
+            return []
+        try:
+            return self._store.top_paises_uso(limite)
+        except Exception as exc:  # noqa: BLE001 - un conteo no tumba el render
+            logger.error("No se pudo contar el uso por pais: %s", exc)
+            return []
+
+    def top_generos_uso(self, limite: int = 3) -> list[dict]:
+        """Los tags MAS sonados de emisoras (chips de genero de /radio)."""
+        if self._store is None or self._solo_lectura:
+            return []
+        try:
+            return self._store.top_generos_uso(limite)
+        except Exception as exc:  # noqa: BLE001
+            logger.error("No se pudo contar el uso por genero: %s", exc)
+            return []
+
+    def top_artistas_uso(
+        self, limite: int = 6, directo: Optional[int] = 0
+    ) -> list[dict]:
+        """Los artistas MAS sonados de canciones (chips del home /buscar)."""
+        if self._store is None or self._solo_lectura:
+            return []
+        try:
+            return self._store.top_artistas_uso(limite, directo=directo)
+        except Exception as exc:  # noqa: BLE001
+            logger.error("No se pudo contar el uso por artista: %s", exc)
+            return []
+
     def marcar_lista_vacia(self) -> None:
         """Vacia la cola (el usuario la limpio desde el boton 📋)."""
         if self._solo_lectura or self._store is None:

@@ -543,6 +543,106 @@ def test_depurar_historial_deja_la_ultima():
     s.cerrar()
 
 
+def test_tags_de_la_fila_sobreviven_y_no_se_pisad_con_vacio():
+    """Migracion 3: el historial guarda los tags DE LA FUENTE por fila, y
+    una re-reproduccion sin tags NO los borra."""
+    s = _store()
+    s.agregar_historial(
+        {
+            "url": "https://stream.example/a",
+            "video_id": "https://stream.example/a",
+            "title": "Radio Agua",
+            "channel": "Venezuela",
+            "directo": True,
+            "tags": "salsa,vallenato",
+        },
+        cuando=1,
+    )
+    fila = s.leer_historial(10, directo=1)[0]
+    assert fila["tags"] == "salsa,vallenato", fila
+
+    # La misma emisora vuelve a sonar y el item no trae tags (cache de
+    # stream de antes): los tags guardados se quedan.
+    s.agregar_historial(
+        {
+            "url": "https://stream.example/a",
+            "video_id": "https://stream.example/a",
+            "title": "Radio Agua",
+            "channel": "Venezuela",
+            "directo": True,
+            "tags": "",
+        },
+        cuando=2,
+    )
+    fila = s.leer_historial(10, directo=1)[0]
+    assert fila["tags"] == "salsa,vallenato", "los tags no se borran con otro play sin tags"
+    s.cerrar()
+
+
+def test_top_de_uso_ordenado_por_historial_real():
+    """Las chips (paises/generos) y el home del buscador salen del USO
+    real (cada fila del historial es un uso), no de lo meramente guardado."""
+    s = _store()
+    emisoras = [
+        {
+            "directo": True,
+            "url": "https://stream.example/a",
+            "video_id": "https://stream.example/a",
+            "title": "Radio Agua",
+            "channel": "Venezuela",
+            "tags": "salsa,vallenato",
+        },
+        {
+            "directo": True,
+            "url": "https://stream.example/b",
+            "video_id": "https://stream.example/b",
+            "title": "Radio Viento",
+            "channel": "Venezuela",
+            "tags": "salsa",
+        },
+        {
+            "directo": True,
+            "url": "https://stream.example/c",
+            "video_id": "https://stream.example/c",
+            "title": "Radio Tierra",
+            "channel": "Colombia",
+            "tags": "salsa,merengue",
+        },
+    ]
+    for i, emisora in enumerate(emisoras):
+        s.agregar_historial(emisora, cuando=i + 1)
+    cancion = {
+        "directo": False,
+        "url": "https://youtu.be/x1",
+        "video_id": "x1",
+        "title": "Una",
+        "artist": "GP Band",
+    }
+    s.agregar_historial(cancion, cuando=2)
+    otra = dict(cancion, video_id="x2", url="https://youtu.be/x2", title="Otra")
+    s.agregar_historial(otra, cuando=3)
+
+    # En tracks PERO sin fila en el historial: no cuenta como uso.
+    s.guardar_track(
+        {
+            "directo": False,
+            "url": "https://youtu.be/x3",
+            "video_id": "x3",
+            "title": "Guardada sin sonar",
+            "artist": "GP Band",
+        }
+    )
+
+    paises = s.top_paises_uso(3)
+    assert paises == [{"clave": "Venezuela", "usos": 2}, {"clave": "Colombia", "usos": 1}], paises
+    generos = s.top_generos_uso(3)
+    claves = [g["clave"] for g in generos]
+    assert claves[0] == "salsa" and "vallenato" in claves and "merengue" in claves, generos
+    artistas = s.top_artistas_uso(6, directo=0)
+    assert artistas == [{"clave": "GP Band", "usos": 2}], artistas
+    s.cerrar()
+
+
 def run():
     total = 0
     try:
