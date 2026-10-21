@@ -264,6 +264,16 @@ class StateStore:
             logger.error("No se pudo contar el uso por genero: %s", exc)
             return []
 
+    def actualizar_tags(self, video_id: str, tags: str) -> None:
+        """Escribe SOLO la columna tags de una cancion existente (el
+        backfill del rep de emisoras viejas); falla callada, como los conteos."""
+        if self._store is None or self._solo_lectura:
+            return
+        try:
+            self._store.actualizar_tags(video_id, tags)
+        except Exception as exc:  # noqa: BLE001
+            logger.error("No se pudo actualizar los tags de %s: %s", video_id, exc)
+
     def top_artistas_uso(
         self, limite: int = 6, directo: Optional[int] = 0
     ) -> list[dict]:

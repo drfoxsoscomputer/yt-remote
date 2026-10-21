@@ -442,9 +442,9 @@ async def test_salud_diagnostico_admin():
 
 async def test_menu_cubre_todos_los_comandos():
     """Todo nombre de CommandHandler de bot.py tiene que estar en
-    _COMANDOS_PUBLICOS o _COMANDOS_ADMIN: un comando nuevo sin registrar
-    en el menu queda invisible para siempre (el olvido que dejo a /salud
-    y cinco comandos mas afuera de la lista del "/")."""
+    _COMANDOS_PUBLICOS, _COMANDOS_DJ o _COMANDOS_ADMIN: un comando nuevo sin
+    registrar en el menu queda invisible para siempre (el olvido que dejo a
+    /salud y cinco comandos mas afuera de la lista del "/")."""
     import re as _re
     from pathlib import Path as _Path
 
@@ -453,10 +453,71 @@ async def test_menu_cubre_todos_los_comandos():
     fuente = _Path(bot_mod.__file__).read_text(encoding="utf-8")
     registrados = set(_re.findall(r'CommandHandler\(\s*"([a-z_]+)"', fuente))
     menu = {c.command for c in bot_mod._COMANDOS_PUBLICOS}
+    menu |= {c.command for c in bot_mod._COMANDOS_DJ}
     menu |= {c.command for c in bot_mod._COMANDOS_ADMIN}
     assert registrados, "el patron no agarro ningun CommandHandler: el test no prueba nada"
     faltan = registrados - menu
     assert not faltan, f"comandos sin menu: {sorted(faltan)}"
+
+
+async def test_menu_dj_por_usuario_y_se_borra_al_perder_el_rol():
+    """/buscar, /play, /radio y /letra solo se VEN para dj y admin: el
+    default del "/" queda con /start y los de dj se aplican con el scope
+    ChatMember por usuario; a quien pierde el rol se le BORRA el scope
+    (sin eso, Telegram le seguiria mostrando el men viejo para siempre)."""
+    from telegram import BotCommandScopeChatMember
+
+    import bot as bot_mod
+
+    b = make_bot()
+    b.config.allowed_chat_id = 44
+    b.roles.set_role(77, "admin", "Admin")
+    b.roles.set_role(88, "dj", "Ocho")
+    b.roles.register_user(99, "Invitado")
+
+    actos: list[tuple] = []
+
+    class _BotFakeMenu:
+        async def set_my_commands(self, cmds, scope=None):
+            actos.append(("set", tuple(c.command for c in cmds), scope))
+
+        async def delete_my_commands(self, scope=None):
+            actos.append(("del", scope))
+
+    b._comandos_dj_aplicados = {88}
+    await b._sincronizar_menu_dj(_BotFakeMenu())
+
+    # El conjunto aplicado venia de una sesion anterior y el rol no cambio:
+    # solo re-aplica (idempotente) para 77 y 88, sin borrados.
+    sets = [a for a in actos if a[0] == "set"]
+    assert {a[2].user_id for a in sets} == {1, 77, 88}, actos
+    vistos = {a[2].user_id: a[1] for a in sets}
+    assert vistos[77] == ("start", "buscar", "play", "radio", "letra"), vistos
+    assert vistos[88] == ("start", "buscar", "play", "radio", "letra"), vistos
+    assert all(a[2].chat_id == 44 for a in sets), actos
+    assert all(
+        isinstance(a[2], BotCommandScopeChatMember) for a in sets
+    ), actos
+    assert b._comandos_dj_aplicados == {1, 77, 88}, b._comandos_dj_aplicados
+
+    # Quitarle dj a 88: la sincronizacion siguiente BORRA su scope y
+    # re-aplica solo el de 77.
+    actos.clear()
+    b.roles.set_role(88, "user", "Ocho")
+    await b._sincronizar_menu_dj(_BotFakeMenu())
+    dels = [a for a in actos if a[0] == "del"]
+    assert len(dels) == 1 and dels[0][1].user_id == 88, actos
+    sets2 = [a for a in actos if a[0] == "set"]
+    assert {a[2].user_id for a in sets2} == {1, 77}, actos
+    assert b._comandos_dj_aplicados == {1, 77}, b._comandos_dj_aplicados
+
+    # El menu abierto queda SIN comandos de dj (start va en ambos a
+    # proposito: el scope de dj no lo necesita, pero es la lista base).
+    publicos = {c.command for c in bot_mod._COMANDOS_PUBLICOS}
+    djs = {c.command for c in bot_mod._COMANDOS_DJ}
+    assert publicos == {"start"}, publicos
+    assert {"buscar", "play", "radio", "letra"} <= djs, djs
+    assert djs - {"start"} and not ({c for c in djs if c != "start"} & publicos), (publicos, djs)
 
 
 async def test_sleep_menu_abre_y_programa():
@@ -2372,9 +2433,10 @@ def _emisora(nombre="Mango Radio", pais="DE", stream="https://s.mp3", logo=""):
 
 
 async def test_radio_destacadas_abren_listado():
-    """/radio sin argumentos abre DESTACADAS en un mensaje-lista propio:
-    encabezado, emisoras con pais y el teclado con play/favorita, la
-    navegacion inerte (una sola pagina) y la fila de vistas."""
+    """/radio sin argumentos abre el HOME del menu; el botón ⭐ Destacadas
+    abre el listado GLOBAL en el mismo mensaje: encabezado, emisoras con
+    pais y el teclado con play/favorita, la navegacion inerte (una sola
+    pagina) y la fila del pie."""
     import radio as radio_mod
 
     b = make_bot()
@@ -2386,17 +2448,26 @@ async def test_radio_destacadas_abren_listado():
     radio_mod.destacadas = destacadas
     try:
         await b.cmd_radio(FakeMessageUpdate("/radio"), SimpleNamespace(args=[]))
+        assert b._radio_view == "home" and b._radio_items == [], (b._radio_view, b._radio_items)
+        b._radio_chat_id, b._radio_message_id = 44, 7
+        upd = FakeUpdate("rad:top", user_id=77)
+        await b._on_radio_callback(upd, None)
+        assert b._radio_view == "top", b._radio_view
     finally:
         radio_mod.destacadas = viejo
 
-    chat_id, texto, kwargs = b._app.bot.sent[-1]
-    assert chat_id == 44 and texto.startswith("🔥 Emisoras destacadas:"), texto
+    texto, kwargs = b._app.bot.edited[-1][2], b._app.bot.edited[-1][-1]
+    assert texto.startswith("🔥 Emisoras destacadas:"), texto
     assert "1. Emisora 1 — DE" in texto, texto
     kb = kwargs["reply_markup"]
     assert kb.inline_keyboard[0][0].callback_data == "rad:play:0"
     assert kb.inline_keyboard[0][1].callback_data == "rad:fav:0"
     assert [btn.text for btn in kb.inline_keyboard[-2]] == ["·", "❌", "·"]
-    assert [btn.callback_data for btn in kb.inline_keyboard[-1]] == ["rad:top", "rad:fav"]
+    assert [btn.callback_data for btn in kb.inline_keyboard[-1]] == [
+        "rad:home",
+        "rad:top",
+        "rad:fav",
+    ]
 
 
 async def test_radio_busqueda_por_nombre():
@@ -2428,8 +2499,8 @@ async def test_radio_busqueda_por_nombre():
 
 
 async def test_radio_fallo_honesto():
-    """Si radio-browser no responde, el motivo llega honesto en UN mensaje y
-    no se abre ningun listado."""
+    """Si radio-browser no responde (⭐ Destacadas), el motivo llega honesto
+    en UNA alerta y el listado queda tal cual."""
     import radio as radio_mod
 
     b = make_bot()
@@ -2439,17 +2510,17 @@ async def test_radio_fallo_honesto():
 
     viejo = radio_mod.destacadas
     radio_mod.destacadas = destacadas
+    b._radio_chat_id, b._radio_message_id = 44, 7
     try:
-        upd = FakeMessageUpdate("/radio")
-        await b.cmd_radio(upd, SimpleNamespace(args=[]))
+        upd = FakeUpdate("rad:top", user_id=77)
+        await b._on_radio_callback(upd, None)
     finally:
         radio_mod.destacadas = viejo
 
-    assert any(
-        t.startswith("⚠️ No se pudo buscar emisoras: radio-browser no responde")
-        for t, _ in upd.sent
-    ), upd.sent
-    assert b._app.bot.sent == [], "un fallo no debe abrir listado"
+    assert upd.answered_kwargs.get("show_alert") and "radio-browser no responde" in str(
+        upd.answered_kwargs.get("text")
+    ), upd.answered_kwargs
+    assert b._app.bot.edited == [], "un fallo no debe repintar el listado"
 
 
 async def test_radio_favoritas_vacias_avisan():
@@ -5738,9 +5809,12 @@ async def test_radio_list_pending_nace_con_el_listado_y_muere_al_cerrar():
     radio_mod.destacadas = _destacadas_falso
     radio_mod.bajar_logo = _logo_falso
     try:
-        # Abrir listado: flag prendido (la card queda quieta).
+        # Abrir el home y ABIR ⭐ Destacadas: listado con emisoras, flag
+        # prendido (la card queda quieta).
         await b.cmd_radio(FakeMessageUpdate("/radio"), SimpleNamespace(args=[]))
-        assert b._radio_chat_id is not None
+        b._radio_chat_id, b._radio_message_id = 44, 7
+        upd_top = FakeUpdate("rad:top", user_id=77)
+        await b._on_radio_callback(upd_top, None)
         assert b._radio_list_pending is True
 
         # Elegir emisora: listado cerrado y flag apagado (card al final).
@@ -5842,118 +5916,216 @@ async def test_paginacion_de_emisoras_del_hub_mueve_historial_no_cola():
     assert b._list_page == 2, "la pagina de la COLA queda intacta"
 
 
-async def test_radio_sin_argumentos_abre_destacadas_del_idioma():
-    """El arranque en frio no pregunta ni asume pais: semilla = idioma de
-    Telegram ('language=spanish', verificado contra el API de radios). Con
-    codigo no mapeado o lista vacia cae a destacadas globales."""
-    import bot as bot_mod
+async def test_radio_sin_argumentos_abre_el_home_menu():
+    """El /radio sin nada es el HOME del menu (🌍 Países / 🎵 Géneros con
+    pie ⭐ ❤️ y vuelta al 📻 Inicio): ni una consulta al API, y rad:home
+    de CUALQUIER vista vuelve al menu."""
     import radio as radio_mod
-    from radio import Emisora
 
+    async def _prohibida(cantidad):
+        raise AssertionError("el home NO consulta el API")
+
+    vieja = radio_mod.destacadas
+    radio_mod.destacadas = _prohibida
     b = make_bot()
-    pedidos: list[tuple[str, int]] = []
-
-    async def _idioma_falso(termino, cantidad):
-        pedidos.append((termino, cantidad))
-        return [
-            Emisora(nombre="Cadena SER", pais="España", stream="https://s.example/1", tags="news,radio"),
-        ]
-
-    async def _destacadas_prohibida(cantidad):
-        raise AssertionError("con semilla de idioma NO debe ir a destacadas")
-
-    viejo_idioma = radio_mod.buscar_idioma
-    viejo_destacadas = radio_mod.destacadas
-    radio_mod.buscar_idioma = _idioma_falso
-    radio_mod.destacadas = _destacadas_prohibida
     try:
         await b.cmd_radio(
             FakeMessageUpdate("/radio", language_code="es-419"),
             SimpleNamespace(args=[]),
         )
-        assert pedidos == [("spanish", bot_mod._RADIO_BATCH)], pedidos
-        assert b._radio_view == "idioma", b._radio_view
-        assert b._radio_query == "en spanish", b._radio_query
-        assert any("Cadena SER" in str(s) for s in b._app.bot.sent), b._app.bot.sent
+        assert b._radio_view == "home", b._radio_view
+        assert b._radio_items == [], b._radio_items
+        kb = b._radio_keyboard()
+        callbacks = [btn.callback_data for fila in kb.inline_keyboard for btn in fila]
+        assert "rad:paises" in callbacks and "rad:generos" in callbacks, callbacks
+        assert "rad:top" in callbacks and "rad:fav" in callbacks, callbacks
+        assert b._radio_text().startswith("📻 ¿Qué escuchamos?"), b._radio_text()
 
-        # Sin emisoras del idioma: cae a destacadas y limpia el titular.
-        pedidos.clear()
-
-        async def _idioma_vacio(termino, cantidad):
-            pedidos.append((termino, cantidad))
-            return []
-
-        destacadas_pedidas: list[int] = []
-
-        async def _destacadas_falsa(cantidad):
-            destacadas_pedidas.append(cantidad)
-            return [Emisora(nombre="Planeta", pais="Venezuela", stream="https://p.example/1")]
-
-        radio_mod.buscar_idioma = _idioma_vacio
-        radio_mod.destacadas = _destacadas_falsa
-        await b.cmd_radio(
-            FakeMessageUpdate("/radio", language_code="es"), SimpleNamespace(args=[])
-        )
-        assert pedidos == [("spanish", bot_mod._RADIO_BATCH)], pedidos
-        assert destacadas_pedidas == [bot_mod._RADIO_BATCH], destacadas_pedidas
-        assert b._radio_view == "top", b._radio_view
-        assert b._radio_query == "", b._radio_query
+        # De CUALQUIER vista, rad:home vuelve al menu.
+        b._radio_view = "busqueda"
+        b._radio_query = "salsa"
+        b._radio_chat_id, b._radio_message_id = 44, 7
+        upd = FakeUpdate("rad:home", user_id=77)
+        await b._on_radio_callback(upd, None)
+        assert b._radio_view == "home", b._radio_view
+        assert upd.answered is not None, "el callback se responde una vez"
     finally:
-        radio_mod.buscar_idioma = viejo_idioma
-        radio_mod.destacadas = viejo_destacadas
+        radio_mod.destacadas = vieja
 
 
-async def test_radio_chips_de_uso_y_callback_de_chip():
-    """Las chips de uso (países y géneros ya sonados) salen DE la base,
-    solo con datos, y el toque rad:pais:N / rad:gen:N ab SU listado sin
-    escribir nada. Sin datos NO hay chips (nada inventado)."""
+async def test_radio_menu_paises_por_cercania_y_genero_del_pais():
+    """El directorio de países ordena por CERCANÍA al salon (el pais del
+    equipo PRIMERO, después los vecinos aunque suenen menos, y los países
+    sin coordenadas al final) y el de géneros pone lo de la SALA encima de
+    los tags del pais segun el API. Todo en rótulos de español."""
     import radio as radio_mod
     from queue_manager import QueueItem
     from radio import Emisora
 
+    catalogo = {
+        radio_mod._normalizar_clave("Bolivarian Republic Of Venezuela"): {
+            "name": "Bolivarian Republic Of Venezuela",
+            "iso_3166_1": "VE",
+            "stationcount": 200,
+        },
+        radio_mod._normalizar_clave("Republic Of Colombia"): {
+            "name": "Republic Of Colombia",
+            "iso_3166_1": "CO",
+            "stationcount": 900,
+        },
+        radio_mod._normalizar_clave("The United States Of America"): {
+            "name": "The United States Of America",
+            "iso_3166_1": "US",
+            "stationcount": 8676,
+        },
+        radio_mod._normalizar_clave("Kingdom Of Spain"): {
+            "name": "Kingdom Of Spain",
+            "iso_3166_1": "ES",
+            "stationcount": 500,
+        },
+        radio_mod._normalizar_clave("RepúblicaSinCoordenadas"): {
+            "name": "RepúblicaSinCoordenadas",
+            "iso_3166_1": "ZZ",
+            "stationcount": 999999,
+        },
+    }
+
+    async def _paises_falso():
+        return catalogo
+
+    async def _tags_falso(iso, cantidad=300, tope=60):
+        return [("salsa", 40), ("vallenato", 20), ("merengue", 10)]
+
+    viejo_paises = radio_mod.paises
+    viejo_tags = radio_mod.tags_de_pais
+    radio_mod.paises = _paises_falso
+    radio_mod.tags_de_pais = _tags_falso
     b = make_bot()
-    b._radio_view = "top"
-    kb = b._radio_keyboard()
-    labels = [btn.text for fila in kb.inline_keyboard for btn in fila]
-    assert not any(l.startswith("🌍 ") for l in labels), "sin datos NO hay chips de pais"
-    assert not any(l.startswith("🎵 ") for l in labels), "sin datos NO hay chips de genero"
-
-    # Uso real: dos emisoras sonadas con pais y tags (una repetida).
+    b._radio_equipo = ("VE", 7.1, -66.2)
+    # La sala ya sonó salsa (2 emisoras) y merengue (1): eso guida arriba.
     b._state.marcar_historial(
-        QueueItem(url="https://r.example/1", title="Uno", channel="Venezuela", tags="salsa,vallenato", directo=True)
+        QueueItem(url="r1", title="A", channel="Venezuela", tags="salsa", directo=True)
     )
     b._state.marcar_historial(
-        QueueItem(url="https://r.example/2", title="Dos", channel="Colombia", tags="salsa", directo=True)
+        QueueItem(url="r2", title="B", channel="Colombia", tags="salsa", directo=True)
     )
-    kb2 = b._radio_keyboard()
-    labels2 = [btn.text for fila in kb2.inline_keyboard for btn in fila]
-    assert any(l.startswith("🌍 ") and l.endswith(")") for l in labels2), labels2
-    assert any(l.startswith("🎵 salsa") for l in labels2), labels2
-    callbacks = [btn.callback_data for fila in kb2.inline_keyboard for btn in fila]
-    assert "rad:pais:0" in callbacks and "rad:gen:0" in callbacks, callbacks
-
-    # El toque de la chip de pais abre SU listado en la misma lista.
-    async def _pais_falso(termino, cantidad):
-        return [Emisora(nombre="Lejia", pais=termino, stream="https://l.example/1", tags="salsa")]
-
-    viejo_pais = radio_mod.buscar_pais
-    radio_mod.buscar_pais = _pais_falso
+    b._state.marcar_historial(
+        QueueItem(url="r3", title="C", channel="Venezuela", tags="merengue", directo=True)
+    )
+    b._radio_chat_id, b._radio_message_id = 44, 7
     try:
-        clave = b._radio_paises[0][0]
-        upd = FakeUpdate("rad:pais:0", user_id=77)
-        b._radio_chat_id, b._radio_message_id = 44, 7
+        upd = FakeUpdate("rad:paises", user_id=77)
         await b._on_radio_callback(upd, None)
-        assert b._radio_view == "busqueda", b._radio_view
-        assert b._radio_query == clave, b._radio_query
-        assert b._radio_items and b._radio_items[0].pais == clave, b._radio_items
-        assert upd.answered is not None, "el callback se responde una vez"
+        assert b._radio_view == "paises", b._radio_view
+        assert [p[1] for p in b._radio_paises] == ["VE", "CO", "US", "ES", "ZZ"], b._radio_paises
+        # El rótulo es el nombre en ESPAÑOL y la votación salta CO por US
+        # (cercania manda, no stationcount).
+        kb = b._radio_keyboard()
+        etiquetas = [btn.text for fila in kb.inline_keyboard for btn in fila]
+        assert any(l == "🌍 Venezuela (200)" for l in etiquetas), etiquetas
+        assert not any("Bolivarian" in l for l in etiquetas), etiquetas
 
-        # Fuera de rango: respuesta mudita y nada roto.
-        upd2 = FakeUpdate("rad:pais:9", user_id=77)
-        await b._on_radio_callback(upd2, None)
-        assert upd2.answered is not None
+        # Tocar el país del salon abre SU listado con el nombre visible.
+        async def _pais_falso(termino, cantidad):
+            assert termino == "VE", termino
+            return [Emisora(nombre="Loca FM", pais="Venezuela", stream="https://l.example/1", tags="salsa")]
+
+        viejo_buscar_pais = radio_mod.buscar_pais
+        radio_mod.buscar_pais = _pais_falso
+        try:
+            upd2 = FakeUpdate("rad:pais:0", user_id=77)
+            await b._on_radio_callback(upd2, None)
+        finally:
+            radio_mod.buscar_pais = viejo_buscar_pais
+        assert b._radio_view == "busqueda", b._radio_view
+        assert b._radio_query == "Venezuela", b._radio_query
+        assert b._radio_items and b._radio_items[0].nombre == "Loca FM", b._radio_items
+
+        # El menu de generos: sala (salsa, merengue) y luego el API (vallenato).
+        await b._on_radio_callback(FakeUpdate("rad:home", user_id=77), None)
+        upd3 = FakeUpdate("rad:generos", user_id=77)
+        await b._on_radio_callback(upd3, None)
+        assert b._radio_view == "generos", b._radio_view
+        claves = [t[0] for t in b._radio_generos]
+        assert claves == ["salsa", "merengue", "vallenato"], claves
+        etiquetas_g = [btn.text for fila in b._radio_keyboard().inline_keyboard for btn in fila]
+        assert "🎵 salsa (2)" in etiquetas_g, etiquetas_g
+
+        # Rad:gen:0 abre el listado del genero.
+        async def _genero_falso(tag, cantidad):
+            return [Emisora(nombre="Gen", pais="Venezuela", stream="https://g.example/1")]
+
+        viejo_genero = radio_mod.buscar_genero
+        radio_mod.buscar_genero = _genero_falso
+        try:
+            upd4 = FakeUpdate("rad:gen:0", user_id=77)
+            await b._on_radio_callback(upd4, None)
+            assert b._radio_view == "busqueda" and b._radio_query == "salsa", (b._radio_view, b._radio_query)
+        finally:
+            radio_mod.buscar_genero = viejo_genero
     finally:
-        radio_mod.buscar_pais = viejo_pais
+        radio_mod.paises = viejo_paises
+        radio_mod.tags_de_pais = viejo_tags
+
+
+async def test_radio_sin_pais_y_sin_sala_avisa_generos_vacio():
+    """Sin país del equipo y sin uso en la sala: el menú de géneros NO
+    inventa categorias; avisa honesto y sigue en home."""
+    import radio as radio_mod
+
+    async def _tags_falso(iso, cantidad=300, tope=60):
+        return []
+
+    viejo = radio_mod.tags_de_pais
+    radio_mod.tags_de_pais = _tags_falso
+    b = make_bot()
+    b._radio_equipo = (None, None, None)
+    b._radio_chat_id, b._radio_message_id = 44, 7
+    try:
+        upd = FakeUpdate("rad:generos", user_id=77)
+        await b._on_radio_callback(upd, None)
+        assert b._radio_view == "home", b._radio_view
+        assert upd.answered is not None and upd.answered_kwargs.get("show_alert"), upd.__dict__
+    finally:
+        radio_mod.tags_de_pais = viejo
+
+
+async def test_radio_rep_viejo_recupera_y_guarda_tags():
+    """El rep de una emisora antigua SIN tags los recupera del API por su
+    stream y los ESCRIBE en tracks (backfill): el ancla de la sesión y la
+    base (donde lee el menú de géneros) quedan con lo mismo."""
+    import radio as radio_mod
+    from queue_manager import QueueItem
+
+    b = make_bot()
+    b._clear_nav_stacks()
+    b._state.marcar_historial(
+        QueueItem(url="https://r.example/vieja", title="Vieja", channel="Venezuela", directo=True)
+    )
+    pedido: list[str] = []
+
+    async def _tags_de_stream_falso(stream):
+        pedido.append(stream)
+        return "cristiana,salsa"
+
+    viejo = radio_mod.tags_por_stream
+    radio_mod.tags_por_stream = _tags_de_stream_falso
+    try:
+        await b._on_control(
+            FakeUpdate("ctl:lista", user_id=77, chat_id=44), SimpleNamespace(args=[]), "lista"
+        )
+        await b._on_list_callback(
+            FakeUpdate("lst:histr", user_id=77, chat_id=44), SimpleNamespace(args=[])
+        )
+        await b._on_list_callback(
+            FakeUpdate("lst:rep:0", user_id=77, chat_id=44), SimpleNamespace(args=[])
+        )
+        assert pedido == ["https://r.example/vieja"], pedido
+        assert b._hist_ancla == {"tipo": "emisora", "pais": "Venezuela", "tags": "cristiana,salsa"}, b._hist_ancla
+        filas = b._state.leer_historial(5)
+        assert any(f.get("video_id") == "https://r.example/vieja" and f.get("tags") == "cristiana,salsa" for f in filas), filas
+    finally:
+        radio_mod.tags_por_stream = viejo
 
 
 async def test_historial_emisora_proxima_por_genero():

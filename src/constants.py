@@ -89,6 +89,8 @@ UPDATE_DIR = "update"
 # sin volver al API.
 RADIO_BATCH = 40
 RADIO_PAGE_SIZE = 5
+# Botones por pagina en los directorios (paises y generos) del menu /radio.
+RADIO_DIRECTORIO_PAGINA = 10
 
 # Host fijo de radio-browser: si cae, el error es honesto ("radio-browser
 # no responde (...)"); no hay fallback multi-servidor porque el plan no lo

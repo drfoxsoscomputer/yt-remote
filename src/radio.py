@@ -11,6 +11,7 @@ que falla en vivo, que es lo peor que le puede pasar al salon.
 """
 
 from dataclasses import dataclass
+import sys
 
 from constants import RADIO_API, RADIO_API_TIMEOUT
 
@@ -303,35 +304,182 @@ async def buscar_pais(termino: str, cantidad: int) -> list:
     return _normalizar(filas)
 
 
-_IDIOMA_NOMBRE = {
-    # Codigo de idioma de Telegram -> nombre del idioma en radio-browser.
-    # El catalogo de idiomas del API va por nombre (verificado contra el
-    # servicio: 'language=spanish' trae emisoras en espanol con tags y
-    # votos); el `languagecode` crudo mezcla emisoras ajenas.
-    "es": "spanish",
-    "pt": "portuguese",
-    "en": "english",
-    "fr": "french",
-    "de": "german",
-    "it": "italian",
+_TAGS_POR_PAIS: "dict[str, list[tuple[str, int]]]" = {}  # cache de la sesion
+
+
+async def tags_de_pais(
+    iso: str, cantidad: int = 300, tope: int = 60
+) -> list[tuple[str, int]]:
+    """Los generos (tags) REALMENTE usados por las emisoras de un pais,
+    ordenados por cantidad de emisoras: es la suma directa del listado del
+    API (nada inventado), cacheada por proceso y por pais (UNA consulta).
+
+    `tope` limita el menu (los tags raros de una sola emisora no merecen
+    boton); el `cantidad` muestrea las mas votadas del pais."""
+    clave = str(iso or "").strip().upper()
+    if not clave:
+        return []
+    if clave not in _TAGS_POR_PAIS:
+        filas = await buscar_pais(clave, cantidad)
+        suma: dict[str, int] = {}
+        for emisora in filas:
+            for tag in str(emisora.tags or "").split(","):
+                tag = tag.strip().lower()
+                if len(tag) >= 3:
+                    suma[tag] = suma.get(tag, 0) + 1
+        ordenado = sorted(suma.items(), key=lambda par: (-par[1], par[0]))
+        _TAGS_POR_PAIS[clave] = [par for par in ordenado[:tope] if par[1] >= 2]
+    return _TAGS_POR_PAIS[clave]
+
+_PAIS_COORDENADAS: dict[str, tuple[float, float]] = {
+    # Centroide de cada pais (iso, lat, lon): es DATO GEOGRAFICO, no uso.
+    # Sirve para ordenar el menu de paises por cercania al equipo
+    # (vez primero lo tuyo, despues los vecinos, no lo que mas vota).
+    "VE": (7.1, -66.2), "CO": (4.6, -74.1), "EC": (-1.8, -78.2),
+    "PE": (-9.2, -75.0), "PA": (8.5, -80.1), "CR": (9.7, -84.2),
+    "NI": (12.9, -85.2), "HN": (14.8, -86.6), "SV": (13.8, -88.9),
+    "GT": (15.5, -90.3), "BZ": (17.2, -88.7), "CU": (21.5, -77.8),
+    "JM": (18.1, -77.3), "HT": (18.9, -72.7), "DO": (18.7, -70.2),
+    "PR": (18.2, -66.4), "TT": (10.7, -61.2), "GY": (4.9, -58.9),
+    "SR": (4.1, -56.0), "BR": (-10.8, -52.9), "BO": (-16.7, -64.7),
+    "PY": (-23.2, -58.4), "CL": (-35.7, -71.5), "AR": (-34.0, -64.2),
+    "UY": (-32.8, -55.8), "MX": (23.6, -102.5), "US": (39.8, -98.6),
+    "CA": (56.1, -106.3), "GL": (71.7, -42.6),
+    "ES": (40.2, -3.6), "PT": (39.4, -8.2), "FR": (46.6, 2.2),
+    "IT": (41.9, 12.6), "GB": (54.8, -3.5), "IE": (53.4, -8.2),
+    "DE": (51.2, 10.4), "NL": (52.2, 5.5), "BE": (50.6, 4.7),
+    "CH": (46.8, 8.2), "AT": (47.6, 14.1), "PL": (52.1, 19.4),
+    "CZ": (49.7, 15.3), "RO": (45.9, 25.0), "GR": (39.1, 22.0),
+    "TR": (39.0, 35.2), "RU": (58.0, 60.0), "UA": (49.0, 31.4),
+    "MA": (31.9, -6.3), "DZ": (28.2, 2.7), "TN": (34.1, 9.6),
+    "EG": (26.5, 29.9), "NG": (9.1, 8.7), "ZA": (-30.6, 22.9),
+    "IL": (31.4, 34.9), "SA": (24.0, 45.1), "AE": (23.9, 54.1),
+    "IN": (21.1, 78.0), "PK": (30.4, 69.4), "CN": (35.9, 104.2),
+    "JP": (36.2, 138.3), "KR": (35.9, 127.8), "PH": (12.9, 121.8),
+    "ID": (-2.5, 118.0), "AU": (-25.7, 134.5), "NZ": (-41.5, 172.8),
+}
+
+_ZONA_PAIS: dict[str, tuple[str | None, float, float]] = {
+    # Windows TimeZoneKeyName -> (iso o None, lat, lon) del EQUIPO: es el
+    # LUGAR que importa (la maquina del salon suena ahi; el telefono no
+    # dice nada). Zonas compartidas por varios paises quedan sin iso y
+    # con su punto representativo: el menu de paises se ordena desde ese
+    # punto (cercania) sin afirmar un pais equivocado.
+    "Venezuela Standard Time": ("VE", 7.1, -66.2),
+    "Central Standard Time (Mexico)": ("MX", 23.6, -102.5),
+    "Pacific Standard Time (Mexico)": ("MX", 20.7, -105.2),
+    "Mountain Standard Time (Mexico)": ("MX", 29.0, -107.5),
+    "Cuba Standard Time": ("CU", 21.5, -77.8),
+    "SA Pacific Standard Time": (None, 4.6, -74.1),
+    "SA Western Standard Time": (None, 10.5, -66.9),
+    "SA Eastern Standard Time": (None, -9.2, -75.0),
+    "SA Central Standard Time": (None, -16.7, -64.7),
+    "E. South America Standard Time": ("BR", -10.8, -52.9),
+    "Central America Standard Time": (None, 9.7, -84.2),
+    "Central Standard Time": (None, 39.8, -98.6),
+    "Mountain Standard Time": (None, 39.8, -98.6),
+    "Eastern Standard Time": (None, 39.8, -98.6),
+    "Pacific Standard Time": (None, 39.8, -98.6),
+    "Romance Standard Time": (None, 46.6, 2.2),
+    "GMT Standard Time": ("GB", 54.8, -3.5),
+    "Central Europe Standard Time": (None, 48.7, 9.5),
+    "AUS Eastern Standard Time": ("AU", -25.7, 134.5),
+    "New Zealand Standard Time": ("NZ", -41.5, 172.8),
 }
 
 
-def idioma_del_api(codigo: str) -> str | None:
-    """El nombre del idioma del API para un codigo de Telegram, None si
-    el bot no lo mapea (el home cae a destacadas sin inventar idiomas)."""
-    return _IDIOMA_NOMBRE.get(str(codigo or "").strip().lower().split("-")[0])
+def pais_del_equipo() -> tuple[str | None, float | None, float | None]:
+    """(iso, lat, lon) del LUGAR del equipo: se lee la zona horaria de
+    Windows (stdlib winreg, cero preguntas, cero escritura del usuario).
+
+    - Zona con pais propio ('Venezuela Standard Time'): notifica el iso y
+      su punto, y el menu de paises lo pone PRIMERO.
+    - Zona compartida: iso None y punto representativo (solo sirve para
+      ordenar por cercania; jamas se afirma un pais equivocado).
+    - Fuera de Windows o zona desconocida: (None, None, None) y el menu
+      muestra el catalogo por orden del servicio (stationcount)."""
+    if sys.platform != "win32":
+        return (None, None, None)
+    try:
+        import winreg  # solo existe en Windows
+
+        with winreg.OpenKey(
+            winreg.HKEY_LOCAL_MACHINE,
+            r"SYSTEM\CurrentControlSet\Control\TimeZoneInformation",
+        ) as clave:
+            zona = str(winreg.QueryValueEx(clave, "TimeZoneKeyName")[0] or "")
+    except OSError:
+        return (None, None, None)
+    if zona in _ZONA_PAIS:
+        iso, lat, lon = _ZONA_PAIS[zona]
+        return (iso, lat, lon)
+    # Zona conocida por Windows pero no mapeada por nosotros: mejor
+    # callado y sin pais que inventar el lugar del salon.
+    return (None, None, None)
 
 
-async def buscar_idioma(termino: str, cantidad: int) -> list:
-    """Emisoras del IDIOMA pedido (name en el API, ej. 'spanish'),
-    ordenadas por votos: la semilla del primer arranque, cuando todavia
-    no hay historial que determine un pais."""
-    filas = await _get(
-        "/json/stations/search",
-        _params(language=termino, limit=str(cantidad), order="votes", reverse="true"),
+def _distancia(lat1, lon1, lat2, lon2):
+    """Distancia aproximada en km (Haversine, suficiente para ORDENAR
+    paises; no es geodesia fina)."""
+    import math
+
+    r = 6371.0
+    f1, f2 = math.radians(lat1), math.radians(lat2)
+    df = math.radians(lat2 - lat1)
+    dl = math.radians(lon2 - lon1)
+    a = (
+        math.sin(df / 2) ** 2
+        + math.cos(f1) * math.cos(f2) * math.sin(dl / 2) ** 2
     )
-    return _normalizar(filas)
+    return 2 * r * math.asin(math.sqrt(a))
+
+
+_PAIS_VISIBLE = {
+    # Nombres para MOSTRAR en espanol; la BUSQUEDA SIEMPRE usa el nombre
+    # oficial del catalogo (el API entiende su propio filete inglés).
+    "Bolivarian Republic Of Venezuela": "Venezuela",
+    "The United States Of America": "Estados Unidos",
+    "The United Mexican States": "México",
+    "The Dominican Republic": "República Dominicana",
+    "Republic Of Colombia": "Colombia",
+    "Republic Of Chile": "Chile",
+    "Republic Of Peru": "Perú",
+    "Republic Of Ecuador": "Ecuador",
+    "Republic Of Cuba": "Cuba",
+    "Republic Of Panama": "Panamá",
+    "Republic Of Bolivia": "Bolivia",
+    "Republic Of Paraguay": "Paraguay",
+    "Republic Of Costa Rica": "Costa Rica",
+    "Republic Of El Salvador": "El Salvador",
+    "Republic Of Nicaragua": "Nicaragua",
+    "Republic Of Guatemala": "Guatemala",
+    "Republic Of Honduras": "Honduras",
+    "Republic Of Argentina": "Argentina",
+    "Republic Of Uruguay": "Uruguay",
+    "Kingdom Of Spain": "España",
+    "Portuguese Republic": "Portugal",
+    "French Republic": "Francia",
+    "Republic Of Peru ": "Perú",
+    "United Mexican States": "México",
+    "Dominican Republic": "República Dominicana",
+    "United States Of America": "Estados Unidos",
+    "United States": "Estados Unidos",
+    "The United Kingdom Of Great Britain And Northern Ireland": "Reino Unido",
+    "Federal Republic Of Germany": "Alemania",
+    "Italian Republic": "Italia",
+    "Swiss Confederation": "Suiza",
+    "Switzerland": "Suiza",
+    "Commonwealth Of Puerto Rico": "Puerto Rico",
+    "Republic Of Trinidad And Tobago": "Trinidad y Tobago",
+    "Republic Of Panama ": "Panamá",
+}
+
+
+def pais_visible(nombre: str) -> str:
+    """El nombre EN ESPAÑOL para mostrar de un país del API. Sin mapa:
+    el nombre original (los rótulos mentirosos mejor ni aparecen)."""
+    texto = str(nombre or "").strip()
+    return _PAIS_VISIBLE.get(texto, texto)
 
 
 _TAGS_POR_STREAM: "dict[str, str | None]" = {}  # cache de la sesion

@@ -21,6 +21,7 @@ from typing import Optional
 from telegram import (
     BotCommand,
     BotCommandScopeAllChatAdministrators,
+    BotCommandScopeChatMember,
     InlineKeyboardButton,
     InlineKeyboardMarkup,
     Update,
@@ -119,6 +120,7 @@ from constants import (  # noqa: E402
     QUICK_TIMEOUT,
     QUICK_TRACKS,
     RADIO_BATCH,
+    RADIO_DIRECTORIO_PAGINA,
     RADIO_PAGE_SIZE,
     RELEASE_ZIP_PATRON,
     RESOLVE_TIMEOUT,
@@ -147,20 +149,27 @@ _SEARCH_PAGE_SIZE = SEARCH_PAGE_SIZE
 _SEARCH_BATCH_CON_ARTISTA = SEARCH_BATCH_CON_ARTISTA
 _RADIO_BATCH = RADIO_BATCH
 _RADIO_PAGE_SIZE = RADIO_PAGE_SIZE
+_RADIO_DIRECTORIO = RADIO_DIRECTORIO_PAGINA
 _TOPE_LETRA = TOPE_LETRA
 
-# Menú de comandos ("/") por audiencia. Los solo-admin van en el scope
-# all_chat_administrators (solo los admins del grupo los ven); el resto en
-# el default. Telegram no tiene scope por rol del bot — el dj es un rol
-# nuestro, no un admin de Telegram — por eso los dj+ se ven para todos y
-# el bot los niega con educacion si no corres.
+# Menú de comandos ("/") por audiencia. Los comandos de DJ (/buscar, /play,
+# /radio, /letra) NO van en el menú abierto: se aplican con el scope
+# BotCommandScopeChatMember (visible SOLO para ese miembro del grupo), uno
+# por dj/admin, al arrancar y tras cada cambio de rol (ver
+# _sincronizar_menu_dj). Telegram no tiene scope por rol del bot — el dj es
+# un rol nuestro, no un admin de Telegram — pero el ChatMember scope es por
+# usuario, que es justo lo que hacía falta. El default queda con /start
+# (un invitado no ve atajos que no puede correr).
 # La cobertura la garantiza test_menu_cubre_todos_los_comandos.
 _COMANDOS_PUBLICOS = [
     BotCommand("start", "Info del bot (dj+)"),
-    BotCommand("buscar", "Buscar artista o link para reproducir (dj+)"),
-    BotCommand("play", "Buscar y reproducir (alias de /buscar) (dj+)"),
-    BotCommand("radio", "Elegir emisora o favoritas (dj+)"),
-    BotCommand("letra", "Letra de lo que esta sonando (dj+)"),
+]
+_COMANDOS_DJ = [
+    BotCommand("start", "Info del bot (dj+)"),
+    BotCommand("buscar", "Buscar artista o link para reproducir"),
+    BotCommand("play", "Buscar y reproducir (alias de /buscar)"),
+    BotCommand("radio", "Elegir emisora o favoritas"),
+    BotCommand("letra", "Letra de lo que esta sonando"),
 ]
 _COMANDOS_ADMIN = [
     BotCommand("reglas", "Re-envia y fija (pin) las reglas del grupo"),
@@ -646,25 +655,30 @@ class YTRemoteBot:
         # todo; el ▶ lo consume al retomar (el ⏹ lo borra: parar = proximo
         # ▶ desde 0). Se persiste con el estado comun.
         self._posicion_guardada: dict | None = None
-        # /radio: la vista abierta (destacadas/buscada/favoritas) vive SOLO
-        # en la sesion (un reinicio reabre en destacadas); las FAVORITAS si
-        # se persisten con el estado comun (clave radio_favs).
-        self._radio_view: str = "top"
+        # /radio: la vista abierta (home/paises/generos/buscada/favoritas)
+        # vive SOLO en la sesion (un reinicio reabre el home); las FAVORITAS
+        # si se persisten con el estado comun (clave radio_favs).
+        self._radio_view: str = "home"
         self._radio_page: int = 0
         self._radio_query: str = ""
         self._radio_items: list = []
         self._radio_favs: list = []
         self._radio_chat_id: int | None = None
         self._radio_message_id: int | None = None
-        # Chips de uso del listado (países/géneros ya sonados): se leen de
-        # la base en cada render del teclado y quedan aqui para que el
-        # callback rad:pais:N / rad:gen:N sepa a qué fila tocó.
-        self._radio_paises: list = []
-        self._radio_generos: list = []
+        # Directorios del menu de /radio: listas COMPLETAS (no solo la
+        # pagina) para que rad:pais:N / rad:gen:N sepa a que fila toco.
+        self._radio_paises: list = []  # [(nombre_api, iso, emisoras)]
+        self._radio_generos: list = []  # [(tag, emisoras)]
+        # El LUGAR del salon: la zona horaria de la PC (la maquina donde
+        # corre el bot), leida UNA vez al arrancar (stdlib, sin preguntar).
+        self._radio_equipo = radio.pais_del_equipo()
         # Home de /buscar (chips de artistas ya sonados, callback bsm:*):
         # UN solo mensaje en pantalla, igual que los demas listados.
         self._buscar_home_chat_id: int | None = None
         self._buscar_home_message_id: int | None = None
+        # Menu "/" de dj ya aplicado (uids con scope ChatMember): sirve para
+        # BORRAR el menu de quien pierde el rol, no solo acumular scopes.
+        self._comandos_dj_aplicados: set[int] = set()
         # Editor de usuarios (boton 👥): la lista vive en el chat PRIVADO del
         # admin. Los cambios quedan "staged" (sin persistir en roles.json)
         # hasta el boton ❌ (commit); tocar un usuario dos veces lo revierte.
@@ -863,6 +877,42 @@ class YTRemoteBot:
             )
         except Exception as exc:  # noqa: BLE001 - no debe tumbar el arranque
             logger.warning("No se pudo registrar los comandos: %s", exc)
+        await self._sincronizar_menu_dj(bot)
+
+    async def _sincronizar_menu_dj(self, bot) -> None:
+        """El menu "/" de los comandas de DJ se aplica POR USUARIO con el
+        scope `BotCommandScopeChatMember` (visible SOLO para ese miembro del
+        grupo) a cada dj/admin conocido. Quien pierde el rol conserva el
+        menu viejo hasta que se le borre explicitamente: por eso el helper
+        tambien tira `delete_my_commands` de los djs que se quedaron fuera.
+        Al arrancar y DESPUES de cada commit de roles (👥)."""
+        chat = self.config.allowed_chat_id
+        if not chat:
+            return
+        dj_y_admin = set(self.roles.get_all_with_role("dj")) | set(
+            self.roles.get_all_with_role("admin")
+        )
+        quitados = self._comandos_dj_aplicados - dj_y_admin
+        self._comandos_dj_aplicados = set(dj_y_admin)
+        for uid in quitados:
+            try:
+                await bot.delete_my_commands(
+                    scope=BotCommandScopeChatMember(chat_id=chat, user_id=uid)
+                )
+            except Exception as exc:  # noqa: BLE001 - el toast/persistencia sigue
+                logger.warning(
+                    "No se pudo esconder el menu de dj para %s: %s", uid, exc
+                )
+        for uid in sorted(dj_y_admin):
+            try:
+                await bot.set_my_commands(
+                    _COMANDOS_DJ,
+                    scope=BotCommandScopeChatMember(chat_id=chat, user_id=uid),
+                )
+            except Exception as exc:  # noqa: BLE001
+                logger.warning(
+                    "No se pudo aplicar el menu de dj para %s: %s", uid, exc
+                )
 
     def _push_to_nav_back(self) -> None:
         """Guarda el item actual en la pila de navegación hacia atrás.
@@ -1605,10 +1655,11 @@ class YTRemoteBot:
     async def cmd_radio(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         """Emisoras de internet (radio-browser): el 📻 del salon.
 
-        Sin argumentos abre las DESTACADAS por votos. Con argumentos, el
-        texto es la busqueda (ver _radio_parsear): por nombre, con
-        "genero:<texto>" por genero y "pais:<texto>" por pais; y
-        "/radio favoritas" abre la lista propia.
+        Sin argumentos abre el HOME del menu: dos listados, Paises (el del
+        salon primero, luego los cercanos) y Generos (los que de verdad se
+        usan en ese pais). Con argumentos, el texto es la busqueda (ver
+        _radio_parsear): por nombre, con "genero:<texto>" por genero y
+        "pais:<texto>" por pais; y "/radio favoritas" abre la lista propia.
 
         El listado es un mensaje aparte (teclas 🔥 ❤️ ◀ ▶ ❌) que cualquiera
         puede abrir; ELEGIR una emisora o tocar favoritas es de dj, igual
@@ -1616,7 +1667,6 @@ class YTRemoteBot:
         llega honesto en un solo mensaje.
         """
         vista, termino = _radio_parsear(" ".join(context.args))
-        titular = ""
         try:
             if vista == "fav":
                 items = list(self._radio_favs)
@@ -1628,29 +1678,14 @@ class YTRemoteBot:
                 items = await radio.buscar_nombre(termino, _RADIO_BATCH)
             else:
                 # El ARRANQUE sin argumentos (_radio_parsear lo trae como
-                # "top") no pregunta nada y no asume pais: usa el idioma
-                # del usuario (Telegram lo trae) como semilla
-                # ('language=spanish', verificado contra el API) y cae a
-                # destacadas globales sin emisoras de ese idioma o con un
-                # codigo no mapeado.
-                idioma = radio.idioma_del_api(
-                    update.effective_user.language_code if update.effective_user else ""
-                )
-                vista = "idioma"
-                titular = f"en {idioma}" if idioma else ""
-                items = (
-                    await radio.buscar_idioma(idioma, _RADIO_BATCH)
-                    if idioma
-                    else []
-                )
-                if not items:
-                    vista = "top"
-                    titular = ""
-                    items = await radio.destacadas(_RADIO_BATCH)
+                # "top") es el HOME del menu: ni una consulta al API ni
+                # ninguna suposicion de idioma o pais de antemano.
+                vista = "home"
+                items = []
         except radio.RadioError as exc:
             await self._reply(update, f"⚠️ No se pudo buscar emisoras: {exc}")
             return
-        if not items:
+        if not items and vista != "home":
             if vista == "fav":
                 await self._reply(update, "Todavía no guardas emisoras favoritas.")
             elif termino:
@@ -1658,10 +1693,10 @@ class YTRemoteBot:
             else:
                 await self._reply(update, "No encontré emisoras destacadas.")
             return
-        self._radio_view = {"top": "top", "fav": "fav", "idioma": "idioma"}.get(
+        self._radio_view = {"top": "home", "fav": "fav", "home": "home"}.get(
             vista, "busqueda"
         )
-        self._radio_query = termino if self._radio_view == "busqueda" else titular
+        self._radio_query = termino
         self._radio_items = items
         self._radio_page = 0
         await self._open_radio_list(update.effective_chat.id)
@@ -1693,11 +1728,28 @@ class YTRemoteBot:
         inicio = self._radio_page * _RADIO_PAGE_SIZE
         return self._radio_items[inicio : inicio + _RADIO_PAGE_SIZE]
 
+    def _radio_tam_pagina(self) -> int:
+        """Botones por pagina segun la vista: las emisoras van 5 por pagina
+        con su texto; los directorios (paises/generos) son solo botones y
+        caben 10."""
+        return (
+            _RADIO_DIRECTORIO
+            if self._radio_view in ("paises", "generos")
+            else _RADIO_PAGE_SIZE
+        )
+
     def _radio_clamp_page(self) -> None:
         """La pagina nunca se sale del lote cargado (si se vacio la vista,
         vuelve a la primera)."""
-        if self._radio_items:
-            ultimo = (len(self._radio_items) - 1) // _RADIO_PAGE_SIZE
+        total = (
+            len(self._radio_paises)
+            if self._radio_view == "paises"
+            else len(self._radio_generos)
+            if self._radio_view == "generos"
+            else len(self._radio_items)
+        )
+        if total:
+            ultimo = (total - 1) // self._radio_tam_pagina()
             self._radio_page = max(0, min(self._radio_page, ultimo))
         else:
             self._radio_page = 0
@@ -1709,16 +1761,27 @@ class YTRemoteBot:
             encabezado = "❤️ Tus emisoras favoritas:"
         elif self._radio_view == "busqueda":
             encabezado = f"🔎 Emisoras para «{self._radio_query}»:"
-        elif self._radio_view == "idioma":
-            # La semilla del arranque: destacadas del idioma del usuario
-            # sin preguntar ni asumir pais (se actualiza sola con el uso).
-            encabezado = f"🔥 Emisoras destacadas {self._radio_query}:"
+        elif self._radio_view == "home":
+            encabezado = "📻 ¿Qué escuchamos?"
+        elif self._radio_view == "paises":
+            pais_salon = radio.pais_visible(
+                self._radio_equipo[0] or ""
+            ) if self._radio_equipo[0] else ""
+            pista = f" (el de aquí primero: {pais_salon})" if pais_salon else ""
+            encabezado = f"🌍 Países{pista}:"
+        elif self._radio_view == "generos":
+            iso = self._radio_equipo[0] or ""
+            pais_salon = radio.pais_visible(iso) if iso else ""
+            de = f" de {pais_salon}" if pais_salon else ""
+            encabezado = f"🎵 Géneros{de} (los de tu sala pesan primero):"
         else:
             encabezado = "🔥 Emisoras destacadas:"
         lineas = [encabezado]
+        if self._radio_view in ("home", "paises", "generos"):
+            return "\n".join(lineas)
         inicio = self._radio_page * _RADIO_PAGE_SIZE
         for n, e in enumerate(self._radio_pagina(), start=inicio + 1):
-            pais = f" — {e.pais}" if e.pais else ""
+            pais = f" — {radio.pais_visible(e.pais)}" if e.pais else ""
             lineas.append(f"{n}. {e.nombre}{pais}")
         if len(lineas) == 1:
             lineas.append("(sin emisoras en esta vista)")
@@ -1730,90 +1793,155 @@ class YTRemoteBot:
         return any(f.stream == emisora.stream for f in self._radio_favs)
 
     def _radio_keyboard(self) -> InlineKeyboardMarkup:
-        """Teclado del listado de /radio: cada fila es una emisora (elegir)
-        con su boton de favorita, la navegacion con el ❌ siempre presente
-        (3 slots fijos, como la lista del 📋) y al pie la fila de vistas
-        🔥 Destacadas | ❤️ Favoritas.
+        """Teclado del listado de /radio.
 
-        Los indices son GLOBALES sobre el lote cargado (rad:play:7 = la 8a
-        emisora de la vista), asi que paginar no renumeran los botones.
+        - home: los DOS listados del menu (🌍 Paises y 🎵 Generos) con el
+          pie de siempre (⭐ ❤️) para quien quiere lo directo.
+        - paises/generos: botones del DIRECTORIO (2 por fila, 10 por
+          pagina), su navegacion y una vuelta al 📻 Inicio.
+        - emisoras (top/fav/busqueda): cada fila es una emisora (elegir)
+          con su boton de favorita.
+
+        Los indices de emisora son GLOBALES sobre el lote cargado (rad:play:7
+        = la 8a emisora de la vista), asi que paginar no renumeran los
+        botones; los del directorio son la posicion en la lista COMPLETA.
         """
         self._radio_clamp_page()
         filas: list[list[InlineKeyboardButton]] = []
-        base = self._radio_page * _RADIO_PAGE_SIZE
-        for n, e in enumerate(self._radio_pagina(), start=base):
-            accion = "❤️ Quitar" if self._radio_es_fav(e) else "❤️ Guardar"
+        if self._radio_view == "home":
             filas.append(
                 [
-                    InlineKeyboardButton(f"📻 {e.nombre}", callback_data=f"rad:play:{n}"),
-                    InlineKeyboardButton(accion, callback_data=f"rad:fav:{n}"),
+                    InlineKeyboardButton("🌍 Países", callback_data="rad:paises"),
+                    InlineKeyboardButton("🎵 Géneros", callback_data="rad:generos"),
                 ]
             )
-        ultima = (len(self._radio_items) - 1) // _RADIO_PAGE_SIZE if self._radio_items else 0
+            filas.append([InlineKeyboardButton("❌", callback_data="rad:close")])
+        elif self._radio_view in ("paises", "generos"):
+            lista = self._radio_paises if self._radio_view == "paises" else self._radio_generos
+            tono = "🌍" if self._radio_view == "paises" else "🎵"
+            tam = _RADIO_DIRECTORIO
+            base = self._radio_page * tam
+            ventana = lista[base : base + tam]
+            for par in range(0, len(ventana), 2):
+                fila_b: list[InlineKeyboardButton] = []
+                for desplaz, dato in enumerate(ventana[par : par + 2]):
+                    idx = base + par + desplaz
+                    if self._radio_view == "paises":
+                        etiqueta = f"{tono} {radio.pais_visible(dato[0])} ({dato[2]})"
+                        acc = f"rad:pais:{idx}"
+                    else:
+                        etiqueta = f"{tono} {dato[0]} ({dato[1]})"
+                        acc = f"rad:gen:{idx}"
+                    fila_b.append(InlineKeyboardButton(etiqueta, callback_data=acc))
+                filas.append(fila_b)
+            ultima = (len(lista) - 1) // tam if lista else 0
+            filas.append(
+                [
+                    InlineKeyboardButton(
+                        "◀" if self._radio_page > 0 else "·",
+                        callback_data="rad:prev" if self._radio_page > 0 else "rad:noop",
+                    ),
+                    InlineKeyboardButton("❌", callback_data="rad:close"),
+                    InlineKeyboardButton(
+                        "▶" if self._radio_page < ultima else "·",
+                        callback_data="rad:next" if self._radio_page < ultima else "rad:noop",
+                    ),
+                ]
+            )
+        else:
+            base = self._radio_page * _RADIO_PAGE_SIZE
+            for n, e in enumerate(self._radio_pagina(), start=base):
+                accion = "❤️ Quitar" if self._radio_es_fav(e) else "❤️ Guardar"
+                filas.append(
+                    [
+                        InlineKeyboardButton(
+                            f"📻 {e.nombre}", callback_data=f"rad:play:{n}"
+                        ),
+                        InlineKeyboardButton(accion, callback_data=f"rad:fav:{n}"),
+                    ]
+                )
+            ultima = (len(self._radio_items) - 1) // _RADIO_PAGE_SIZE if self._radio_items else 0
+            filas.append(
+                [
+                    InlineKeyboardButton(
+                        "◀" if self._radio_page > 0 else "·",
+                        callback_data="rad:prev" if self._radio_page > 0 else "rad:noop",
+                    ),
+                    InlineKeyboardButton("❌", callback_data="rad:close"),
+                    InlineKeyboardButton(
+                        "▶" if self._radio_page < ultima else "·",
+                        callback_data="rad:next" if self._radio_page < ultima else "rad:noop",
+                    ),
+                ]
+            )
         filas.append(
             [
-                InlineKeyboardButton(
-                    "◀" if self._radio_page > 0 else "·",
-                    callback_data="rad:prev" if self._radio_page > 0 else "rad:noop",
-                ),
-                InlineKeyboardButton("❌", callback_data="rad:close"),
-                InlineKeyboardButton(
-                    "▶" if self._radio_page < ultima else "·",
-                    callback_data="rad:next" if self._radio_page < ultima else "rad:noop",
-                ),
-            ]
-        )
-        filas.append(
-            [
+                InlineKeyboardButton("📻 Inicio", callback_data="rad:home"),
                 InlineKeyboardButton("🔥 Destacadas", callback_data="rad:top"),
                 InlineKeyboardButton("❤️ Favoritas", callback_data="rad:fav"),
             ]
         )
-        # Chips de uso REAL (países y géneros más sonados de ESTA sala):
-        # nada fijo de fábrica; solo aparecen cuando ya hay datos, y cada
-        # toque vuelve con su listado sin escribir nada.
-        paises = self._state.top_paises_uso(3)
-        if paises:
-            self._radio_paises = [(str(d["clave"]), int(d["usos"])) for d in paises]
-            filas.append(
-                [
-                    InlineKeyboardButton(
-                        f"🌍 {self._pais_corto(clave)} ({usos})",
-                        callback_data=f"rad:pais:{i}",
-                    )
-                    for i, (clave, usos) in enumerate(self._radio_paises)
-                ]
-            )
-        generos = self._state.top_generos_uso(3)
-        if generos:
-            self._radio_generos = [(str(d["clave"]), int(d["usos"])) for d in generos]
-            filas.append(
-                [
-                    InlineKeyboardButton(
-                        f"🎵 {clave} ({usos})",
-                        callback_data=f"rad:gen:{i}",
-                    )
-                    for i, (clave, usos) in enumerate(self._radio_generos)
-                ]
-            )
         return InlineKeyboardMarkup(filas)
 
-    @staticmethod
-    def _pais_corto(nombre: str) -> str:
-        """El nombre CORTO de un país SOLO para las chips de uso: el API
-        nombra oficiales largos ('Bolivarian Republic Of Venezuela') que no
-        caben en un boton. La busqueda SIEMPRE usa el nombre completo."""
-        texto = str(nombre or "")
-        for saca, pon in (
-            ("Bolivarian Republic Of ", ""),
-            ("Republic Of ", ""),
-            ("The United States Of America", "EE. UU."),
-            ("The United Kingdom Of Great Britain And Northern Ireland", "Reino Unido"),
-            ("The United Republic Of ", ""),
-            ("The ", ""),
-        ):
-            texto = texto.replace(saca, pon)
-        return " ".join(texto.split()).strip()[:14] or nombre
+    async def _radio_armar_paises(self) -> None:
+        """La lista completa de paises del API ordenada por CERCANIA al
+        salon: primero el pais del equipo (si la zona horaria lo dice),
+        despues el resto por distancia desde el punto del salon; los paises
+        sin coordenadas conocidas van al final por cantidad de emisoras.
+        Una consulta al API la primera vez, cacheada por proceso."""
+        catalogo = await radio.paises()
+        filas = [
+            (str(fila.get("name") or ""), str(fila.get("iso_3166_1") or ""), int(fila.get("stationcount") or 0))
+            for fila in catalogo.values()
+            if fila.get("iso_3166_1")
+        ]
+        iso_salon, lat_salon, lon_salon = self._radio_equipo
+        con_dato: list[tuple[float, int, tuple]] = []
+        sin_dato: list[tuple] = []
+        for fila in filas:
+            coord = radio._PAIS_COORDENADAS.get(fila[1])
+            if coord is None:
+                sin_dato.append(fila)
+            elif fila[1] == iso_salon:
+                con_dato.insert(0, (0.0, -1, fila))
+            elif lat_salon is not None:
+                con_dato.append(
+                    (radio._distancia(lat_salon, lon_salon, *coord), 0, fila)
+                )
+            else:
+                sin_dato.append(fila)
+        con_dato.sort(key=lambda par: (par[0], par[1]))
+        self._radio_paises = [fila for _, _, fila in con_dato] + sorted(
+            sin_dato, key=lambda fila: -fila[2]
+        )
+
+    async def _radio_armar_generos(self) -> None:
+        """La lista de generos del menu: PRIMERO lo que la sala ya sono
+        (uso real, la base) y despues los tags con que las emisoras del
+        pais del salon se marcan de verdad en el API (suma directa del
+        listado, nada inventado). Sin pais y sin sala: lista vacia y el
+        aviso honesto lo dice."""
+        lista: list[tuple[str, int]] = []
+        ya: set[str] = set()
+        for dato in self._state.top_generos_uso(10):
+            clave = str(dato["clave"]).lower()
+            if clave not in ya:
+                lista.append((clave, int(dato["usos"])))
+                ya.add(clave)
+        iso = self._radio_equipo[0]
+        if iso:
+            try:
+                for tag, emisoras in await radio.tags_de_pais(
+                    iso, cantidad=300, tope=60
+                ):
+                    if tag not in ya:
+                        lista.append((tag, emisoras))
+                        ya.add(tag)
+            except radio.RadioError:
+                # El API no contesto: el menu de generos queda con lo de la
+                # sala (o avisa vacio) sin tumbar el home.
+                pass
+        self._radio_generos = lista
 
     async def _radio_render(self) -> None:
         """Repinta el listado abierto (texto + teclado de la vista/pagina
@@ -1851,6 +1979,10 @@ class YTRemoteBot:
     ) -> None:
         """Botones del mensaje-lista de /radio (callback `rad:*`).
 
+        - `rad:home`/`rad:paises`/`rad:generos`: el menu del salon (el
+          callback de paises/generos consulta el API la primera vez).
+        - `rad:pais:N`/`rad:gen:N` (dj): abre el API con el pais o genero N
+          del directorio.
         - `rad:top`/`rad:fav`: cambia la vista sobre el MISMO mensaje (top
           vuelve al API; favoritas lee la lista persistida).
         - `rad:prev`/`rad:next`: pagina; `rad:close` borra el mensaje.
@@ -1890,6 +2022,40 @@ class YTRemoteBot:
             await self._radio_render()
             await self._list_answer(query)
             return
+        if accion == "home":
+            self._radio_view = "home"
+            self._radio_query = ""
+            self._radio_items = []
+            self._radio_page = 0
+            await self._radio_render()
+            await self._list_answer(query)
+            return
+        if accion == "paises":
+            try:
+                await self._radio_armar_paises()
+            except radio.RadioError as exc:
+                await self._list_answer(query, str(exc), show_alert=True)
+                return
+            self._radio_view = "paises"
+            self._radio_page = 0
+            await self._radio_render()
+            await self._list_answer(query)
+            return
+        if accion == "generos":
+            await self._radio_armar_generos()
+            if not self._radio_generos:
+                await self._list_answer(
+                    query,
+                    "Sin géneros todavía: escucha algo primero o elige el país"
+                    " en 🌍 Países.",
+                    show_alert=True,
+                )
+                return
+            self._radio_view = "generos"
+            self._radio_page = 0
+            await self._radio_render()
+            await self._list_answer(query)
+            return
         if accion == "top":
             try:
                 self._radio_items = await radio.destacadas(_RADIO_BATCH)
@@ -1917,27 +2083,30 @@ class YTRemoteBot:
             except ValueError:
                 await self._list_answer(query)
                 return
-            chips = self._radio_paises if tipo == "pais" else self._radio_generos
-            if not (0 <= posicion < len(chips)):
+            lista = self._radio_paises if tipo == "pais" else self._radio_generos
+            if not (0 <= posicion < len(lista)):
                 await self._list_answer(query)
                 return
-            clave = chips[posicion][0]
+            if tipo == "pais":
+                nombre_api, iso, _ = lista[posicion]
+                clave_busqueda = iso or nombre_api
+                clave_visible = radio.pais_visible(nombre_api)
+                consulta = radio.buscar_pais
+            else:
+                clave_busqueda = clave_visible = lista[posicion][0]
+                consulta = radio.buscar_genero
             try:
-                self._radio_items = (
-                    await radio.buscar_pais(clave, _RADIO_BATCH)
-                    if tipo == "pais"
-                    else await radio.buscar_genero(clave, _RADIO_BATCH)
-                )
+                self._radio_items = await consulta(clave_busqueda, _RADIO_BATCH)
             except radio.RadioError as exc:
                 await self._list_answer(query, str(exc), show_alert=True)
                 return
             if not self._radio_items:
                 await self._list_answer(
-                    query, f"No encontré emisoras para «{clave}».", show_alert=True
+                    query, f"No encontré emisoras para «{clave_visible}».", show_alert=True
                 )
                 return
             self._radio_view = "busqueda"
-            self._radio_query = clave
+            self._radio_query = clave_visible
             self._radio_page = 0
             await self._radio_render()
             await self._list_answer(query)
@@ -2191,7 +2360,7 @@ class YTRemoteBot:
             )
             return
         await self._hist_saltar_listado(
-            update, emisoras, "país " + self._pais_corto(pais)
+            update, emisoras, "país " + radio.pais_visible(pais)
         )
 
     async def _radio_play(self, query, update, user_id, accion: str) -> None:
@@ -5278,6 +5447,12 @@ class YTRemoteBot:
                 tags = str(fila.get("tags", "") or "")
                 if not tags:
                     tags = str(await radio.tags_por_stream(item.url) or "")
+                    # BACKFILL: lo que se acabo de recuperar por stream se
+                    # ESCRIBE en la fila del historial. Si no, los tags del
+                    # rep viejo viven solo en el ancla de la sesion y el
+                    # menu de generos (que lee la base) jamas los ve.
+                    if tags:
+                        self._state.actualizar_tags(item.url, tags)
                 self._hist_ancla = {
                     "tipo": "emisora",
                     "pais": fila.get("channel", ""),
@@ -5480,6 +5655,10 @@ class YTRemoteBot:
                 await self._notify_role_change(uid, role)
             except Exception:  # noqa: BLE001 - no romper el commit
                 logger.warning("No se pudo notificar el rol nuevo al usuario %s.", uid)
+        try:
+            await self._sincronizar_menu_dj(self._app.bot)
+        except Exception:  # noqa: BLE001 - el commit del rol no se tira
+            logger.warning("No se pudo sincronizar el menú de comandos tras los roles.")
         await self._close_members_message()
         try:
             if total:

@@ -291,6 +291,21 @@ class Store:
             ),
         )
 
+    def actualizar_tags(self, video_id: str, tags: str) -> None:
+        """Escribe SOLO la columna tags de una cancion existente (o la deja
+        igual si la fila no esta). Es el backfill del rep de emisoras viejas:
+        los tags que se recupera por stream se guardan, no mueren en el ancla
+        de la sesion."""
+        self._verificar_escritura()
+        video_id = str(video_id or "")
+        tags = str(tags or "").strip()
+        if not video_id or not tags:
+            return
+        self.conn.execute(
+            "UPDATE tracks SET tags = ? WHERE video_id = ?",
+            (tags, video_id),
+        )
+
     def tracks_por_video_id(self, ids: list[str]) -> dict[str, dict]:
         """Canciones pedidas por id, en un solo viaje a la base.
 

@@ -643,6 +643,35 @@ def test_top_de_uso_ordenado_por_historial_real():
     s.cerrar()
 
 
+def test_actualizar_tags_escribe_solo_esa_columna():
+    """El backfill del rep de emisoras viejas: los tags recuperados por
+    stream se ESCRIBEN en la fila (nada mas se toca) y un video_id que no
+    esta queda callado sin crear nada."""
+    s = _store()
+    fila = {
+        "directo": True,
+        "url": "https://stream.example/vieja",
+        "video_id": "https://stream.example/vieja",
+        "title": "Radio Antigua",
+        "channel": "Venezuela",
+    }
+    s.agregar_historial(fila, cuando=1)
+    fila_vieja = s.leer_historial(10, directo=1)[0]
+    assert fila_vieja["tags"] == "", "sin tags al arranque"
+
+    s.actualizar_tags("https://stream.example/vieja", "cristiana,salsa")
+    nueva = s.leer_historial(10, directo=1)[0]
+    assert nueva["tags"] == "cristiana,salsa", nueva
+    assert nueva["title"] == "Radio Antigua", "solo se toca tags"
+    assert nueva["video_id"] == fila_vieja["video_id"]
+
+    # video_id desconocido: no crea fila ni tumba nada.
+    s.actualizar_tags("desconocido", "salsa")
+    assert len(s.leer_historial(10, directo=1)) == 1
+    s.actualizar_tags("", "")  # vacios: silencio
+    s.cerrar()
+
+
 def run():
     total = 0
     try:
