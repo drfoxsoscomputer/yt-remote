@@ -30,6 +30,7 @@ import shutil
 import time
 from asyncio import AbstractEventLoop, TimerHandle, get_event_loop
 from pathlib import Path
+from typing import Optional
 
 from constants import MAX_HISTORY
 
@@ -187,11 +188,9 @@ class StateStore:
     def marcar_historial(self, item) -> None:
         """Suma UNA cancion al historial guardado.
 
-        La base guarda UNA sola fila por cancion: si ya sonó, la reubica
-        arriba (queda la ultima reproduccion). Antes el historial vivia en
-        el JSON y se reescribia entero en cada cancion; ahora es una fila
-        incremental.
-        """
+        La base deja la posicion ESTABLE: si ya sonó, la fila no se mueve
+        (la regla del usuario); solo una cancion nueva entra al tope. La
+        base es incremental: cada cancion que suena llama aca."""
         if self._solo_lectura or self._store is None:
             return
         filas = _para_guardar([item])
@@ -203,12 +202,15 @@ class StateStore:
         except Exception as exc:  # noqa: BLE001
             logger.error("No se pudo guardar el historial: %s", exc)
 
-    def leer_historial(self, limite: int = MAX_HISTORY) -> list[dict]:
-        """El historial guardado, lo mas reciente primero (fuente del hub)."""
+    def leer_historial(
+        self, limite: int = MAX_HISTORY, directo: Optional[int] = None
+    ) -> list[dict]:
+        """El historial guardado, lo mas reciente primero (fuente del hub).
+        Con `directo` trae SOLO emisoras (1) o SOLO canciones (0)."""
         if self._store is None or self._solo_lectura:
             return []
         try:
-            return self._store.leer_historial(limite)
+            return self._store.leer_historial(limite, directo=directo)
         except Exception as exc:  # noqa: BLE001 - no tumbar el render
             logger.error("No se pudo leer el historial: %s", exc)
             return []
@@ -223,14 +225,24 @@ class StateStore:
             logger.error("No se pudo borrar del historial: %s", exc)
             return False
 
-    def vaciar_historial(self) -> None:
-        """Borra TODA la lista del historial (el boton borrar todo del hub)."""
+    def vaciar_historial(self, directo: Optional[int] = None) -> None:
+        """Borra la lista del historial; con `directo`, SOLO ese tipo."""
         if self._solo_lectura or self._store is None:
             return
         try:
-            self._store.vaciar_historial()
+            self._store.vaciar_historial(directo=directo)
         except Exception as exc:  # noqa: BLE001
             logger.error("No se pudo vaciar el historial: %s", exc)
+
+    def contar_historial(self) -> tuple[int, int]:
+        """(emisoras, canciones) guardadas, para el selector del hub."""
+        if self._store is None or self._solo_lectura:
+            return (0, 0)
+        try:
+            return self._store.contar_historial()
+        except Exception as exc:  # noqa: BLE001
+            logger.error("No se pudo contar el historial: %s", exc)
+            return (0, 0)
 
     def marcar_lista_vacia(self) -> None:
         """Vacia la cola (el usuario la limpio desde el boton 📋)."""

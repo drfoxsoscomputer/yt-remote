@@ -323,23 +323,28 @@ def test_actualizar_una_cancion_no_borra_la_cola_ni_el_historial():
 
 
 def test_historial_sin_repeticiones_se_reubica_la_ultima():
-    """UNA sola fila por cancion: si vuelve a sonar, se reubica arriba
-    (queda la ultima reproduccion). Regla de casa."""
+    """UNA sola fila por cancion, con la posicion ESTABLE: si vuelve a
+    sonar NO se mueve (la regla del usuario: la 28 sigue siendo la 28);
+    solo una cancion NUEVA entra al tope."""
     s = _store()
     s.agregar_historial({"url": "u1", "video_id": "v1", "title": "Uno"}, cuando=100)
     s.agregar_historial({"url": "u2", "video_id": "v2", "title": "Dos"}, cuando=101)
-    # u1 vuelve a sonar: NO suma fila, se mueve arriba con su titulo nuevo.
+    # u1 vuelve a sonar: NO suma fila y NO se reubica; el titulo nuevo
+    # queda en su fila (los datos se actualizan, la POSICION no).
     s.agregar_historial({"url": "u1", "video_id": "v1", "title": "Uno nuevo"}, cuando=102)
 
     leido = s.leer_historial(100)
     assert len(leido) == 2, leido
-    assert [h["url"] for h in leido] == ["u1", "u2"], leido
-    assert leido[0]["title"] == "Uno nuevo", leido[0]
+    assert [h["url"] for h in leido] == ["u2", "u1"], leido
+    assert leido[1]["title"] == "Uno nuevo", leido[1]
 
     # Y las cinco veces iguales del caso viejo quedan en UNA.
     for i in range(5):
         s.agregar_historial({"url": "u3", "video_id": "v3", "title": "Tres"}, cuando=200 + i)
     assert len(s.leer_historial(100)) == 3, s.leer_historial(100)
+    # Una NUEVA entra al tope.
+    s.agregar_historial({"url": "u4", "video_id": "v4", "title": "Cuatro"}, cuando=300)
+    assert [h["url"] for h in s.leer_historial(100)] == ["u4", "u3", "u2", "u1"]
     s.cerrar()
 
 

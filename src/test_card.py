@@ -3877,7 +3877,19 @@ async def test_list_hub_historial_view():
 
     upd = FakeUpdate("lst:historial", user_id=77, chat_id=44)
     await b._on_list_callback(upd, SimpleNamespace(args=[]))
-    assert b._list_view == "historial", "el 🕘 cambia la vista del MISMO mensaje"
+    # El 🕘 ya NO abre el historial directo: primero el SELECTOR (la regla
+    # del usuario: dos historiales separados, emisoras y canciones).
+    assert b._list_view == "hub", "el 🕘 abre el selector del historial"
+    texto = b._app.bot.edited[-1][2]
+    markup = b._app.bot.edited[-1][3]["reply_markup"]
+    assert "historial" in texto, texto
+    labels = [btn.text for fila in markup.inline_keyboard for btn in fila]
+    assert "📻 Emisoras (0)" in labels, labels
+    assert "🎵 Canciones (1)" in labels, labels
+
+    upd1 = FakeUpdate("lst:histm", user_id=77, chat_id=44)
+    await b._on_list_callback(upd1, SimpleNamespace(args=[]))
+    assert b._list_view == "historial", "el selector abre el historial de canciones"
     texto = b._app.bot.edited[-1][2]
     markup = b._app.bot.edited[-1][3]["reply_markup"]
     assert "Historial" in texto, texto
@@ -3892,18 +3904,19 @@ async def test_list_hub_historial_view():
     assert "Lista" in b._app.bot.edited[-1][2]
 
 
-async def test_list_historial_abre_directo_si_cola_vacia():
-    """Cola vacia pero con historial: el 📋 abre DIRECTO en el historial (es
-    el unico lugar donde vive); solo toast cuando no hay nada en ninguna."""
+async def test_list_historial_abre_selector_si_cola_vacia():
+    """Cola vacia pero con historial: el 📋 abre el SELECTOR del historial
+    (emisoras/canciones, el unico lugar donde vive); solo toast cuando no
+    hay nada en ninguna de las dos listas."""
     from queue_manager import QueueItem
 
     b = make_bot()
     b._state.marcar_historial(QueueItem(url="uv", title="Vieja"))
     upd = FakeUpdate("ctl:lista", user_id=77, chat_id=44)
     await b._on_control(upd, SimpleNamespace(args=[]), "lista")
-    assert b._list_view == "historial", "debe abrir directo en el historial"
-    assert b._list_message_id is not None, "se envia el mensaje del historial"
-    assert "Historial" in b._app.bot.sent[-1][1]
+    assert b._list_view == "hub", "debe abrir directo en el selector"
+    assert b._list_message_id is not None, "se envia el mensaje del selector"
+    assert "historial" in b._app.bot.sent[-1][1]
 
 
 async def test_list_historial_rep_link_del():
@@ -3929,6 +3942,11 @@ async def test_list_historial_rep_link_del():
     await b._on_control(
         FakeUpdate("ctl:lista", user_id=77, chat_id=44), SimpleNamespace(args=[]), "lista"
     )
+    # Cola vacia: el hub abre el SELECTOR, y recien el histm abre canciones.
+    assert b._list_view == "hub"
+    await b._on_list_callback(
+        FakeUpdate("lst:histm", user_id=77, chat_id=44), SimpleNamespace(args=[])
+    )
     list_id = b._list_message_id
     assert b._list_view == "historial"
 
@@ -3943,6 +3961,9 @@ async def test_list_historial_rep_link_del():
     # sigue abierta.
     await b._on_control(
         FakeUpdate("ctl:lista", user_id=77, chat_id=44), SimpleNamespace(args=[]), "lista"
+    )
+    await b._on_list_callback(
+        FakeUpdate("lst:histm", user_id=77, chat_id=44), SimpleNamespace(args=[])
     )
     enviados_antes = len(b._app.bot.sent)
     upd = FakeUpdate("lst:link:1", user_id=50, chat_id=44)
@@ -3972,6 +3993,10 @@ async def test_list_historial_permisos():
     b._state.marcar_historial(QueueItem(url="ua", title="Cancion A"))
     await b._on_control(
         FakeUpdate("ctl:lista", user_id=50, chat_id=44), SimpleNamespace(args=[]), "lista"
+    )
+    assert b._list_view == "hub"
+    await b._on_list_callback(
+        FakeUpdate("lst:histm", user_id=50, chat_id=44), SimpleNamespace(args=[])
     )
     assert b._list_view == "historial"
     upd = FakeUpdate("lst:rep:0", user_id=50, chat_id=44)
@@ -4065,6 +4090,10 @@ async def test_list_historial_borrar_todo():
     await b._on_control(
         FakeUpdate("ctl:lista", user_id=50, chat_id=44), SimpleNamespace(args=[]), "lista"
     )
+    assert b._list_view == "hub"
+    await b._on_list_callback(
+        FakeUpdate("lst:histm", user_id=50, chat_id=44), SimpleNamespace(args=[])
+    )
     assert b._list_view == "historial"
 
     # El user no puede ni armar: alerta y la base queda igual.
@@ -4082,7 +4111,7 @@ async def test_list_historial_borrar_todo():
     # El teclado muestra el alcance EXACTO (2 canciones) + cancelar.
     markup = b._app.bot.edited[-1][3]["reply_markup"]
     labels = [btn.text for fila in markup.inline_keyboard for btn in fila]
-    assert "✅ Borrar TODO el historial (2 canciones)" in labels, labels
+    assert "✅ Borrar TODAS las canciones (2)" in labels, labels
     assert "❌ Cancelar" in labels, labels
     assert "🗑 Borrar todo" not in labels, labels
 
@@ -4103,6 +4132,9 @@ async def test_list_historial_borrar_todo_cancela():
     b._state.marcar_historial(QueueItem(url="ua", title="Cancion A"))
     await b._on_control(
         FakeUpdate("ctl:lista", user_id=77, chat_id=44), SimpleNamespace(args=[]), "lista"
+    )
+    await b._on_list_callback(
+        FakeUpdate("lst:histm", user_id=77, chat_id=44), SimpleNamespace(args=[])
     )
     upd = FakeUpdate("lst:delall", user_id=77, chat_id=44)
     await b._on_list_callback(upd, SimpleNamespace(args=[]))
@@ -4131,18 +4163,361 @@ async def test_historial_pagina_de_10_y_titulo_ancho_completo():
     await b._on_control(
         FakeUpdate("ctl:lista", user_id=77, chat_id=44), SimpleNamespace(args=[]), "lista"
     )
+    await b._on_list_callback(
+        FakeUpdate("lst:histm", user_id=77, chat_id=44), SimpleNamespace(args=[])
+    )
     assert b._list_view == "historial"
     assert b._history_text(0) == "🕘 Historial (pag 1/2):", b._history_text(0)
 
-    markup = b._app.bot.sent[-1][2]["reply_markup"]
+    markup = b._app.bot.edited[-1][3]["reply_markup"]
     filas = markup.inline_keyboard
-    assert len(filas) == 13, filas  # 10 titulos + borrar todo + cola + nav
+    assert len(filas) == 14, filas  # 10 titulos + salto + borrar todo + cola + nav
     for fila in filas[:10]:
         assert len(fila) == 1, "el titulo va a ancho completo"
     assert not any(btn.text.startswith("🔄") for fila in filas for btn in fila)
     assert not any(btn.text == "🗑" for fila in filas for btn in fila)
     assert filas[0][0].text == "1. Cancion 11", filas[0]
     assert filas[9][0].text == "10. Cancion 2", filas[9]
+
+
+async def test_historial_dos_listas_emisora_y_cancion():
+    """Registros SEPARADOS: lo que suena como EMISORA (directo) va a la
+    lista 📻 del hub y lo que suena como cancion a la 🎵; el selector
+    muestra las dos cuentas y cada vista SOLO su lista."""
+    from queue_manager import QueueItem
+
+    b = make_bot()
+    b._state.marcar_historial(
+        QueueItem(
+            url="https://radio.example/stream",
+            title="La Radio",
+            channel="Venezuela",
+            directo=True,
+        )
+    )
+    b._state.marcar_historial(
+        QueueItem(url="https://youtube.com/watch?v=aa", title="Cancion Uno")
+    )
+    await b._on_control(
+        FakeUpdate("ctl:lista", user_id=77, chat_id=44), SimpleNamespace(args=[]), "lista"
+    )
+    assert b._list_view == "hub"
+    labels = [btn.text for fila in b._app.bot.sent[-1][2]["reply_markup"].inline_keyboard for btn in fila]
+    assert labels == ["📻 Emisoras (1)", "🎵 Canciones (1)", "❌"], labels
+
+    upd = FakeUpdate("lst:histr", user_id=77, chat_id=44)
+    await b._on_list_callback(upd, SimpleNamespace(args=[]))
+    assert b._list_view == "radio"
+    assert b._history_text(0) == "📻 Historial de emisoras:", b._history_text(0)
+    etiquetas = [btn.text for fila in b._app.bot.edited[-1][3]["reply_markup"].inline_keyboard for btn in fila]
+    assert any("La Radio" in t for t in etiquetas), etiquetas
+    assert not any("Cancion Uno" in t for t in etiquetas), "la cancion NO sale en la vista de emisoras"
+
+    upd = FakeUpdate("lst:histm", user_id=77, chat_id=44)
+    await b._on_list_callback(upd, SimpleNamespace(args=[]))
+    assert b._list_view == "historial"
+    etiquetas = [btn.text for fila in b._app.bot.edited[-1][3]["reply_markup"].inline_keyboard for btn in fila]
+    assert any("Cancion Uno" in t for t in etiquetas), etiquetas
+    assert not any("La Radio" in t for t in etiquetas), "la emisora NO sale en la vista de canciones"
+
+
+async def test_historial_selector_vacio_da_toasts_distintos():
+    """El salto cruzado con la lista vacia no rompe: toast de emisoras y
+    toast de canciones (el texto nombra el tipo que falta)."""
+    from queue_manager import QueueItem
+
+    b = make_bot()
+    b._state.marcar_historial(QueueItem(url="uv", title="Solo Cancion"))
+    await b._on_control(
+        FakeUpdate("ctl:lista", user_id=77, chat_id=44), SimpleNamespace(args=[]), "lista"
+    )
+    upd = FakeUpdate("lst:histr", user_id=77, chat_id=44)
+    await b._on_list_callback(upd, SimpleNamespace(args=[]))
+    assert upd.answered_kwargs.get("text") == "No hay emisoras en el historial."
+    assert b._list_view == "hub", "sin emisoras NO cambia la vista"
+
+    upd = FakeUpdate("lst:histm", user_id=77, chat_id=44)
+    await b._on_list_callback(upd, SimpleNamespace(args=[]))
+    assert b._list_view == "historial"
+    labels = [btn.text for fila in b._app.bot.edited[-1][3]["reply_markup"].inline_keyboard for btn in fila]
+    assert "📻 Emisoras (0)" in labels, labels
+
+
+async def test_borrar_todo_en_emisoras_deja_las_canciones_intactas():
+    """El 🗑 Borrar todo de la vista 📻 vacia SOLO las emisoras: la lista de
+    canciones queda completa (y viceversa)."""
+    from queue_manager import QueueItem
+
+    b = make_bot()
+    b._state.marcar_historial(
+        QueueItem(url="https://r.example/live", title="Radio A", channel="Chile", directo=True)
+    )
+    b._state.marcar_historial(QueueItem(url="uv", title="Cancion"))
+    await b._on_control(
+        FakeUpdate("ctl:lista", user_id=77, chat_id=44), SimpleNamespace(args=[]), "lista"
+    )
+    await b._on_list_callback(
+        FakeUpdate("lst:histr", user_id=77, chat_id=44), SimpleNamespace(args=[])
+    )
+    await b._on_list_callback(
+        FakeUpdate("lst:delall", user_id=77, chat_id=44), SimpleNamespace(args=[])
+    )
+    labels = [btn.text for fila in b._app.bot.edited[-1][3]["reply_markup"].inline_keyboard for btn in fila]
+    assert "✅ Borrar la emisora (1)" in labels, labels
+    await b._on_list_callback(
+        FakeUpdate("lst:delall_ok", user_id=77, chat_id=44), SimpleNamespace(args=[])
+    )
+    assert b._historial(1) == [], b._historial(1)
+    assert [h["url"] for h in b._historial(0)] == ["uv"], b._historial(0)
+
+
+async def test_rep_de_emisora_del_historial_no_pasa_por_ytdlp():
+    """El bug del usuario, clavado en prueba: repetir UNA EMISORA del
+    historial restaura `directo=True` y su stream NUNCA se resuelve con
+    yt-dlp (antes el rep de una emisora aplicaba "generic" y reventaba)."""
+    import radio as radio_mod
+    import playback as playback_mod
+    from queue_manager import QueueItem
+
+    b = make_bot()
+    b._state.marcar_historial(
+        QueueItem(
+            url="https://laradiossl.online:9226/index.html?sid=1",
+            title="DJ Shaggy Venezuela Radio",
+            channel="Venezuela",
+            directo=True,
+        )
+    )
+    resolvio: list[str] = []
+
+    def _resolver(url):
+        resolvio.append(url)
+        return None
+
+    viejo_resolver = playback_mod.resolve_stream_url
+    viejo_bajar = radio_mod.bajar_logo
+    playback_mod.resolve_stream_url = _resolver
+
+    async def _logo_nulo(url):
+        return None
+
+    radio_mod.bajar_logo = _logo_nulo
+    try:
+        await b._on_control(
+            FakeUpdate("ctl:lista", user_id=77, chat_id=44), SimpleNamespace(args=[]), "lista"
+        )
+        await b._on_list_callback(
+            FakeUpdate("lst:histr", user_id=77, chat_id=44), SimpleNamespace(args=[])
+        )
+        await b._on_list_callback(
+            FakeUpdate("lst:rep:0", user_id=77, chat_id=44), SimpleNamespace(args=[])
+        )
+        assert b.player.loaded == [
+            ("https://laradiossl.online:9226/index.html?sid=1", None)
+        ], b.player.loaded
+        assert resolvio == [], "la emisora NO debe pasar por el resolver"
+        assert b.queue.current.directo is True, b.queue.current
+        assert b._hist_ancla == {"tipo": "emisora", "pais": "Venezuela"}, b._hist_ancla
+        assert b._radio_ancla is None, "el ancla del hub reemplaza a la de /radio"
+    finally:
+        playback_mod.resolve_stream_url = viejo_resolver
+        radio_mod.bajar_logo = viejo_bajar
+
+
+async def test_historial_cancion_camina_con_next_prev_y_avisa_al_final():
+    """La fila elegida del hub queda anclada: ⏭ camina hacia la MAS NUEVA
+    (la 1 son indices menores) y ⏮ hacia la MAS VIEJA; el caminar NO toca
+    el ancla, y el ⏮ en la ultima del historial avisa sin tocar nada."""
+    import bot as bot_mod
+    from queue_manager import QueueItem
+
+    bot_mod.resolve_stream_url = lambda url: ("stream-" + url, None)
+    playback_mod.resolve_stream_url = lambda url: ("stream-" + url, None)
+    try:
+        b = make_bot()
+        b._clear_nav_stacks()
+        # Siembra AL REVEZ: la base lee lo mas nuevo primero (ub nuevo).
+        b._state.marcar_historial(QueueItem(url="ub", title="Tres", artist="Artista X"))
+        b._state.marcar_historial(QueueItem(url="uc", title="Dos", artist="Artista X"))
+        b._state.marcar_historial(QueueItem(url="ua", title="Una", artist="Artista Y"))
+        await b._on_control(
+            FakeUpdate("ctl:lista", user_id=77, chat_id=44), SimpleNamespace(args=[]), "lista"
+        )
+        await b._on_list_callback(
+            FakeUpdate("lst:histm", user_id=77, chat_id=44), SimpleNamespace(args=[])
+        )
+        # Elegi la 3 (la mas vieja): QUEDE anclada con su artista.
+        await b._on_list_callback(
+            FakeUpdate("lst:rep:2", user_id=77, chat_id=44), SimpleNamespace(args=[])
+        )
+        assert b.queue.current.url == "ub", b.queue.current
+        assert b._hist_ancla == {"tipo": "cancion", "artista": "Artista X"}, b._hist_ancla
+        assert b._radio_artist == "Artista X", b._radio_artist
+
+        async def fake_pick(current):
+            return None, False, False
+
+        b._pick_next_candidate = fake_pick
+        b.playback.pick_next_candidate = fake_pick
+
+        # ⏭ hacia la mas nueva: la 2; y de nuevo, la 1.
+        await b.cmd_next(FakeUpdate("ctl:next"), SimpleNamespace(args=[]))
+        assert b.queue.current.url == "uc", b.queue.current
+        await b.cmd_next(FakeUpdate("ctl:next"), SimpleNamespace(args=[]))
+        assert b.queue.current.url == "ua", b.queue.current
+        # ⏮ hacia la mas vieja: la 2 de vuelta.
+        await b.cmd_prev(FakeUpdate("ctl:prev"), SimpleNamespace(args=[]))
+        assert b.queue.current.url == "uc", b.queue.current
+        # ⏮ en la ultima del historial (ub): aviso y nada.
+        await b.cmd_next(FakeUpdate("ctl:next"), SimpleNamespace(args=[]))
+        await b.cmd_next(FakeUpdate("ctl:next"), SimpleNamespace(args=[]))
+        # (del tope de historial cayo al flujo estandar: sin candidato)
+        await b.cmd_next(FakeUpdate("ctl:next"), SimpleNamespace(args=[]))
+        assert b.queue.current.url == "ua", b.queue.current
+        await b.cmd_prev(FakeUpdate("ctl:prev"), SimpleNamespace(args=[]))
+        assert b.queue.current.url == "uc", b.queue.current
+    finally:
+        bot_mod.resolve_stream_url = lambda url: None
+        playback_mod.resolve_stream_url = lambda url: None
+
+
+async def test_historial_cancion_el_top_cae_a_la_busqueda_del_ancla():
+    """⏭ desde la 1 del historial (o con una cancion fresca del buscador)
+    NO camina: cae al flujo estandar de la radio, que busca con la semilla
+    del ancla (el artista de la fila elegida)."""
+    import bot as bot_mod
+    from queue_manager import QueueItem
+
+    bot_mod.resolve_stream_url = lambda url: ("stream-" + url, None)
+    playback_mod.resolve_stream_url = lambda url: ("stream-" + url, None)
+    try:
+        b = make_bot()
+        b._clear_nav_stacks()
+        b._state.marcar_historial(QueueItem(url="uz", title="Vieja", artist="Otro"))
+        b._state.marcar_historial(QueueItem(url="ua", title="Nueva", artist="El Artista"))
+        await b._on_control(
+            FakeUpdate("ctl:lista", user_id=77, chat_id=44), SimpleNamespace(args=[]), "lista"
+        )
+        await b._on_list_callback(
+            FakeUpdate("lst:histm", user_id=77, chat_id=44), SimpleNamespace(args=[])
+        )
+        await b._on_list_callback(
+            FakeUpdate("lst:rep:0", user_id=77, chat_id=44), SimpleNamespace(args=[])
+        )
+        assert b._radio_artist == "El Artista", b._radio_artist
+        visto: list = []
+
+        async def fake_pick(current):
+            visto.append(current.url)
+            return None, False, False
+
+        b._pick_next_candidate = fake_pick
+        b.playback.pick_next_candidate = fake_pick
+        await b.cmd_next(FakeUpdate("ctl:next"), SimpleNamespace(args=[]))
+        assert visto == ["ua"], ("el ⏭ en la 1 busca con el ancla", visto)
+    finally:
+        bot_mod.resolve_stream_url = lambda url: None
+        playback_mod.resolve_stream_url = lambda url: None
+
+
+async def test_historial_emisora_camina_y_en_la_1_busca_por_pais():
+    """⏭ sobre emisoras del hub camina el historial de radio hacia la MAS
+    NUEVA; al llegar a la 1, la busqueda USA el pais del ancla y el listado
+    del pais pasa a ser el ancla de rotacion (reglas de /radio)."""
+    import radio as radio_mod
+    from queue_manager import QueueItem
+    from radio import Emisora
+
+    b = make_bot()
+    viejo_bajar = radio_mod.bajar_logo
+    viejo_buscar = radio_mod.buscar_pais
+
+    async def _logo_nulo(url):
+        return None
+
+    async def _pais_falso(termino, cantidad):
+        assert termino == "Venezuela", termino
+        return [
+            Emisora(nombre="Tres", pais="Venezuela", stream="https://r.example/3"),
+            Emisora(nombre="Mango", pais="Venezuela", stream="https://mango.example/b"),
+        ]
+
+    radio_mod.bajar_logo = _logo_nulo
+    radio_mod.buscar_pais = _pais_falso
+    try:
+        b._clear_nav_stacks()
+        b._state.marcar_historial(
+            QueueItem(url="https://r.example/1", title="Uno", channel="Venezuela", directo=True)
+        )
+        b._state.marcar_historial(
+            QueueItem(url="https://r.example/2", title="Dos", channel="Venezuela", directo=True)
+        )
+        b._state.marcar_historial(
+            QueueItem(url="https://r.example/3", title="Tres", channel="Venezuela", directo=True)
+        )
+        await b._on_control(
+            FakeUpdate("ctl:lista", user_id=77, chat_id=44), SimpleNamespace(args=[]), "lista"
+        )
+        await b._on_list_callback(
+            FakeUpdate("lst:histr", user_id=77, chat_id=44), SimpleNamespace(args=[])
+        )
+        # Elegi la 3 (la mas vieja de las tres): ancla = su pais.
+        await b._on_list_callback(
+            FakeUpdate("lst:rep:2", user_id=77, chat_id=44), SimpleNamespace(args=[])
+        )
+        assert b.queue.current.directo is True, b.queue.current
+        assert b._hist_ancla == {"tipo": "emisora", "pais": "Venezuela"}, b._hist_ancla
+
+        # ⏭ hacia la mas nueva: la 2 (Dos) y luego la 1 (Tres).
+        await b.cmd_next(FakeUpdate("ctl:next"), SimpleNamespace(args=[]))
+        assert b.queue.current.url == "https://r.example/2", b.queue.current
+        await b.cmd_next(FakeUpdate("ctl:next"), SimpleNamespace(args=[]))
+        assert b.queue.current.url == "https://r.example/3", b.queue.current
+
+        # ⏭ en la 1 (la mas nueva): radio-por-pais del ancla y las reglas
+        # de /radio toman el ancla.
+        await b.cmd_next(FakeUpdate("ctl:next"), SimpleNamespace(args=[]))
+        assert b.queue.current.url == "https://mango.example/b", b.queue.current
+        assert b._radio_ancla is not None, "el listado del pais queda de ancla"
+        assert len(b._radio_ancla) == 2, b._radio_ancla
+        assert b._hist_ancla is None, "la sesion del hub termina aca"
+    finally:
+        radio_mod.bajar_logo = viejo_bajar
+        radio_mod.buscar_pais = viejo_buscar
+
+
+async def test_historial_emisora_ultima_sin_anterior_avisa():
+    """⏮ sobre la emisora MAS VIEJA del historial del hub: aviso unico y
+    la emisora sigue sonando (no hay nada anterior)."""
+    from queue_manager import QueueItem
+
+    b = make_bot()
+    b._clear_nav_stacks()
+    b._state.marcar_historial(
+        QueueItem(url="https://r.example/1", title="Uno", channel="Chile", directo=True)
+    )
+    b._state.marcar_historial(
+        QueueItem(url="https://r.example/2", title="Dos", channel="Chile", directo=True)
+    )
+    await b._on_control(
+        FakeUpdate("ctl:lista", user_id=77, chat_id=44), SimpleNamespace(args=[]), "lista"
+    )
+    await b._on_list_callback(
+        FakeUpdate("lst:histr", user_id=77, chat_id=44), SimpleNamespace(args=[])
+    )
+    # Elegi la 2 (la mas vieja de las dos).
+    await b._on_list_callback(
+        FakeUpdate("lst:rep:1", user_id=77, chat_id=44), SimpleNamespace(args=[])
+    )
+    enviados_antes = len(b._app.bot.sent)
+    upd_prev = FakeUpdate("ctl:prev", chat_id=44)
+    await b.cmd_prev(upd_prev, SimpleNamespace(args=[]))
+    aviso = upd_prev.answered
+    assert aviso and (
+        ("Esa es la ultima del historial: no hay anterior." in str(aviso))
+    ), aviso
+    assert len(b._app.bot.sent) == enviados_antes
+    assert b.queue.current.url == "https://r.example/1", b.queue.current
 
 
 async def test_playlist_expand_times_out():

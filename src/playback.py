@@ -369,11 +369,21 @@ class PlaybackEngine:
             vecina = await self._app._radio_candidata_vecina(+1)
             if vecina is None:
                 if chat_id is not None:
-                    await self._app._enviar_al_chat(
-                        chat_id,
-                        "📻 La radio de emisoras se detuvo: no hay listado "
-                        "del que rotar. Abrí /radio para elegir otra.",
-                    )
+                    if (
+                        getattr(self._app, "_hist_ancla", None)
+                        and self._app._hist_ancla.get("tipo") == "emisora"
+                    ):
+                        # Sesion del hub 🕘: las emisoras NO avanzan solas
+                        # (regla del usuario); esperan el ⏭/⏮ de la card.
+                        mensaje = (
+                            "📻 La emisora se cortó: el historial espera tu ⏭/⏮."
+                        )
+                    else:
+                        mensaje = (
+                            "📻 La radio de emisoras se detuvo: no hay listado "
+                            "del que rotar. Abrí /radio para elegir otra."
+                        )
+                    await self._app._enviar_al_chat(chat_id, mensaje)
                 return
             if self._app._radio_ancla_wrap:
                 self._app._radio_ancla_wrap = False

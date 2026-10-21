@@ -588,6 +588,14 @@ class YTRemoteBot:
         # True la UNA vez que la rotacion da la vuelta (p. ej. del final
         # de la lista vuelve a la primera): un solo aviso "empezo de nuevo".
         self._radio_ancla_wrap: bool = False
+        # Ancla del historial: la fila que el dj elegio del hub 🕘 (emisora
+        # o cancion). Define DONDE entra la busqueda cuando el caminar por
+        # el historial se acaba: ⏭ en la primera posicion (la mas nueva)
+        # busca con esa fila como semilla (emisora: por su pais; cancion:
+        # por su artista). Repetir del historial la RE-COLOCA; sonar una
+        # cancion de otro sitio (cola, /buscar, link) la mata, igual que
+        # la regla de siempre: el ancla vive entre picks.
+        self._hist_ancla: dict | None = None
         # Candado anti-colision de botones: una sola accion de control a la
         # vez. Si ya hay una en curso (p.ej. resolviendo el stream de un
         # salto), los toques extra se descartan al instante en vez de
@@ -1902,6 +1910,103 @@ class YTRemoteBot:
             item,
         )
 
+    async def _hist_sonar(self, update, fila: dict, etiqueta: str) -> None:
+        """Reproducir UNA entrada del historial del hub (el caminar de
+        ⏭/⏮). El ancla NO cambia: segun la regla del usuario, el ancla
+        sigue siendo la fila que ELIGIO del listado, no cada vecina que
+        va entrando."""
+        item = QueueItem.from_dict(fila)
+        ok = await self._play_item(update, item)
+        if ok:
+            await self._send_track_card(
+                update, etiqueta + str(fila.get("title") or ""), item
+            )
+
+    async def _hist_next_emisora(self, update) -> None:
+        """⏭ sobre una emisora CON sesion del hub 🕘: hacia la MAS NUEVA
+        (la 1 son indices menores). En la primera posicion — o con una
+        emisora fresca del buscador — se abre la radio-por-pais del ancla."""
+        filas = self._historial(1)
+        indice = self._hist_indice_actual(filas)
+        if indice is None or indice in (0, -1):
+            await self._hist_radio_pais(update)
+            return
+        await self._hist_sonar(update, filas[indice - 1], "📻 Siguiente emisora: ")
+
+    async def _hist_prev_emisora(self, update) -> None:
+        """⏮ sobre una emisora CON sesion del hub: hacia la MAS VIEJA
+        (indices mayores). En la ultima del historial: aviso y nada."""
+        filas = self._historial(1)
+        indice = self._hist_indice_actual(filas)
+        if indice is not None and (indice == -1 or indice + 1 < len(filas)):
+            await self._hist_sonar(update, filas[indice + 1], "📻 Emisora anterior: ")
+            return
+        await self._reply(
+            update, "Esa es la ultima del historial: no hay anterior."
+        )
+
+    async def _hist_radio_pais(self, update) -> None:
+        """El ⏭ llego al tope del historial de emisoras: la busqueda usa el
+        PAIS del ancla (la fila elegida del hub guarda el pais en su
+        channel), con la MISMA mecanica de /radio: lista del API, entra la
+        emisora que sigue en ese listado (con la del actual descartada) y el
+        listado PASA a ser el ancla de rotacion: de aca en mas, ⏭/⏮ y el
+        auto-avance giran con las reglas de /radio (wrap incluido)."""
+        pais = str((self._hist_ancla or {}).get("pais") or "").strip()
+        if not pais:
+            self._hist_ancla = None
+            await self._radio_sonar_vecina(update, +1)
+            return
+        try:
+            emisoras = [
+                e for e in await radio.buscar_pais(pais, _RADIO_BATCH) if e.stream
+            ]
+        except radio.RadioError as exc:
+            logger.warning("Historial-emisoras: el API no respondio: %s", exc)
+            self._hist_ancla = None
+            await self._reply(
+                update,
+                "📻 El servicio de radios no responde ahora: abri /radio mas tarde.",
+            )
+            return
+        if not emisoras:
+            await self._reply(
+                update,
+                f"No hay emisoras de {pais} en el listado de radios.",
+            )
+            return
+        actual_url = getattr(self.queue.current, "url", "")
+        posicion = next(
+            (i for i, e in enumerate(emisoras) if e.stream == actual_url), None
+        )
+        if posicion is not None and posicion + 1 < len(emisoras):
+            elegida = emisoras[posicion + 1]
+        else:
+            # La emisora que suena no sale hoy en el listado del pais (o es
+            # la ultima de el): entra la primera DISTINTA de la que suena.
+            elegida = next(
+                (e for e in emisoras if e.stream != actual_url), None
+            )
+            if elegida is None and posicion is not None:
+                elegida = emisoras[posicion]
+        if elegida is None:
+            await self._reply(
+                update, "El listado de ese pais no trae otra emisora distinta."
+            )
+            return
+        item = self._radio_item_de(elegida)
+        ok = await self._play_item(update, item)
+        if not ok:
+            return
+        # Fruto del ancla: el listado del pais gobierna desde ahora (reglas
+        # de /radio) y la sesion del hub termina aca.
+        self._radio_ancla = emisoras
+        self._radio_ancla_wrap = False
+        self._hist_ancla = None
+        await self._send_track_card(
+            update, "📻 Siguiente emisora: " + elegida.nombre, item
+        )
+
     async def _radio_play(self, query, update, user_id, accion: str) -> None:
         """Elegir emisora (dj): suena ya con el stream DIRECTO (sin yt-dlp)
         y el listado se cierra. Si no arranca, el listado queda en pie."""
@@ -1930,6 +2035,9 @@ class YTRemoteBot:
                     # Ancla de rotacion: desde ACA ⏭/⏮ y el auto-avance
                     # giran dentro de ESTE listado. El current-item no-
                     # emisora (una cancion de /buscar) aborta el ancla.
+                    # La sesion del hub 🕘 tambien termina: el pick de
+                    # /radio es un ancla nueva y manda sobre la vieja.
+                    self._hist_ancla = None
                     self._radio_ancla = [
                         e for e in self._radio_items if e.stream
                     ] or None
@@ -2318,6 +2426,10 @@ class YTRemoteBot:
         # Todo /buscar o /play nuevo reemplaza al intento anterior: la card
         # vuelve a poder reposicionarse (un listado nuevo re-setea el flag).
         self._search_list_pending = False
+        # Usar el buscador ES cambiar de sesion: el ancla del hub 🕘 muere
+        # (la regla del usuario: la radio se re-ancla con las elecciones del
+        # buscador, no con la fila vieja del historial).
+        self._hist_ancla = None
         if is_youtube_link(query):
             await self._play_link_or_playlist(update, context, query)
             return
@@ -2968,6 +3080,9 @@ class YTRemoteBot:
         # Resuelto: ahora si, la intencion es nueva de verdad.
         snap = self._snapshot_reproduccion()
         self._search_list_pending = False
+        # La eleccion del RESULTADO es un ancla nueva de la radio: la sesion
+        # del hub 🕘 muere aca (la semilla se re-ancla abajo con su artista).
+        self._hist_ancla = None
 
         # La tarjeta persistente (mini reproductor con miniatura + estado +
         # botones) ES la unica confirmacion; _play_item la crea al reproducir.
@@ -3497,11 +3612,13 @@ class YTRemoteBot:
             await self._reply(update, "No hay ninguna cancion reproduciendose.")
             return
 
-        # ⏭ en modo emisora: rota por el listado ancla. El flujo estandar
-        # era radio de YouTube por artista (el semillero ponia al PAIS como
-        # artista y metia canciones de la nada).
+        # ⏭ en modo emisora: primero la sesion del hub 🕘 (el historial de
+        # emisoras); si no hay ancla, rota por el listado ancla de /radio.
         if self.queue.current.directo:
-            await self._radio_sonar_vecina(update, +1)
+            if self._hist_ancla and self._hist_ancla.get("tipo") == "emisora":
+                await self._hist_next_emisora(update)
+            else:
+                await self._radio_sonar_vecina(update, +1)
             return
 
         # Modo playlist: cursor con wrap (logica previa).
@@ -3554,6 +3671,19 @@ class YTRemoteBot:
                 return
             await self._send_track_card(
                 update, f"⏭️ Siguiente: {candidate.title}", candidate
+            )
+            return
+
+        # Sesion del hub 🕘 (canciones): caminar el historial hacia la MAS
+        # NUEVA (la 1 son indices menores). En la primera posicion — o con
+        # una cancion fresca del buscador: esa pasa a ser la 1 — cae al
+        # flujo estandar de abajo, que ya busca con la semilla del ancla
+        # (el artista de la fila elegida).
+        filas = self._historial(0)
+        posicion = self._hist_indice_actual(filas)
+        if posicion is not None and posicion > 0:
+            await self._hist_sonar(
+                update, filas[posicion - 1], "⏭️ Siguiente: "
             )
             return
 
@@ -3742,10 +3872,15 @@ class YTRemoteBot:
             await self._reply(update, "No hay ninguna cancion reproduciendose.")
             return
 
-        # ⏮ en modo emisora: la emisora ANTERIOR del listado ancla
-        # (simetrica al ⏭; el flujo estandar de navegacion es de canciones).
+        # ⏮ en modo emisora: primero la sesion del hub 🕘 (el historial de
+        # emisoras, hacia la MAS VIEJA); si no hay ancla, la anterior del
+        # listado ancla de /radio (simetrica al ⏭; el flujo estandar de
+        # navegacion es de canciones).
         if self.queue.current.directo:
-            await self._radio_sonar_vecina(update, -1)
+            if self._hist_ancla and self._hist_ancla.get("tipo") == "emisora":
+                await self._hist_prev_emisora(update)
+            else:
+                await self._radio_sonar_vecina(update, -1)
             return
 
         # Modo playlist: cursor con wrap (logica previa).
@@ -3760,6 +3895,23 @@ class YTRemoteBot:
                 await self._send_track_card(
                     update, f"⏮️ Anterior: {item.title}", item
                 )
+            return
+
+        # Sesion del hub 🕘 (canciones): hacia la MAS VIEJA del historial
+        # (indices mayores). En la ultima del historial: aviso y nada. La
+        # cancion fresca del buscador cuenta como la 1: su "anterior" es la
+        # que era la 1 (la mas nueva de la lista de la base).
+        filas = self._historial(0)
+        posicion = self._hist_indice_actual(filas)
+        if posicion is not None:
+            if filas and (posicion == -1 or posicion + 1 < len(filas)):
+                await self._hist_sonar(
+                    update, filas[posicion + 1], "⏮️ Anterior: "
+                )
+                return
+            await self._reply(
+                update, "Esa es la ultima del historial: no hay anterior."
+            )
             return
 
         # Modo radio.
@@ -4073,69 +4225,169 @@ class YTRemoteBot:
         rows.append([prev, close, next_])
         return InlineKeyboardMarkup(rows)
 
-    def _historial(self) -> list[dict]:
-        """El historial GUARDADO (la base), lo mas reciente primero.
+    def _historial(self, directo: int | None = None) -> list[dict]:
+        """El historial GUARDADO (la base), lo mas reciente primero; con
+        `directo` SOLO emisoras (1) o SOLO canciones (0) — las dos listas
+        del hub 🕘 comparten tabla y se separan por ese flag.
 
         La base es la fuente del hub 🕘 — no el deque de navegacion de la
         cola, que existe para el /prev y el anti-repetir de la radio.
         """
-        return self._state.leer_historial()
+        return self._state.leer_historial(directo=directo)
+
+    def _hist_directo(self) -> int | None:
+        """El flag `directo` de la vista ACTIVA del hub: 1 (emisoras) o
+        0 (canciones); None en la cola o en el selector."""
+        if self._list_view == "radio":
+            return 1
+        if self._list_view == "historial":
+            return 0
+        return None
+
+    def _hist_indice_actual(self, items: list[dict]) -> int:
+        """La posicion de lo que SUENA dentro del historial de su tipo.
+
+        Solo aplica en una sesion del hub (con ancla). Devuelve:
+        - el indice (0 = la mas nueva) si esta en la lista;
+        - -1 si lo que suena ES del tipo pero NO esta en el historial
+          (una cancion/emisora fresca del buscador: la regla dice que esa
+          pasa a ser la 1);
+        - None si no hay sesion de hub activa (sin ancla) o si lo que
+          suena es del tipo equivocado.
+        """
+        ancla = self._hist_ancla
+        if not ancla:
+            return None
+        actual = self.queue.current
+        if actual is None:
+            return None
+        if ancla["tipo"] == "emisora" and not actual.directo:
+            return None
+        if ancla["tipo"] == "cancion" and actual.directo:
+            return None
+        for i, it in enumerate(items):
+            if (it.get("url") or "") == actual.url:
+                return i
+        return -1
 
     def _history_text(self, page: int = 0) -> str | None:
-        """Encabezado del historial del hub; None si no hay nada registrado."""
-        items = self._historial()
+        """Encabezado del historial del hub, SEGUN la vista activa (emisoras
+        o canciones, dos listas separadas por el selector); None si la vista
+        no tiene nada registrado."""
+        es_radio = self._list_view == "radio"
+        items = self._historial(1 if es_radio else 0)
         if not items:
             return None
         pages = max(1, (len(items) + _HISTORY_PAGE_SIZE - 1) // _HISTORY_PAGE_SIZE)
         if pages <= 1:
-            return "🕘 Historial:"
+            return (
+                "📻 Historial de emisoras:"
+                if es_radio
+                else "🕘 Historial:"
+            )
         page = max(0, min(page, pages - 1))
-        return f"🕘 Historial (pag {page + 1}/{pages}):"
+        titulo = "📻 Historial de emisoras" if es_radio else "🕘 Historial"
+        return f"{titulo} (pag {page + 1}/{pages}):"
+
+    def _hub_text(self) -> str | None:
+        """Encabezado del selector del historial: None si NO hay nada
+        guardado de ningun tipo."""
+        radios, canciones = self._state.contar_historial()
+        if radios == 0 and canciones == 0:
+            return None
+        return "🕘 ¿Qué historial abro?"
+
+    def _hub_keyboard(self) -> InlineKeyboardMarkup:
+        """Selector del hub: dos entradas, el historial de EMISORAS (lo que
+        sonó como emisora) y el de CANCIONES (lo que sonó de YouTube), cada
+        una con su contador. El ❌ cierra el mensaje como siempre."""
+        radios, canciones = self._state.contar_historial()
+        return InlineKeyboardMarkup(
+            [
+                [
+                    InlineKeyboardButton(
+                        f"📻 Emisoras ({radios})", callback_data="lst:histr"
+                    )
+                ],
+                [
+                    InlineKeyboardButton(
+                        f"🎵 Canciones ({canciones})", callback_data="lst:histm"
+                    )
+                ],
+                [InlineKeyboardButton("❌", callback_data="lst:close")],
+            ]
+        )
 
     def _history_keyboard(self) -> InlineKeyboardMarkup:
-        """Teclado del historial: una fila por cancion con UN SOLO boton de
-        ancho completo (numero + titulo COMPLETO; tocarlo la repite con el
-        callback lst:rep) — Telegram reparte el ancho de cada fila en partes
+        """Teclado del historial de la VISTA ACTIVA (emisoras o canciones:
+        dos listas separadas; el indice de cada boton apunta a la lista de
+        su vista). Una fila por entrada con UN SOLO boton de ancho completo
+        (numero + titulo COMPLETO; tocarlo la repite con el callback
+        lst:rep) — Telegram reparte el ancho de cada fila en partes
         iguales, asi que sin boton de borrar al lado el titulo se lee entero.
-        Al pie [🗑 Borrar todo] (dj, con confirmacion en dos toques), [🔙
+        Al pie, el salto cruzado al OTRO historial, [🗑 Borrar todo] (dj,
+        con confirmacion en dos toques, SOLO del tipo de esta vista), [🔙
         Cola] y la navegacion habitual. Los callbacks lst:del y lst:link
         siguen atendidos (sin boton) para que un teclado viejo no quede muerto.
         """
-        items = self._historial()
+        items = self._historial(self._hist_directo())
         pages = max(1, (len(items) + _HISTORY_PAGE_SIZE - 1) // _HISTORY_PAGE_SIZE)
         page = max(0, min(self._history_page, pages - 1))
         start = page * _HISTORY_PAGE_SIZE
+
+        radios, canciones = self._state.contar_historial()
+        salto = (
+            InlineKeyboardButton(
+                f"🎵 Canciones ({canciones})", callback_data="lst:histm"
+            )
+            if self._list_view == "radio"
+            else InlineKeyboardButton(
+                f"📻 Emisoras ({radios})", callback_data="lst:histr"
+            )
+        )
 
         rows: list[list[InlineKeyboardButton]] = []
         for idx, it in enumerate(
             items[start : start + _HISTORY_PAGE_SIZE], start=start
         ):
-            rows.append(
-                [
-                    InlineKeyboardButton(
-                        f"{idx + 1}. {str(it.get('title') or '').strip()}",
-                        callback_data=f"lst:rep:{idx}",
-                    )
-                ]
-            )
+            filas = [
+                InlineKeyboardButton(
+                    f"{idx + 1}. {str(it.get('title') or '').strip()}",
+                    callback_data=f"lst:rep:{idx}",
+                )
+            ]
+            rows.append(filas)
         if not rows:
+            vacio = (
+                "No hay emisoras en el historial."
+                if self._list_view == "radio"
+                else "El historial esta vacio."
+            )
             rows.append(
-                [
-                    InlineKeyboardButton(
-                        "El historial esta vacio.", callback_data="lst:noop"
-                    )
-                ]
+                [InlineKeyboardButton(vacio, callback_data="lst:noop")]
             )
         else:
             if self._historial_borrar_armado:
                 # Confirmacion en dos toques: el alcance EXACTO esta en el
-                # boton, asi que el dj ve cuantas canciones van a la basura.
+                # boton, asi que el dj ve cuantas ENTRADAS DE ESTA VISTA van
+                # a la basura (el otro historial queda intacto).
                 n = len(items)
-                sufijo = "canciones" if n != 1 else "cancion"
+                if self._list_view == "radio":
+                    texto_borrar = (
+                        f"✅ Borrar TODAS las emisoras ({n})"
+                        if n != 1
+                        else "✅ Borrar la emisora (1)"
+                    )
+                else:
+                    texto_borrar = (
+                        f"✅ Borrar TODAS las canciones ({n})"
+                        if n != 1
+                        else "✅ Borrar la cancion (1)"
+                    )
                 rows.append(
                     [
                         InlineKeyboardButton(
-                            f"✅ Borrar TODO el historial ({n} {sufijo})",
+                            texto_borrar,
                             callback_data="lst:delall_ok",
                         )
                     ]
@@ -4155,6 +4407,7 @@ class YTRemoteBot:
                         )
                     ]
                 )
+        rows.append([salto])
         rows.append([InlineKeyboardButton("🔙 Cola", callback_data="lst:cola")])
 
         prev = (
@@ -4391,10 +4644,11 @@ class YTRemoteBot:
         """Boton 📋 de la card: abre el mensaje-lista como MENSAJE aparte.
 
         Es un hub de contexto: por defecto muestra la COLA (pagina actual) con
-        un boton 🕘 Historial que convierte el MISMO mensaje en el historial;
-        si la cola esta vacia pero hay historial, abre DIRECTO en el
-        historial (es el unico lugar donde vive). Solo responde el toast
-        cuando no hay nada que mostrar en ninguna de las dos vistas.
+        un boton 🕘 Historial que convierte el MISMO mensaje en el SELECTOR
+        del historial (dos listas separadas: emisoras y canciones); si la
+        cola esta vacia pero hay historial guardado, abre DIRECTO ese
+        selector (es el unico lugar donde vive). Solo responde el toast
+        cuando no hay nada que mostrar en ninguna de las tres vistas.
 
         La card nunca se pisa: se envia un mensaje nuevo en el chat con la
         pagina ACTUAL (texto + botones paginados al unisono; el render clampa
@@ -4406,9 +4660,11 @@ class YTRemoteBot:
         self._history_page = 0
         self._historial_borrar_armado = False
         text = self._queue_list_text()
-        if text is None and self._historial():
-            text = self._history_text()
-            self._list_view = "historial"
+        if text is None:
+            radios, canciones = self._state.contar_historial()
+            if radios or canciones:
+                text = self._hub_text()
+                self._list_view = "hub"
         if text is None:
             try:
                 await query.answer("La lista esta vacia.")
@@ -4419,7 +4675,9 @@ class YTRemoteBot:
         self._list_can_select = user_id is not None and self.roles.has_role(user_id, "dj")
         keyboard = (
             self._history_keyboard()
-            if self._list_view == "historial"
+            if self._list_view in ("historial", "radio")
+            else self._hub_keyboard()
+            if self._list_view == "hub"
             else self._list_keyboard()
         )
         try:
@@ -4439,7 +4697,10 @@ class YTRemoteBot:
         Segun la vista (_list_view) pagina la cola o el historial."""
         if self._list_chat_id is None or self._list_message_id is None:
             return
-        if self._list_view == "historial":
+        if self._list_view == "hub":
+            text = self._hub_text()
+            keyboard = self._hub_keyboard()
+        elif self._list_view in ("historial", "radio"):
             text = self._history_text(self._history_page)
             keyboard = self._history_keyboard()
         else:
@@ -4498,10 +4759,31 @@ class YTRemoteBot:
             return
 
         if action == "historial":
-            if not self._historial():
+            radios, canciones = self._state.contar_historial()
+            if not (radios or canciones):
                 await self._list_answer(query, "El historial esta vacio.")
                 return
-            self._list_view = "historial"
+            # El selector DELANTE de las listas: el dj elige emisoras o
+            # canciones y recien ahi se abre su historial.
+            self._list_view = "hub"
+            self._history_page = 0
+            self._historial_borrar_armado = False
+            await self._edit_list_message()
+            await self._list_answer(query)
+            return
+
+        if action in ("histr", "histm"):
+            radios, canciones = self._state.contar_historial()
+            cuentos = radios if action == "histr" else canciones
+            if not cuentos:
+                await self._list_answer(
+                    query,
+                    "No hay emisoras en el historial."
+                    if action == "histr"
+                    else "El historial esta vacio.",
+                )
+                return
+            self._list_view = "radio" if action == "histr" else "historial"
             self._history_page = 0
             self._historial_borrar_armado = False
             await self._edit_list_message()
@@ -4586,10 +4868,11 @@ class YTRemoteBot:
         """Acciones del historial del hub: rep:N (dj, repite), link:N
         (cualquiera, manda el enlace al chat) y del:N (dj, borra la entrada).
 
-        El historial se RELEE DE LA BASE en cada accion: los indices del
-        teclado son posiciones vivas, y si el historial cambio entre el
+        El historial de la VISTA ACTIVA se RELEE DE LA BASE en cada accion
+        (emisoras o canciones: `self._hist_directo()`) — los indices del
+        teclado son posiciones vivas de ESA lista, y si cambio entre el
         render y el toque se responde "fuera de rango" en vez de tocar la
-        cancion equivocada.
+        entrada equivocada.
         """
         kind, _, raw = action.partition(":")
         try:
@@ -4597,7 +4880,7 @@ class YTRemoteBot:
         except ValueError:
             await self._list_answer(query)
             return
-        historial = self._historial()
+        historial = self._historial(self._hist_directo())
         if idx < 0 or idx >= len(historial):
             await self._list_answer(query, "Numero fuera de rango.")
             return
@@ -4635,18 +4918,40 @@ class YTRemoteBot:
             await self._list_answer(query, "Borrado del historial ✓")
             return
 
-        # rep: repetir la cancion del historial con las MISMAS garantias que
-        # elegir de la cola: resolver el stream primero y, si falla, no se
-        # toca lista, historial ni tarjeta.
+        # rep: repetir la entrada del historial de la vista activa con las
+        # MISMAS garantias que elegir de la cola: resolver el stream primero
+        # y, si falla, no se toca lista, historial ni tarjeta (ni ancla).
         item = QueueItem.from_dict(fila)
         async with self._control_lock:
             self._from_card = True
             try:
                 await self._list_answer(query)
                 await self._close_list_message()
-                await self._play_item(update, item, preserve_current=True)
+                # Sin preserve_current: un rep del hub es una sesion NUEVA
+                # (el item debe quedar posicionado como current, como al
+                # elegir de la cola).
+                ok = await self._play_item(update, item)
             finally:
                 self._from_card = False
+        # El ancla SIEMPRE despues del resultado: solo una entrada que SE
+        # PUSO a sonar define la sesion del hub (la 8 o la 28 del usuario).
+        # Emisora: espera el pais (para la busqueda del ⏭ en la 1).
+        # Cancion: la semilla del radio es su artista (asi el auto-avance
+        # y la busqueda del ⏭ salen del MISMO ancla).
+        if ok:
+            if item.directo:
+                self._radio_ancla = None
+                self._hist_ancla = {
+                    "tipo": "emisora",
+                    "pais": fila.get("channel", ""),
+                }
+            else:
+                self._hist_ancla = {
+                    "tipo": "cancion",
+                    "artista": fila.get("artist") or fila.get("channel") or "",
+                }
+                if self._hist_ancla["artista"]:
+                    self._radio_artist = self._hist_ancla["artista"]
 
     async def _historial_borrar_confirmar(self, query, user_id: int | None) -> None:
         """Primer toque de 🗑 Borrar todo (solo dj): NO borra nada. Arma la
@@ -4657,6 +4962,11 @@ class YTRemoteBot:
             await self._list_answer(
                 query, "Solo el admin o un dj pueden hacer eso.", show_alert=True
             )
+            return
+        if self._hist_directo() is None:
+            # Un teclado viejo mandando delall desde el selector: ahi no hay
+            # historial abierto que borrar.
+            await self._list_answer(query)
             return
         self._historial_borrar_armado = True
         await self._edit_list_message()
@@ -4675,7 +4985,10 @@ class YTRemoteBot:
             )
             return
         self._historial_borrar_armado = False
-        self._state.vaciar_historial()
+        # SOLO el tipo de la vista activa: borrar en emisoras vacia
+        # emisoras y las canciones quedan (y viceversa); en el selector no
+        # hay boton de borrar, asi que nunca llega None.
+        self._state.vaciar_historial(self._hist_directo())
         if self._queue_list_text() is not None:
             self._list_view = "cola"
             self._list_page = 0

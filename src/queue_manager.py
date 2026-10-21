@@ -52,7 +52,7 @@ class QueueItem:
             thumbnail=d.get("thumbnail", ""),
             channel=d.get("channel", ""),
             artist=d.get("artist", ""),
-            directo=d.get("directo", False),
+            directo=bool(d.get("directo", False)),
         )
 
 

@@ -272,8 +272,9 @@ def test_save_no_pisa_el_historial():
     print("  OK  test_save_no_pisa_el_historial")
 
 
-def test_marcar_reubica_sin_repeticiones():
-    """Una sola fila por cancion: vuelve a sonar y queda la ULTIMA, arriba."""
+def test_marcar_posicion_estable_sin_repeticiones():
+    """Una sola fila por cancion, posicion ESTABLE: vuelve a sonar y NO
+    se reubica; solo lo nuevo entra al tope (la regla del usuario)."""
     s = make_store()
     s.load()
     s.marcar_historial({"url": "ua", "title": "A"})
@@ -281,9 +282,9 @@ def test_marcar_reubica_sin_repeticiones():
     s.marcar_historial({"url": "ua", "title": "A de nuevo"})
 
     leido = make_store_en(s.path).load()
-    assert [t["url"] for t in leido["history"]] == ["ua", "ub"], leido["history"]
-    assert leido["history"][0]["title"] == "A de nuevo", leido["history"][0]
-    print("  OK  test_marcar_reubica_sin_repeticiones")
+    assert [t["url"] for t in leido["history"]] == ["ub", "ua"], leido["history"]
+    assert leido["history"][1]["title"] == "A de nuevo", leido["history"][1]
+    print("  OK  test_marcar_posicion_estable_sin_repeticiones")
 
 
 def test_borrar_y_vaciar_desde_la_fachada():

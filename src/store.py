@@ -50,7 +50,7 @@ from constants import MAX_HISTORY
 
 logger = logging.getLogger("bot")
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
 
 def data_dir() -> Path:
@@ -114,6 +114,20 @@ _MIGRACIONES: dict[int, tuple[str, list[str]]] = {
                 valor TEXT NOT NULL
             )
             """,
+        ],
+    ),
+    2: (
+        "columna directo en tracks (el historial separa emisoras de canciones)",
+        [
+            "ALTER TABLE tracks ADD COLUMN directo INTEGER NOT NULL DEFAULT 0",
+            # Filas viejas (cuando NO existia la columna): el video_id de una
+            # cancion SIEMPRE es una URL de YouTube; el de una emisora es el
+            # stream del API (icy/https ajeno). Heuristica de bandera para
+            # que el historial ya guardado se parta bien en la primera
+            # apertura.
+            "UPDATE tracks SET directo = 1 "
+            "WHERE video_id NOT LIKE '%youtu.be%' "
+            "AND video_id NOT LIKE '%youtube.com%'",
         ],
     ),
 }
@@ -237,8 +251,8 @@ class Store:
             """
             INSERT INTO tracks
                 (video_id, url, title, duration, duration_seconds,
-                 thumbnail, channel, artist)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                 thumbnail, channel, artist, directo)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(video_id) DO UPDATE SET
                 url              = excluded.url,
                 title            = excluded.title,
@@ -246,7 +260,8 @@ class Store:
                 duration_seconds = excluded.duration_seconds,
                 thumbnail        = excluded.thumbnail,
                 channel          = excluded.channel,
-                artist           = excluded.artist
+                artist           = excluded.artist,
+                directo          = excluded.directo
             """,
             (
                 video_id,
@@ -257,6 +272,7 @@ class Store:
                 track.get("thumbnail", ""),
                 track.get("channel", ""),
                 track.get("artist", ""),
+                1 if track.get("directo") else 0,
             ),
         )
 
@@ -315,28 +331,62 @@ class Store:
         if not video_id:
             return
         self.guardar_track(track)
-        # Sin repetidas: UNA sola fila por cancion. Volver a sonar la
-        # REUBICA arriba (id nuevo = lo mas reciente); queda la ultima.
-        self.conn.execute("DELETE FROM history WHERE video_id = ?", (video_id,))
-        self.conn.execute(
-            "INSERT INTO history (played_at, video_id) VALUES (?, ?)",
-            (int(cuando if cuando is not None else time.time()), video_id),
-        )
+        # Posicion ESTABLE: repetir una cancion que ya esta NO la mueve (la
+        # regla del usuario: la 28 sigue siendo la 28). Solo una cancion
+        # NUEVA entra al tope; `id DESC` del lector hace el resto.
+        ya_esta = self.conn.execute(
+            "SELECT 1 FROM history WHERE video_id = ?", (video_id,)
+        ).fetchone()
+        if ya_esta is None:
+            self.conn.execute(
+                "INSERT INTO history (played_at, video_id) VALUES (?, ?)",
+                (int(cuando if cuando is not None else time.time()), video_id),
+            )
         self.conn.commit()
 
-    def leer_historial(self, limite: int = 100) -> list[dict]:
+    def leer_historial(
+        self, limite: int = 100, directo: Optional[int] = None
+    ) -> list[dict]:
+        """El historial (lo mas reciente primero), filtrado por tipo si el
+        llamador lo pide: `directo=1` trae SOLO emisoras y `directo=0` Solo
+        canciones. El filtro va en el SQL: un LIMIT aplicado despues de
+        filtrar en Python cortaria con el tamanio equivocado."""
+        if directo is None:
+            filas = self.conn.execute(
+                "SELECT video_id FROM history ORDER BY id DESC LIMIT ?", (limite,)
+            ).fetchall()
+            if not filas:
+                return []
+            encontrados = self.tracks_por_video_id([f["video_id"] for f in filas])
+            salida: list[dict] = []
+            for fila in filas:
+                t = encontrados.get(fila["video_id"])
+                if t:
+                    salida.append(dict(t))
+            return salida
         filas = self.conn.execute(
-            "SELECT video_id FROM history ORDER BY id DESC LIMIT ?", (limite,)
+            """
+            SELECT t.* FROM history h
+            JOIN tracks t ON t.video_id = h.video_id
+            WHERE t.directo = ?
+            ORDER BY h.id DESC LIMIT ?
+            """,
+            (directo, limite),
         ).fetchall()
-        if not filas:
-            return []
-        encontrados = self.tracks_por_video_id([f["video_id"] for f in filas])
-        salida: list[dict] = []
-        for fila in filas:
-            t = encontrados.get(fila["video_id"])
-            if t:
-                salida.append(dict(t))
-        return salida
+        return [dict(f) for f in filas]
+
+    def contar_historial(self) -> tuple[int, int]:
+        """(emisoras, canciones) del historial, para el selector del hub."""
+        fila = self.conn.execute(
+            """
+            SELECT
+                (SELECT COUNT(*) FROM history h
+                  JOIN tracks t ON t.video_id = h.video_id WHERE t.directo = 1),
+                (SELECT COUNT(*) FROM history h
+                  JOIN tracks t ON t.video_id = h.video_id WHERE t.directo = 0)
+            """
+        ).fetchone()
+        return int(fila[0]), int(fila[1])
 
     def borrar_historial(self, video_id: str) -> bool:
         """Quita TODAS las filas de UNA cancion. True si habia algo."""
@@ -345,10 +395,23 @@ class Store:
         self.conn.commit()
         return cur.rowcount > 0
 
-    def vaciar_historial(self) -> None:
-        """Borra la lista del historial entera."""
+    def vaciar_historial(self, directo: Optional[int] = None) -> None:
+        """Borra la lista del historial. Con `directo` borra SOLO ese tipo
+        (la regla del hub separado: borrar en la vista de emisoras vacia
+        emisoras; las canciones quedan intactas, y viceversa)."""
         self._verificar_escritura()
-        self.conn.execute("DELETE FROM history")
+        if directo is None:
+            self.conn.execute("DELETE FROM history")
+        elif directo:
+            self.conn.execute(
+                """DELETE FROM history WHERE video_id IN (
+                    SELECT video_id FROM tracks WHERE directo = 1)"""
+            )
+        else:
+            self.conn.execute(
+                """DELETE FROM history WHERE video_id IN (
+                    SELECT video_id FROM tracks WHERE directo = 0)"""
+            )
         self.conn.commit()
 
     def depurar_historial(self) -> int:
