@@ -39,6 +39,22 @@ _roles_mod.ROLES_PATH = Path(_ROLES_TEST_DIR) / "roles.json"
 # Se redirecta la base al mismo temp.
 _roles_mod.DB_PATH = Path(_ROLES_TEST_DIR) / "roles.db"
 
+# Aislar la RED del API de radios PARA TODO EL PROCESO: la recuperacion de
+# tags de filas viejas (`tags_por_stream`) llama al API real por stream, y
+# el suite usa URLs falsas (r.example): sin stub cada rep de emisora
+# esperaria el timeout. Default apagado (None = sin tags); los tests que
+# ejercitan la recuperacion pisan el atributo temporalmente.
+import radio as _radio_mod
+
+_tags_por_stream_real = _radio_mod.tags_por_stream
+
+
+async def _tags_por_stream_sin_red(url):
+    return None
+
+
+_radio_mod.tags_por_stream = _tags_por_stream_sin_red
+
 
 @contextmanager
 def isolated_state_path():
@@ -197,7 +213,7 @@ class FakeApp:
 class FakeUpdate:
     """Callback query mínimo para disparar _on_control."""
 
-    def __init__(self, data, message_id=7, chat_id=44, user_id=77):
+    def __init__(self, data, message_id=7, chat_id=44, user_id=77, language_code=""):
         self.data = data
         self.answered = None
         self.answered_kwargs = {}
@@ -210,7 +226,7 @@ class FakeUpdate:
 
             @property
             def from_user(self):
-                return SimpleNamespace(id=self._uid)
+                return SimpleNamespace(id=self._uid, language_code=language_code)
 
             async def answer(self, *args, **kwargs):
                 self.parent.answered = args
@@ -225,7 +241,7 @@ class FakeUpdate:
 
         self.callback_query = _Query(self, user_id)
         self.chat = SimpleNamespace(id=chat_id)
-        self.effective_user = SimpleNamespace(id=user_id)
+        self.effective_user = SimpleNamespace(id=user_id, language_code=language_code)
 
     @property
     def effective_chat(self):
@@ -664,14 +680,14 @@ async def test_card_text_fallback_without_thumbnail():
 class FakeMessageUpdate:
     """Mensaje de texto mínimo para cmd_play (/buscar)."""
 
-    def __init__(self, text, user_id=77, chat_id=44):
+    def __init__(self, text, user_id=77, chat_id=44, language_code=""):
         self.sent = []
         self.callback_query = None
         self.message = SimpleNamespace(
             text=text, message_id=200, reply_text=self._reply_text
         )
         self.chat = SimpleNamespace(id=chat_id)
-        self.effective_user = SimpleNamespace(id=user_id)
+        self.effective_user = SimpleNamespace(id=user_id, language_code=language_code)
 
     async def _reply_text(self, text, **kwargs):
         self.sent.append((text, kwargs))
@@ -4287,6 +4303,7 @@ async def test_rep_de_emisora_del_historial_no_pasa_por_ytdlp():
         )
     )
     resolvio: list[str] = []
+    pedidos_tags: list[str] = []
 
     def _resolver(url):
         resolvio.append(url)
@@ -4294,12 +4311,19 @@ async def test_rep_de_emisora_del_historial_no_pasa_por_ytdlp():
 
     viejo_resolver = playback_mod.resolve_stream_url
     viejo_bajar = radio_mod.bajar_logo
+    viejo_tags_stream = radio_mod.tags_por_stream
     playback_mod.resolve_stream_url = _resolver
 
     async def _logo_nulo(url):
         return None
 
+    async def _tags_viejos(url):
+        """Fila vieja (sin columna tags): el API los recupera por stream."""
+        pedidos_tags.append(url)
+        return "salsa,merengue"
+
     radio_mod.bajar_logo = _logo_nulo
+    radio_mod.tags_por_stream = _tags_viejos
     try:
         await b._on_control(
             FakeUpdate("ctl:lista", user_id=77, chat_id=44), SimpleNamespace(args=[]), "lista"
@@ -4315,11 +4339,19 @@ async def test_rep_de_emisora_del_historial_no_pasa_por_ytdlp():
         ], b.player.loaded
         assert resolvio == [], "la emisora NO debe pasar por el resolver"
         assert b.queue.current.directo is True, b.queue.current
-        assert b._hist_ancla == {"tipo": "emisora", "pais": "Venezuela"}, b._hist_ancla
+        assert b._hist_ancla == {
+            "tipo": "emisora",
+            "pais": "Venezuela",
+            "tags": "salsa,merengue",
+        }, b._hist_ancla
+        assert pedidos_tags == [
+            "https://laradiossl.online:9226/index.html?sid=1"
+        ], pedidos_tags
         assert b._radio_ancla is None, "el ancla del hub reemplaza a la de /radio"
     finally:
         playback_mod.resolve_stream_url = viejo_resolver
         radio_mod.bajar_logo = viejo_bajar
+        radio_mod.tags_por_stream = viejo_tags_stream
 
 
 async def test_historial_cancion_camina_con_next_prev_y_avisa_al_final():
@@ -4464,7 +4496,11 @@ async def test_historial_emisora_camina_y_en_la_1_busca_por_pais():
             FakeUpdate("lst:rep:2", user_id=77, chat_id=44), SimpleNamespace(args=[])
         )
         assert b.queue.current.directo is True, b.queue.current
-        assert b._hist_ancla == {"tipo": "emisora", "pais": "Venezuela"}, b._hist_ancla
+        assert b._hist_ancla == {
+            "tipo": "emisora",
+            "pais": "Venezuela",
+            "tags": "",
+        }, b._hist_ancla
 
         # ⏭ hacia la mas nueva: la 2 (Dos) y luego la 1 (Tres).
         await b.cmd_next(FakeUpdate("ctl:next"), SimpleNamespace(args=[]))
@@ -5756,6 +5792,314 @@ async def test_con_listado_radio_abierto_la_card_no_se_reposiciona():
     assert ran == [1]
     assert b._app.bot.deleted == [], b._app.bot.deleted
     assert b._app.bot.sent == [], b._app.bot.sent
+
+
+async def test_paginacion_de_emisoras_del_hub_mueve_historial_no_cola():
+    """Bug del relevo 10/2026: la vista de EMISORAS del hub (_list_view
+    "radio") movia la pagina de la COLA y el historial quedaba clavado
+    (y la cola se contaminaba con un salto que nadie pedia)."""
+    from queue_manager import QueueItem
+
+    b = make_bot()
+    b.queue.set_playlist(
+        [QueueItem(url=f"u{i}", title=f"Tema {i}") for i in range(21)]
+    )
+    b._list_page = 2  # pagina de la cola que ya traia; NO debe moverse
+    b._state.marcar_historial(
+        QueueItem(url="https://r.example/1", title="Uno", channel="Venezuela", directo=True)
+    )
+    b._state.marcar_historial(
+        QueueItem(url="https://r.example/2", title="Dos", channel="Venezuela", directo=True)
+    )
+    b._state.marcar_historial(
+        QueueItem(url="https://r.example/3", title="Tres", channel="Venezuela", directo=True)
+    )
+    b._state.marcar_historial(
+        QueueItem(url="https://r.example/4", title="Cuatro", channel="Venezuela", directo=True)
+    )
+    b._state.marcar_historial(
+        QueueItem(url="https://r.example/5", title="Cinco", channel="Venezuela", directo=True)
+    )
+    b._state.marcar_historial(
+        QueueItem(url="https://r.example/6", title="Seis", channel="Venezuela", directo=True)
+    )
+    await b._on_control(
+        FakeUpdate("ctl:lista", user_id=77, chat_id=44), SimpleNamespace(args=[]), "lista"
+    )
+    await b._on_list_callback(
+        FakeUpdate("lst:histr", user_id=77, chat_id=44), SimpleNamespace(args=[])
+    )
+    assert b._list_view == "radio", b._list_view
+    await b._on_list_callback(
+        FakeUpdate("lst:next", user_id=77, chat_id=44), SimpleNamespace(args=[])
+    )
+    assert b._history_page == 1, b._history_page
+    assert b._list_page == 2, "la pagina de la COLA queda intacta"
+    await b._on_list_callback(
+        FakeUpdate("lst:prev", user_id=77, chat_id=44), SimpleNamespace(args=[])
+    )
+    assert b._history_page == 0, b._history_page
+    assert b._list_page == 2, "la pagina de la COLA queda intacta"
+
+
+async def test_radio_sin_argumentos_abre_destacadas_del_idioma():
+    """El arranque en frio no pregunta ni asume pais: semilla = idioma de
+    Telegram ('language=spanish', verificado contra el API de radios). Con
+    codigo no mapeado o lista vacia cae a destacadas globales."""
+    import bot as bot_mod
+    import radio as radio_mod
+    from radio import Emisora
+
+    b = make_bot()
+    pedidos: list[tuple[str, int]] = []
+
+    async def _idioma_falso(termino, cantidad):
+        pedidos.append((termino, cantidad))
+        return [
+            Emisora(nombre="Cadena SER", pais="España", stream="https://s.example/1", tags="news,radio"),
+        ]
+
+    async def _destacadas_prohibida(cantidad):
+        raise AssertionError("con semilla de idioma NO debe ir a destacadas")
+
+    viejo_idioma = radio_mod.buscar_idioma
+    viejo_destacadas = radio_mod.destacadas
+    radio_mod.buscar_idioma = _idioma_falso
+    radio_mod.destacadas = _destacadas_prohibida
+    try:
+        await b.cmd_radio(
+            FakeMessageUpdate("/radio", language_code="es-419"),
+            SimpleNamespace(args=[]),
+        )
+        assert pedidos == [("spanish", bot_mod._RADIO_BATCH)], pedidos
+        assert b._radio_view == "idioma", b._radio_view
+        assert b._radio_query == "en spanish", b._radio_query
+        assert any("Cadena SER" in str(s) for s in b._app.bot.sent), b._app.bot.sent
+
+        # Sin emisoras del idioma: cae a destacadas y limpia el titular.
+        pedidos.clear()
+
+        async def _idioma_vacio(termino, cantidad):
+            pedidos.append((termino, cantidad))
+            return []
+
+        destacadas_pedidas: list[int] = []
+
+        async def _destacadas_falsa(cantidad):
+            destacadas_pedidas.append(cantidad)
+            return [Emisora(nombre="Planeta", pais="Venezuela", stream="https://p.example/1")]
+
+        radio_mod.buscar_idioma = _idioma_vacio
+        radio_mod.destacadas = _destacadas_falsa
+        await b.cmd_radio(
+            FakeMessageUpdate("/radio", language_code="es"), SimpleNamespace(args=[])
+        )
+        assert pedidos == [("spanish", bot_mod._RADIO_BATCH)], pedidos
+        assert destacadas_pedidas == [bot_mod._RADIO_BATCH], destacadas_pedidas
+        assert b._radio_view == "top", b._radio_view
+        assert b._radio_query == "", b._radio_query
+    finally:
+        radio_mod.buscar_idioma = viejo_idioma
+        radio_mod.destacadas = viejo_destacadas
+
+
+async def test_radio_chips_de_uso_y_callback_de_chip():
+    """Las chips de uso (países y géneros ya sonados) salen DE la base,
+    solo con datos, y el toque rad:pais:N / rad:gen:N ab SU listado sin
+    escribir nada. Sin datos NO hay chips (nada inventado)."""
+    import radio as radio_mod
+    from queue_manager import QueueItem
+    from radio import Emisora
+
+    b = make_bot()
+    b._radio_view = "top"
+    kb = b._radio_keyboard()
+    labels = [btn.text for fila in kb.inline_keyboard for btn in fila]
+    assert not any(l.startswith("🌍 ") for l in labels), "sin datos NO hay chips de pais"
+    assert not any(l.startswith("🎵 ") for l in labels), "sin datos NO hay chips de genero"
+
+    # Uso real: dos emisoras sonadas con pais y tags (una repetida).
+    b._state.marcar_historial(
+        QueueItem(url="https://r.example/1", title="Uno", channel="Venezuela", tags="salsa,vallenato", directo=True)
+    )
+    b._state.marcar_historial(
+        QueueItem(url="https://r.example/2", title="Dos", channel="Colombia", tags="salsa", directo=True)
+    )
+    kb2 = b._radio_keyboard()
+    labels2 = [btn.text for fila in kb2.inline_keyboard for btn in fila]
+    assert any(l.startswith("🌍 ") and l.endswith(")") for l in labels2), labels2
+    assert any(l.startswith("🎵 salsa") for l in labels2), labels2
+    callbacks = [btn.callback_data for fila in kb2.inline_keyboard for btn in fila]
+    assert "rad:pais:0" in callbacks and "rad:gen:0" in callbacks, callbacks
+
+    # El toque de la chip de pais abre SU listado en la misma lista.
+    async def _pais_falso(termino, cantidad):
+        return [Emisora(nombre="Lejia", pais=termino, stream="https://l.example/1", tags="salsa")]
+
+    viejo_pais = radio_mod.buscar_pais
+    radio_mod.buscar_pais = _pais_falso
+    try:
+        clave = b._radio_paises[0][0]
+        upd = FakeUpdate("rad:pais:0", user_id=77)
+        b._radio_chat_id, b._radio_message_id = 44, 7
+        await b._on_radio_callback(upd, None)
+        assert b._radio_view == "busqueda", b._radio_view
+        assert b._radio_query == clave, b._radio_query
+        assert b._radio_items and b._radio_items[0].pais == clave, b._radio_items
+        assert upd.answered is not None, "el callback se responde una vez"
+
+        # Fuera de rango: respuesta mudita y nada roto.
+        upd2 = FakeUpdate("rad:pais:9", user_id=77)
+        await b._on_radio_callback(upd2, None)
+        assert upd2.answered is not None
+    finally:
+        radio_mod.buscar_pais = viejo_pais
+
+
+async def test_historial_emisora_proxima_por_genero():
+    """⏭ con ancla de emisora que TRAE tags: rota el listado del genero
+    (lo que sonaba se conserva), el listado pasa a gobernar (ancla de
+    /radio), la sesion del hub muere y el aviso dice el criterio."""
+    import bot as bot_mod
+    import radio as radio_mod
+    from queue_manager import QueueItem
+    from radio import Emisora
+
+    b = make_bot()
+    b._clear_nav_stacks()
+    b._state.marcar_historial(
+        QueueItem(url="https://r.example/1", title="Uno", channel="Venezuela", tags="cristiana,salsa", directo=True)
+    )
+    await b._on_control(
+        FakeUpdate("ctl:lista", user_id=77, chat_id=44), SimpleNamespace(args=[]), "lista"
+    )
+    await b._on_list_callback(
+        FakeUpdate("lst:histr", user_id=77, chat_id=44), SimpleNamespace(args=[])
+    )
+    await b._on_list_callback(
+        FakeUpdate("lst:rep:0", user_id=77, chat_id=44), SimpleNamespace(args=[])
+    )
+    assert b._hist_ancla == {"tipo": "emisora", "pais": "Venezuela", "tags": "cristiana,salsa"}, b._hist_ancla
+
+    pedidos: list[tuple[str, int]] = []
+
+    async def _genero_falso(tag, cantidad):
+        pedidos.append((tag, cantidad))
+        return [
+            Emisora(nombre="Radio Fe Y Alegria", pais="Venezuela", stream="https://f.example/1", tags=tag),
+            Emisora(nombre="Otra del Genero", pais="Colombia", stream="https://f.example/2", tags=tag),
+        ]
+
+    viejo_genero = radio_mod.buscar_genero
+    radio_mod.buscar_genero = _genero_falso
+    try:
+        await b.cmd_next(FakeUpdate("ctl:next"), SimpleNamespace(args=[]))
+        assert pedidos == [("cristiana", bot_mod._RADIO_BATCH)], pedidos
+        # La que suena (r.example/1) NO esta en el listado: entra la primera
+        # distinta... es la propia f.example/1? NO: la que suena no sale en
+        # el listado, asi que entra la PRIMERA del listado.
+        assert b.player.loaded[-1] == ("https://f.example/1", None), b.player.loaded
+        assert b._radio_ancla is not None and len(b._radio_ancla) == 2, b._radio_ancla
+        assert b._hist_ancla is None, "la sesion del hub muere con el salto"
+        # El aviso dice el criterio (genero), no manda el titulo callado.
+        rastro = [str(s) for s in b._app.bot.sent] + [str(e) for e in b._app.bot.edited]
+        assert any("Siguiente por género" in s for s in rastro), rastro
+
+        # Tags con SOLO tags sin emisoras: prueba el siguiente tag del
+        # ancla antes de caer al caminar.
+        pedidos.clear()
+
+        async def _genero_vacio(tag, cantidad):
+            pedidos.append(tag)
+            return []
+
+        radio_mod.buscar_genero = _genero_vacio
+        b._radio_ancla = None
+        b._hist_ancla = {"tipo": "emisora", "pais": "Venezuela", "tags": "cristiana,salsa"}
+        await b.cmd_next(FakeUpdate("ctl:next"), SimpleNamespace(args=[]))
+        assert pedidos == ["cristiana", "salsa"], pedidos
+    finally:
+        radio_mod.buscar_genero = viejo_genero
+
+
+async def test_buscar_home_artistas_y_candado_de_rol():
+    """/buscar sin texto: home con chips de artistas ya sonados (uso real)
+    para dj, uso escrito para el resto. El toque bsm:art:N busca el
+    artista con EXACTAMENTE las garantias de escribirlo."""
+    from queue_manager import QueueItem
+
+    b = make_bot()
+    b._state.marcar_historial(QueueItem(url="https://youtu.be/a1", title="A", artist="GP Band"))
+    b._state.marcar_historial(QueueItem(url="https://youtu.be/a2", title="B", artist="GP Band"))
+    b._state.marcar_historial(QueueItem(url="https://youtu.be/a3", title="C", artist="Otro Artista"))
+
+    # Sin datos para el observador (user sin rol): uso escrito de siempre.
+    viejo_run_search = b._run_search
+    searches: list[str] = []
+
+    async def _run_search_falsa(update, context, query):
+        searches.append(query)
+
+    try:
+        b._run_search = _run_search_falsa
+
+        upd_user = FakeUpdate("bsm:noop", user_id=50, chat_id=44)
+        await b._on_buscar_home_callback(upd_user, None)
+        assert upd_user.answered_kwargs.get("show_alert") is True, upd_user.answered_kwargs
+        assert searches == []
+    finally:
+        b._run_search = viejo_run_search
+
+    # El dj abre el home: sale con chips ordenadas por USO.
+    upd = FakeMessageUpdate("/buscar", user_id=77)
+    await b.cmd_play(upd, SimpleNamespace(args=[]))
+    envio = b._app.bot.sent[-1]
+    assert envio[0] == 44 and "👥 Artistas que ya sonaron en esta sala:" in envio[1], envio
+    markup = envio[2]["reply_markup"]
+    texts = [btn.text for fila in markup.inline_keyboard for btn in fila]
+    assert any("GP Band (2)" in t for t in texts), texts
+    assert any("Otro Artista (1)" in t for t in texts), texts
+    assert b._buscar_home_message_id is not None
+
+    # El toque busca el artista (misma semilla que escribirlo) y cierra.
+    searches.clear()
+    try:
+        b._run_search = _run_search_falsa
+        upd2 = FakeUpdate("bsm:art:0", user_id=77, chat_id=44)
+        await b._on_buscar_home_callback(upd2, None)
+        assert searches == ["GP Band"], searches
+        assert b._search_artist == "GP Band", b._search_artist
+        assert b._hist_ancla is None, "el cambio de sesion mata el ancla del hub"
+        assert b._buscar_home_message_id is None and b._buscar_home_chat_id is None
+    finally:
+        b._run_search = viejo_run_search
+
+
+async def test_card_foto_se_re_crea_como_texto_sin_miniatura():
+    """Bug del relevo 10/2026: al pasar a un tema SIN miniatura, la card
+    de foto quedaba con el logo VIEJO (edit del caption no toca el media).
+    Ahora se borra y se re-crea como mensaje de texto."""
+    from queue_manager import QueueItem
+
+    b = make_bot()
+    b.queue.set_current(
+        QueueItem(url="u1", title="Con Logo", thumbnail="https://img/1")
+    )
+    await b._send_card(44)
+    message_id_foto = b._card_message_id
+    assert b._card_is_photo is True
+
+    # El tema nuevo NO trae miniatura: la card pasa a texto, sin foto vieja.
+    b.queue.set_current(QueueItem(url="u2", title="Solita Audio"))
+    await b._render_card(b._track_status_text(), 44)
+    assert b._card_is_photo is False, b._card_is_photo
+    assert (44, message_id_foto) in b._app.bot.deleted, b._app.bot.deleted
+    nuevos = [
+        s for s in b._app.bot.sent
+        if s[0] == 44 and isinstance(s[1], str) and "Solita Audio" in s[1]
+    ]
+    assert nuevos, b._app.bot.sent
+    assert b._card_message_id != message_id_foto, b._card_message_id
 
 
 def run():

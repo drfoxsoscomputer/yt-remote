@@ -656,6 +656,15 @@ class YTRemoteBot:
         self._radio_favs: list = []
         self._radio_chat_id: int | None = None
         self._radio_message_id: int | None = None
+        # Chips de uso del listado (países/géneros ya sonados): se leen de
+        # la base en cada render del teclado y quedan aqui para que el
+        # callback rad:pais:N / rad:gen:N sepa a qué fila tocó.
+        self._radio_paises: list = []
+        self._radio_generos: list = []
+        # Home de /buscar (chips de artistas ya sonados, callback bsm:*):
+        # UN solo mensaje en pantalla, igual que los demas listados.
+        self._buscar_home_chat_id: int | None = None
+        self._buscar_home_message_id: int | None = None
         # Editor de usuarios (boton 👥): la lista vive en el chat PRIVADO del
         # admin. Los cambios quedan "staged" (sin persistir en roles.json)
         # hasta el boton ❌ (commit); tocar un usuario dos veces lo revierte.
@@ -917,13 +926,28 @@ class YTRemoteBot:
         self._persist_dirty()
 
     def _register_owner(self) -> None:
-        """El dueno (OWNER_ID) queda como admin automaticamente."""
+        """El dueno (OWNER_ID) queda como admin automaticamente SOLO en el
+        arranque en frio (tabla `usuarios` sin nadie).
+
+        El auto-registro en TODO arranque anulaba en silencio cualquier
+        cambio de rol hecho despues (con dev_rol o el editor \U0001f465): se
+        bajaba al dueno a dj y al reiniciar volvia admin solo."""
         if self.config.owner_id is None:
             logger.warning("OWNER_ID no configurado en .env: no hay admin inicial.")
             return
-        if not self.roles.has_role(self.config.owner_id, "admin"):
+        if self.roles.has_role(self.config.owner_id, "admin"):
+            return
+        if self.roles.vacio():
             self.roles.set_role(self.config.owner_id, "admin")
-            logger.info("Dueno %s registrado como admin.", self.config.owner_id)
+            logger.info(
+                "Dueno %s registrado como admin (primer arranque).",
+                self.config.owner_id,
+            )
+        else:
+            logger.info(
+                "Dueno %s entro sin admin: ya hay usuarios, no se fuerza su rol.",
+                self.config.owner_id,
+            )
 
     @property
     def app(self) -> Application:
@@ -1592,6 +1616,7 @@ class YTRemoteBot:
         llega honesto en un solo mensaje.
         """
         vista, termino = _radio_parsear(" ".join(context.args))
+        titular = ""
         try:
             if vista == "fav":
                 items = list(self._radio_favs)
@@ -1602,7 +1627,26 @@ class YTRemoteBot:
             elif vista == "name":
                 items = await radio.buscar_nombre(termino, _RADIO_BATCH)
             else:
-                items = await radio.destacadas(_RADIO_BATCH)
+                # El ARRANQUE sin argumentos (_radio_parsear lo trae como
+                # "top") no pregunta nada y no asume pais: usa el idioma
+                # del usuario (Telegram lo trae) como semilla
+                # ('language=spanish', verificado contra el API) y cae a
+                # destacadas globales sin emisoras de ese idioma o con un
+                # codigo no mapeado.
+                idioma = radio.idioma_del_api(
+                    update.effective_user.language_code if update.effective_user else ""
+                )
+                vista = "idioma"
+                titular = f"en {idioma}" if idioma else ""
+                items = (
+                    await radio.buscar_idioma(idioma, _RADIO_BATCH)
+                    if idioma
+                    else []
+                )
+                if not items:
+                    vista = "top"
+                    titular = ""
+                    items = await radio.destacadas(_RADIO_BATCH)
         except radio.RadioError as exc:
             await self._reply(update, f"⚠️ No se pudo buscar emisoras: {exc}")
             return
@@ -1614,8 +1658,10 @@ class YTRemoteBot:
             else:
                 await self._reply(update, "No encontré emisoras destacadas.")
             return
-        self._radio_view = {"top": "top", "fav": "fav"}.get(vista, "busqueda")
-        self._radio_query = termino if self._radio_view == "busqueda" else ""
+        self._radio_view = {"top": "top", "fav": "fav", "idioma": "idioma"}.get(
+            vista, "busqueda"
+        )
+        self._radio_query = termino if self._radio_view == "busqueda" else titular
         self._radio_items = items
         self._radio_page = 0
         await self._open_radio_list(update.effective_chat.id)
@@ -1663,6 +1709,10 @@ class YTRemoteBot:
             encabezado = "❤️ Tus emisoras favoritas:"
         elif self._radio_view == "busqueda":
             encabezado = f"🔎 Emisoras para «{self._radio_query}»:"
+        elif self._radio_view == "idioma":
+            # La semilla del arranque: destacadas del idioma del usuario
+            # sin preguntar ni asumir pais (se actualiza sola con el uso).
+            encabezado = f"🔥 Emisoras destacadas {self._radio_query}:"
         else:
             encabezado = "🔥 Emisoras destacadas:"
         lineas = [encabezado]
@@ -1719,7 +1769,51 @@ class YTRemoteBot:
                 InlineKeyboardButton("❤️ Favoritas", callback_data="rad:fav"),
             ]
         )
+        # Chips de uso REAL (países y géneros más sonados de ESTA sala):
+        # nada fijo de fábrica; solo aparecen cuando ya hay datos, y cada
+        # toque vuelve con su listado sin escribir nada.
+        paises = self._state.top_paises_uso(3)
+        if paises:
+            self._radio_paises = [(str(d["clave"]), int(d["usos"])) for d in paises]
+            filas.append(
+                [
+                    InlineKeyboardButton(
+                        f"🌍 {self._pais_corto(clave)} ({usos})",
+                        callback_data=f"rad:pais:{i}",
+                    )
+                    for i, (clave, usos) in enumerate(self._radio_paises)
+                ]
+            )
+        generos = self._state.top_generos_uso(3)
+        if generos:
+            self._radio_generos = [(str(d["clave"]), int(d["usos"])) for d in generos]
+            filas.append(
+                [
+                    InlineKeyboardButton(
+                        f"🎵 {clave} ({usos})",
+                        callback_data=f"rad:gen:{i}",
+                    )
+                    for i, (clave, usos) in enumerate(self._radio_generos)
+                ]
+            )
         return InlineKeyboardMarkup(filas)
+
+    @staticmethod
+    def _pais_corto(nombre: str) -> str:
+        """El nombre CORTO de un país SOLO para las chips de uso: el API
+        nombra oficiales largos ('Bolivarian Republic Of Venezuela') que no
+        caben en un boton. La busqueda SIEMPRE usa el nombre completo."""
+        texto = str(nombre or "")
+        for saca, pon in (
+            ("Bolivarian Republic Of ", ""),
+            ("Republic Of ", ""),
+            ("The United States Of America", "EE. UU."),
+            ("The United Kingdom Of Great Britain And Northern Ireland", "Reino Unido"),
+            ("The United Republic Of ", ""),
+            ("The ", ""),
+        ):
+            texto = texto.replace(saca, pon)
+        return " ".join(texto.split()).strip()[:14] or nombre
 
     async def _radio_render(self) -> None:
         """Repinta el listado abierto (texto + teclado de la vista/pagina
@@ -1816,6 +1910,38 @@ class YTRemoteBot:
             await self._radio_render()
             await self._list_answer(query)
             return
+        if accion.startswith(("pais:", "gen:")):
+            tipo, _, crudo = accion.partition(":")
+            try:
+                posicion = int(crudo)
+            except ValueError:
+                await self._list_answer(query)
+                return
+            chips = self._radio_paises if tipo == "pais" else self._radio_generos
+            if not (0 <= posicion < len(chips)):
+                await self._list_answer(query)
+                return
+            clave = chips[posicion][0]
+            try:
+                self._radio_items = (
+                    await radio.buscar_pais(clave, _RADIO_BATCH)
+                    if tipo == "pais"
+                    else await radio.buscar_genero(clave, _RADIO_BATCH)
+                )
+            except radio.RadioError as exc:
+                await self._list_answer(query, str(exc), show_alert=True)
+                return
+            if not self._radio_items:
+                await self._list_answer(
+                    query, f"No encontré emisoras para «{clave}».", show_alert=True
+                )
+                return
+            self._radio_view = "busqueda"
+            self._radio_query = clave
+            self._radio_page = 0
+            await self._radio_render()
+            await self._list_answer(query)
+            return
         if accion.startswith("play:"):
             await self._radio_play(query, update, user_id, accion)
             return
@@ -1866,6 +1992,7 @@ class YTRemoteBot:
             title=emisora.nombre,
             thumbnail=emisora.logo,
             channel=emisora.pais,
+            tags=emisora.tags,
             directo=True,
         )
 
@@ -1909,12 +2036,11 @@ class YTRemoteBot:
                 update,
                 "🔁 La lista de emisoras volvió a empezar desde el principio.",
             )
-        await self._send_track_card(
-            update,
+        aviso = (
             ("📻 Siguiente emisora: " if delta > 0 else "📻 Emisora anterior: ")
-            + vecina.nombre,
-            item,
+            + vecina.nombre
         )
+        await self._send_track_card(update, aviso, item, nota=aviso)
 
     async def _hist_sonar(self, update, fila: dict, etiqueta: str) -> None:
         """Reproducir UNA entrada del historial del hub (el caminar de
@@ -1924,14 +2050,24 @@ class YTRemoteBot:
         item = QueueItem.from_dict(fila)
         ok = await self._play_item(update, item)
         if ok:
-            await self._send_track_card(
-                update, etiqueta + str(fila.get("title") or ""), item
-            )
+            aviso = etiqueta + str(fila.get("title") or "")
+            await self._send_track_card(update, aviso, item, nota=aviso)
 
     async def _hist_next_emisora(self, update) -> None:
         """⏭ sobre una emisora CON sesion del hub 🕘: hacia la MAS NUEVA
-        (la 1 son indices menores). En la primera posicion — o con una
-        emisora fresca del buscador — se abre la radio-por-pais del ancla."""
+        (la 1 son indices menores).
+
+        La regla del usuario (relevo 10/2026): el ancla es la fila que ELIGIO
+        y DEBE conservar lo que sonaba. Prioridad de rotacion:
+        1) GÉNERO (los tags de la fila, del API de radios) si la fila los
+           trae (o se los pudo recuperar por stream);
+        2) el caminar del historial queda para filas sin tags (y su salto
+           al tope va por pais del ancla).
+        """
+        ancla = self._hist_ancla or {}
+        if ancla.get("tipo") == "emisora":
+            if await self._hist_radio_genero(update):
+                return
         filas = self._historial(1)
         indice = self._hist_indice_actual(filas)
         if indice is None or indice in (0, -1):
@@ -1951,13 +2087,86 @@ class YTRemoteBot:
             update, "Esa es la ultima del historial: no hay anterior."
         )
 
+    async def _hist_radio_genero(self, update) -> bool:
+        """La rotacion por GÉNERO con el ancla del hub.
+
+        Usa los tags de la fila elegida (del API de radios, letra chica:
+        'bible,cristiana,...'). Entra la emisora que sigue en el listado
+        del genero, con la del actual descartada, y el listado pasa a ser
+        el ancla de rotacion (reglas de /radio, wrap incluido). Devuelve
+        False si la fila no trae tags con que trabajar: el camino del
+        llamador cae al caminar por pais. Un listado vacio para los 3
+        primeros tags del ancla y una caida del API SE AVISAN: True."""
+        ancla = self._hist_ancla or {}
+        tags = [
+            t.strip()
+            for t in str(ancla.get("tags", "") or "").split(",")
+            if t.strip()
+        ]
+        if not tags:
+            return False
+        for tag in tags[:3]:
+            try:
+                emisoras = [
+                    e
+                    for e in await radio.buscar_genero(tag, _RADIO_BATCH)
+                    if e.stream
+                ]
+            except radio.RadioError as exc:
+                logger.warning("Historial-emisoras: el API no respondio: %s", exc)
+                await self._reply(
+                    update,
+                    "📻 El servicio de radios no responde ahora: abri /radio mas tarde.",
+                )
+                return True
+            if emisoras:
+                await self._hist_saltar_listado(update, emisoras, f"género {tag}")
+                return True
+            # Tag sin emisoras hoy: prueba el siguiente del ancla.
+        return False
+
+    async def _hist_saltar_listado(self, update, emisoras: list, criterio: str) -> bool:
+        """El salto a la siguiente de UN listado (genero o pais) con la
+        mecanica de /radio: entra la emisora que sigue en ese listado (con
+        la del actual descartada; si no sale en el listado, la primera
+        distinta), y el listado PASA a ser el ancla de rotacion: de aca en
+        mas, ⏭/⏮ y el auto-avance giran con las reglas de /radio (wrap
+        incluido) y la sesion del hub muere. True si el paso se hizo."""
+        actual_url = getattr(self.queue.current, "url", "")
+        posicion = next(
+            (i for i, e in enumerate(emisoras) if e.stream == actual_url), None
+        )
+        if posicion is not None and posicion + 1 < len(emisoras):
+            elegida = emisoras[posicion + 1]
+        else:
+            # La emisora que suena no sale hoy en el listado (o es la ultima
+            # de el): entra la primera DISTINTA de la que suena.
+            elegida = next((e for e in emisoras if e.stream != actual_url), None)
+            if elegida is None and posicion is not None:
+                elegida = emisoras[posicion]
+        if elegida is None:
+            await self._reply(
+                update, "El listado no trae otra emisora distinta."
+            )
+            return True
+        item = self._radio_item_de(elegida)
+        ok = await self._play_item(update, item)
+        if not ok:
+            return True
+        # Fruto del ancla: el listado del criterio gobierna desde ahora.
+        self._radio_ancla = emisoras
+        self._radio_ancla_wrap = False
+        self._hist_ancla = None
+        aviso = "📻 Siguiente por " + criterio + ": " + elegida.nombre
+        await self._send_track_card(update, aviso, item, nota=aviso)
+        return True
+
     async def _hist_radio_pais(self, update) -> None:
-        """El ⏭ llego al tope del historial de emisoras: la busqueda usa el
-        PAIS del ancla (la fila elegida del hub guarda el pais en su
-        channel), con la MISMA mecanica de /radio: lista del API, entra la
-        emisora que sigue en ese listado (con la del actual descartada) y el
-        listado PASA a ser el ancla de rotacion: de aca en mas, ⏭/⏮ y el
-        auto-avance giran con las reglas de /radio (wrap incluido)."""
+        """El ⏭ llego al tope del historial de emisoras (o la fila del ancla
+        no trae tags): la busqueda usa el PAIS del ancla (la fila elegida
+        del hub guarda el pais en su channel) con la MISMA mecanica de
+        /radio. El aviso dice EL PAIS usada: antes el salto callaba y el
+        usuario no sabia de donde salio la emisora (relevo 10/2026)."""
         pais = str((self._hist_ancla or {}).get("pais") or "").strip()
         if not pais:
             self._hist_ancla = None
@@ -1981,36 +2190,8 @@ class YTRemoteBot:
                 f"No hay emisoras de {pais} en el listado de radios.",
             )
             return
-        actual_url = getattr(self.queue.current, "url", "")
-        posicion = next(
-            (i for i, e in enumerate(emisoras) if e.stream == actual_url), None
-        )
-        if posicion is not None and posicion + 1 < len(emisoras):
-            elegida = emisoras[posicion + 1]
-        else:
-            # La emisora que suena no sale hoy en el listado del pais (o es
-            # la ultima de el): entra la primera DISTINTA de la que suena.
-            elegida = next(
-                (e for e in emisoras if e.stream != actual_url), None
-            )
-            if elegida is None and posicion is not None:
-                elegida = emisoras[posicion]
-        if elegida is None:
-            await self._reply(
-                update, "El listado de ese pais no trae otra emisora distinta."
-            )
-            return
-        item = self._radio_item_de(elegida)
-        ok = await self._play_item(update, item)
-        if not ok:
-            return
-        # Fruto del ancla: el listado del pais gobierna desde ahora (reglas
-        # de /radio) y la sesion del hub termina aca.
-        self._radio_ancla = emisoras
-        self._radio_ancla_wrap = False
-        self._hist_ancla = None
-        await self._send_track_card(
-            update, "📻 Siguiente emisora: " + elegida.nombre, item
+        await self._hist_saltar_listado(
+            update, emisoras, "país " + self._pais_corto(pais)
         )
 
     async def _radio_play(self, query, update, user_id, accion: str) -> None:
@@ -2214,8 +2395,10 @@ class YTRemoteBot:
     def _with_card_reposition(self, handler):
         return self.card.with_reposition(handler)
 
-    async def _send_track_card(self, update, caption: str, item) -> None:
-        await self.card.send_track_card(update, caption, item)
+    async def _send_track_card(
+        self, update, caption: str, item, nota: str | None = None
+    ) -> None:
+        await self.card.send_track_card(update, caption, item, nota=nota)
 
     def _truncate(self, text: str, limit: int = 80) -> str:
         return self.card.truncate(text, limit)
@@ -2419,12 +2602,11 @@ class YTRemoteBot:
         """
         query = " ".join(context.args or []).strip()
         if not query:
-            await self._reply(
-                update,
-                "Uso: /buscar <artista> - <cancion>.\n"
-                "Ej: /buscar GP Band - Inexplicable\n"
-                "Tambien puedes pegar un link de YouTube.",
-            )
+            # El home de /buscar: artistas que YA sonaron (uso real del
+            # historial) como chips de un toque, mas el recordatorio del
+            # uso escrito. Sin datos guardados se queda el uso de siempre
+            # (nada de chips inventados). Cero preguntas, cero tecleo.
+            await self._buscar_home_abrir(update)
             return
         # Todo /buscar o /play nuevo reemplaza al intento anterior: la card
         # vuelve a poder reposicionarse (un listado nuevo re-setea el flag).
@@ -2450,6 +2632,119 @@ class YTRemoteBot:
         self._search_artist = artist
         search_query = f"{artist} {song}".strip()
         await self._run_search(update, context, search_query)
+
+    async def _buscar_home_abrir(self, update) -> None:
+        """La lista del home de /buscar: chips de artistas con uso REAL.
+
+        Cada chip de un toque lanza la busqueda del artista (las mismas
+        garantias que escribirlo: muere el ancla del hub y el listado
+        nuevo reemplaza al anterior). Igual que el listado del radio: si
+        ya habia uno abierto se borra y se manda uno fresco.
+        """
+        chat_id = update.effective_chat.id
+        await self._buscar_home_cerrar()
+        artistas = self._state.top_artistas_uso(6, directo=0)
+        if not artistas:
+            await self._reply(
+                update,
+                "Uso: /buscar <artista> - <cancion>.\n"
+                "Ej: /buscar GP Band - Inexplicable\n"
+                "Tambien puedes pegar un link de YouTube.",
+            )
+            return
+        lineas = [
+            "👥 Artistas que ya sonaron en esta sala:",
+            "✍️ O escribe: /buscar artista - cancion",
+        ]
+        filas: list[list[InlineKeyboardButton]] = []
+        for i, fila in enumerate(artistas):
+            clave = str(fila["clave"])
+            lineas.append(f"{i + 1}. {clave} ({fila['usos']})")
+            filas.append(
+                [
+                    InlineKeyboardButton(
+                        f"👥 {self._truncate(clave, 32)} ({fila['usos']})",
+                        callback_data=f"bsm:art:{i}",
+                    )
+                ]
+            )
+        filas.append([InlineKeyboardButton("❌", callback_data="bsm:close")])
+        try:
+            msg = await self._app.bot.send_message(
+                chat_id,
+                "\n".join(lineas),
+                reply_markup=InlineKeyboardMarkup(filas),
+            )
+        except Exception as exc:  # noqa: BLE001 - no romper el flujo
+            logger.warning("No se pudo enviar el home de /buscar: %s", exc)
+            return
+        self._buscar_home_chat_id = chat_id
+        self._buscar_home_message_id = msg.message_id
+
+    async def _buscar_home_cerrar(self) -> None:
+        """Borra el home abierto de /buscar (si lo hay) y limpia sus ids."""
+        if self._buscar_home_chat_id is None or self._buscar_home_message_id is None:
+            return
+        try:
+            await self._app.bot.delete_message(
+                self._buscar_home_chat_id, self._buscar_home_message_id
+            )
+        except Exception:  # noqa: BLE001 - ya no esta o la API fallo: da igual
+            pass
+        self._buscar_home_chat_id = None
+        self._buscar_home_message_id = None
+
+    async def _on_buscar_home_callback(
+        self, update: Update, context: ContextTypes.DEFAULT_TYPE
+    ) -> None:
+        """Botones del home de /buscar (callback `bsm:`).
+
+        - `bsm:art:N` (dj): lanza la busqueda del artista N del historial
+          con EXACTAMENTE las garantias de escribir `/buscar artista`.
+        - `bsm:close`: borra el home.
+        Regla del usuario: sin rol nada de nada (mismo candado de /buscar).
+        """
+        query = update.callback_query
+        data = query.data or ""
+        accion = data.split(":", 1)[1] if data.startswith("bsm:") else ""
+        user_id = query.from_user.id if query.from_user else None
+        if not (user_id is not None and self.roles.has_role(user_id, "dj")):
+            await self._list_answer(
+                query, "🔒 /buscar es solo para dj/admin.", show_alert=True
+            )
+            return
+        if accion in ("", "noop"):
+            await self._list_answer(query)
+            return
+        if accion == "close":
+            await self._list_answer(query)
+            await self._buscar_home_cerrar()
+            return
+        if accion.startswith("art:"):
+            crudo = accion.split(":", 1)[1]
+            try:
+                posicion = int(crudo)
+            except ValueError:
+                await self._list_answer(query)
+                return
+            artistas = self._state.top_artistas_uso(6, directo=0)
+            if not (0 <= posicion < len(artistas)):
+                # Reordenado por uso entre render y toque: expiro, se cierra.
+                await self._list_answer(query, "Esa lista expiro, abre /buscar otra vez.")
+                await self._buscar_home_cerrar()
+                return
+            artista = str(artistas[posicion]["clave"])
+            await self._list_answer(query)
+            await self._buscar_home_cerrar()
+            # Las MISMAS garantias que /buscar con texto (cmd_play):
+            # un listado nuevo reemplaza al anterior y el ancla del hub
+            # muere con el cambio de sesion.
+            self._search_list_pending = False
+            self._hist_ancla = None
+            self._search_artist = artista
+            await self._run_search(update, context, artista)
+            return
+        await self._list_answer(query)
 
     async def _play_link_or_playlist(
         self, update: Update, context: ContextTypes.DEFAULT_TYPE, query: str
@@ -3022,6 +3317,10 @@ class YTRemoteBot:
         if query.data and query.data.startswith("rad:"):
             # Botones del mensaje-lista de /radio (emisoras radio-browser).
             await self._on_radio_callback(update, context)
+            return
+        if query.data and query.data.startswith("bsm:"):
+            # Botones del home de /buscar (artistas del historial).
+            await self._on_buscar_home_callback(update, context)
             return
         # Regla del usuario: sin rol nada de nada (el listado del buscador
         # es de dj+ por completo: navegar, cancelar o elegir).
@@ -4824,10 +5123,17 @@ class YTRemoteBot:
             return
 
         if action in ("prev", "next"):
-            if self._list_view == "historial":
-                self._history_page += -1 if action == "prev" else 1
+            delta = -1 if action == "prev" else 1
+            # El historial del hub son DOS vistas: emisoras (_list_view
+            # "radio") y canciones ("historial"). Antes solo "historial"
+            # movia _history_page: en emisoras el toque movia la pagina de
+            # la COLA (que no estaba abierta), el historial no se movia y
+            # ademas quedaba la pagina de la cola contaminada (relevo
+            # 10/2026). Las dos vistas del hub usan la misma pagina.
+            if self._list_view in ("historial", "radio"):
+                self._history_page += delta
             else:
-                self._list_page += -1 if action == "prev" else 1
+                self._list_page += delta
             await self._edit_list_message()
             await self._list_answer(query)
             return
@@ -4961,15 +5267,21 @@ class YTRemoteBot:
                 self._from_card = False
         # El ancla SIEMPRE despues del resultado: solo una entrada que SE
         # PUSO a sonar define la sesion del hub (la 8 o la 28 del usuario).
-        # Emisora: espera el pais (para la busqueda del ⏭ en la 1).
-        # Cancion: la semilla del radio es su artista (asi el auto-avance
-        # y la busqueda del ⏭ salen del MISMO ancla).
+        # Emisora: espera el pais y los TAGS (el ⏭ rota por genero si la
+        # fila los trae); una fila vieja sin tags los recupera del API por
+        # su stream (una consulta, cacheada). Cancion: la semilla del radio
+        # es su artista (asi el auto-avance y la busqueda del ⏭ salen del
+        # MISMO ancla).
         if ok:
             if item.directo:
                 self._radio_ancla = None
+                tags = str(fila.get("tags", "") or "")
+                if not tags:
+                    tags = str(await radio.tags_por_stream(item.url) or "")
                 self._hist_ancla = {
                     "tipo": "emisora",
                     "pais": fila.get("channel", ""),
+                    "tags": tags,
                 }
             else:
                 self._hist_ancla = {

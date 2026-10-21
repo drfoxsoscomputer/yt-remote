@@ -56,6 +56,12 @@ class CardManager:
         # Serial la re-creacion (borrar + enviar de nuevo): dos updates seguidos
         # no deben borrar dos veces para duplicar la card.
         self.lock: asyncio.Lock = asyncio.Lock()
+        # Nota de UNA VEZ (ej. '📻 Siguiente por género cristiana: X'): la
+        # pongo los saltos de ⏭ y la card la muestra en el primer render y
+        # la apaga sola. Sin esto la etiqueta del aviso se perdia: la card
+        # solo reflejaba el titulo y el pais/genero del salto quedaba en la
+        # nada (relevo 10/2026).
+        self.nota: str = ""
 
     # --- Identidad -------------------------------------------------------
 
@@ -82,6 +88,11 @@ class CardManager:
             return "No hay ninguna cancion sonando."
         state = "⏸️ Pausado" if self._app._paused else "▶️ Sonando"
         text = f"{state}\n🎵 {self.truncate(cur.title)}"
+        if self.nota:
+            text += f"\n{self.nota}"
+            # Nota de UNA VEZ: se apaga aqui para que el render de siempre
+            # (pausa, volumen, proximo tema) vuelva al texto limpio.
+            self.nota = ""
         if self._app._restored:
             self._app._restored = False
             text += "\n🔄 Retomada del cierre anterior: usa ▶ para reanudar."
@@ -246,15 +257,34 @@ class CardManager:
                         reply_markup=self.control_keyboard(),
                     )
                 else:
-                    # Sin miniatura para el tema nuevo: se actualiza solo el
-                    # texto (no se puede poner un mensaje de texto sobre una
-                    # foto editando el media a vacio).
-                    await bot.edit_message_caption(
-                        caption=text,
-                        chat_id=chat_id,
-                        message_id=self.message_id,
-                        reply_markup=self.control_keyboard(),
-                    )
+                    # Sin miniatura para el tema nuevo: Telegram NO permite
+                    # quitar la foto de un mensaje (el edit a vacio
+                    # revienta), y con el caption solito la miniatura VIEJA
+                    # quedaba clavada: la card mostraba el logo de la
+                    # emisora ANTERIOR (relevo 10/2026). Se re-crea la card
+                    # como mensaje de TEXTO: se borra la foto y se manda un
+                    # mensaje nuevo al final con el mismo teclado (es el
+                    # mismo comportamiento que remove + send_card).
+                    try:
+                        await bot.delete_message(chat_id, self.message_id)
+                    except Exception as exc_del:  # noqa: BLE001
+                        logger.warning(
+                            "No se pudo borrar la card de foto: %s", exc_del
+                        )
+                    self.is_photo = False
+                    try:
+                        msg = await bot.send_message(
+                            chat_id,
+                            text,
+                            reply_markup=self.control_keyboard(),
+                        )
+                        self.message_id = msg.message_id
+                        self.chat_id = chat_id
+                        self._app._persist_dirty()
+                    except Exception as exc_send:  # noqa: BLE001
+                        logger.warning(
+                            "No se pudo re-crear la card de texto: %s", exc_send
+                        )
             else:
                 try:
                     await bot.edit_message_text(
@@ -444,14 +474,18 @@ class CardManager:
     # --- Integracion con los handlers ------------------------------------
 
     async def send_track_card(
-        self, update, caption: str, item: QueueItem | None
+        self, update, caption: str, item: QueueItem | None, nota: str | None = None
     ) -> None:
         """Refresca la tarjeta persistente del mini reproductor.
 
         Es la unica confirmacion visual: miniatura + estado + botones se
         re-renderizan en el mismo mensaje (nada de fotos sueltas duplicadas).
         El caption se usa solo como fallback si no hay item que reflejar.
-        """
+
+        `nota`: linea de UNA VEZ (ej. el criterio de un salto con pais o
+        genero) que la card muestra en ESTE render y luego apaga. Sin nota,
+        y con item, la card reflejaria SOLAMENTE el titulo: la etiqueta del
+        salto se perdia en la nada."""
         if self._app._from_card:
             # Desde un boton de la tarjeta, el cierre de _on_control ya
             # re-renderiza la tarjeta en su lugar.
@@ -462,6 +496,8 @@ class CardManager:
         chat = update.effective_chat
         if chat is None:
             return
+        if nota:
+            self.nota = nota
         await self.show_card(chat.id)
 
     def with_reposition(self, handler):

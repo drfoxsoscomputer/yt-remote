@@ -182,6 +182,14 @@ class RoleManager:
     def all_users(self) -> dict[str, str]:
         return dict(self._roles)
 
+    def vacio(self) -> bool:
+        """True cuando NO hay nadie registrado en `usuarios`.
+
+        Es la senal del arranque en frio (yo mismo lo cargue de la base
+        vacia): `_roles` y `_users` nacen de la MISMA lectura, asi que sin
+        usuarios no hay roles de ningun tipo."""
+        return not self._users and not self._roles
+
     def get_all_with_role(self, role: str) -> list[int]:
         """Devuelve todos los user IDs que tienen ese rol exacto."""
         return [int(uid) for uid, r in self._roles.items() if r == role]
