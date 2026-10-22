@@ -38,6 +38,7 @@
    "_comment": "allow_all: se empaqueta todo src/*.py del arbol. La lista escrita a mano se quedo vieja y el ZIP salio roto (sin store.py ni los modulos nuevos).",
    "exclude_files": [
     "demo_roles.py",
+    "dev_rol.py",
     "testkit.py"
    ],
    "exclude_globs": [
@@ -74,7 +75,9 @@
       "always_exclude_globs": [
         "**/__pycache__/**",
         "**/*.pyc",
-        "**/*.pyo"
+        "**/*.pyo",
+        "**/site-packages/*/tests/**",
+        "**/site-packages/*/_tests/**"
       ]
     }
   }
