@@ -20,6 +20,7 @@ SRC = Path(__file__).resolve().parent
 sys.path.insert(0, str(SRC))
 
 from testkit import run_sync_tests  # noqa: E402
+import constants as constants_mod  # noqa: E402
 import playback as playback_mod
 
 # Aislar el registro de roles PARA TODO EL PROCESO: el RoleManager default
@@ -1834,9 +1835,29 @@ def meta_de_actualizacion(release, pypi, instalada):
         ) = viejos
 
 
-# Releases de figura: (version, url, bytes, sha256_publicado)
-RELEASE_1_1_4 = ("1.1.4", "https://x/yt-remote-1.1.4-portable.zip", 10, None)
-RELEASE_1_2_0 = ("1.2.0", "https://x/yt-remote-1.2.0-portable.zip", 1_000, None)
+# Releases de figura: (version, url, bytes, sha256_publicado). La "actual" se
+# deriva de constants.VERSION y la "siguiente" sube el ultimo numero: asi un
+# bump de release no obliga a editar estos tests a mano (antes estaban
+# clavados en 1.1.4/1.2.0 y el bump los rompia).
+VERSION_ACTUAL = constants_mod.VERSION
+VERSION_SIGUIENTE = ".".join(
+    [
+        *VERSION_ACTUAL.split(".")[:-1],
+        str(int(VERSION_ACTUAL.split(".")[-1]) + 1),
+    ]
+)
+RELEASE_ACTUAL = (
+    VERSION_ACTUAL,
+    f"https://x/yt-remote-{VERSION_ACTUAL}-portable.zip",
+    10,
+    None,
+)
+RELEASE_SIGUIENTE = (
+    VERSION_SIGUIENTE,
+    f"https://x/yt-remote-{VERSION_SIGUIENTE}-portable.zip",
+    1_000,
+    None,
+)
 # Versiones de la pieza interna: (version_publicada, url, sha)
 PYPI_2026_08 = ("2026.08.19", "https://u/w", "sha")
 PYPI_2026_10 = ("2026.10.01", "https://u/w2", "sha2")
@@ -1865,12 +1886,12 @@ async def test_actualizar_nada_nuevo():
     lanzamiento, sin marca y sin mencionar piezas internas."""
     b = make_bot()
     lanzados, marcas = _ayudante_y_marcas(b, disponible=False)
-    with meta_de_actualizacion(RELEASE_1_1_4, PYPI_2026_08, "2026.08.19"):
+    with meta_de_actualizacion(RELEASE_ACTUAL, PYPI_2026_08, "2026.08.19"):
         upd = FakeMessageUpdate("/actualizar")
         await b.cmd_actualizar(upd, SimpleNamespace(args=[]))
     assert len(upd.sent) == 1, upd.sent
     texto = upd.sent[0][0]
-    assert "✅ YT-Remote 1.1.4 ya está al día." in texto, texto
+    assert f"✅ YT-Remote {VERSION_ACTUAL} ya está al día." in texto, texto
     assert "yt-dlp" not in texto and "PyPI" not in texto, texto
     assert lanzados == [] and marcas == [], (lanzados, marcas)
 
@@ -1907,7 +1928,7 @@ async def test_actualizar_interna_no_se_nombra():
         return "2026.08.19", "2026.10.01"
 
     b._actualizar_ytdlp = ok  # type: ignore[method-assign]
-    with meta_de_actualizacion(RELEASE_1_1_4, PYPI_2026_10, "2026.08.19"):
+    with meta_de_actualizacion(RELEASE_ACTUAL, PYPI_2026_10, "2026.08.19"):
         upd = FakeMessageUpdate("/actualizar")
         await b.cmd_actualizar(upd, SimpleNamespace(args=[]))
     assert len(upd.sent) == 1, upd.sent
@@ -1930,7 +1951,7 @@ async def test_actualizar_interna_sin_ayudante_pide_reinicio_manual():
         return "2026.08.19", "2026.10.01"
 
     b._actualizar_ytdlp = ok  # type: ignore[method-assign]
-    with meta_de_actualizacion(RELEASE_1_1_4, PYPI_2026_10, "2026.08.19"):
+    with meta_de_actualizacion(RELEASE_ACTUAL, PYPI_2026_10, "2026.08.19"):
         upd = FakeMessageUpdate("/actualizar")
         await b.cmd_actualizar(upd, SimpleNamespace(args=[]))
     texto = upd.sent[0][0]
@@ -1951,7 +1972,7 @@ async def test_actualizar_interna_fallida_aviso_y_nada_mas():
         raise bot_mod.ActualizacionError("PyPI no responde (te)")
 
     b._actualizar_ytdlp = raya  # type: ignore[method-assign]
-    with meta_de_actualizacion(RELEASE_1_1_4, PYPI_2026_10, "2026.08.19"):
+    with meta_de_actualizacion(RELEASE_ACTUAL, PYPI_2026_10, "2026.08.19"):
         upd = FakeMessageUpdate("/actualizar")
         await b.cmd_actualizar(upd, SimpleNamespace(args=[]))
     assert len(upd.sent) == 1, upd.sent
@@ -1973,12 +1994,12 @@ async def test_actualizar_app_nueva_reinicia_solo():
         return (Path("paquete.zip"), [])
 
     b._actualizar_aplicacion = lista  # type: ignore[method-assign]
-    with meta_de_actualizacion(RELEASE_1_2_0, PYPI_2026_08, "2026.08.19"):
+    with meta_de_actualizacion(RELEASE_SIGUIENTE, PYPI_2026_08, "2026.08.19"):
         upd = FakeMessageUpdate("/actualizar")
         await b.cmd_actualizar(upd, SimpleNamespace(args=[]))
     assert len(upd.sent) == 1, upd.sent
     texto = upd.sent[0][0]
-    assert "🚀 Actualizando YT-Remote 1.1.4 → 1.2.0." in texto, texto
+    assert f"🚀 Actualizando YT-Remote {VERSION_ACTUAL} → {VERSION_SIGUIENTE}." in texto, texto
     assert "YT-Remote se cierra solo y vuelve al rato." in texto, texto
     assert "yt-dlp" not in texto, texto
     assert lanzados == [(Path("paquete.zip"), [])], lanzados
@@ -2000,11 +2021,11 @@ async def test_actualizar_app_y_componentes_una_pasada():
         return (Path("z.zip"), [SALTO_INTERNA])
 
     b._actualizar_aplicacion = lista  # type: ignore[method-assign]
-    with meta_de_actualizacion(RELEASE_1_2_0, PYPI_2026_10, "2026.08.19"):
+    with meta_de_actualizacion(RELEASE_SIGUIENTE, PYPI_2026_10, "2026.08.19"):
         upd = FakeMessageUpdate("/actualizar")
         await b.cmd_actualizar(upd, SimpleNamespace(args=[]))
     texto = upd.sent[0][0]
-    assert "🚀 Actualizando YT-Remote 1.1.4 → 1.2.0." in texto, texto
+    assert f"🚀 Actualizando YT-Remote {VERSION_ACTUAL} → {VERSION_SIGUIENTE}." in texto, texto
     assert "✅ Componentes internos: 2026.08.19 → 2026.10.01." in texto, texto
     assert "YT-Remote se cierra solo y vuelve al rato." in texto, texto
     assert lanzados == [(Path("z.zip"), [SALTO_INTERNA])], lanzados
@@ -2023,11 +2044,11 @@ async def test_actualizar_app_sin_ayudante_manual():
         return (Path("sin_uso.zip"), [])
 
     b._actualizar_aplicacion = no_baja  # type: ignore[method-assign]
-    with meta_de_actualizacion(RELEASE_1_2_0, PYPI_2026_08, "2026.08.19"):
+    with meta_de_actualizacion(RELEASE_SIGUIENTE, PYPI_2026_08, "2026.08.19"):
         upd = FakeMessageUpdate("/actualizar")
         await b.cmd_actualizar(upd, SimpleNamespace(args=[]))
     texto = upd.sent[0][0]
-    assert "🚀 YT-Remote 1.1.4 → 1.2.0 disponible." in texto, texto
+    assert f"🚀 YT-Remote {VERSION_ACTUAL} → {VERSION_SIGUIENTE} disponible." in texto, texto
     assert "no permite el cambio automático" in texto, texto
     assert baja == [] and lanzados == [] and marcas == [], (baja, lanzados, marcas)
 
@@ -2044,12 +2065,12 @@ async def test_actualizar_app_fallo_bajar_zip():
         raise bot_mod.ActualizacionError("GitHub no respondio (te)")
 
     b._actualizar_aplicacion = estalla  # type: ignore[method-assign]
-    with meta_de_actualizacion(RELEASE_1_2_0, PYPI_2026_08, "2026.08.19"):
+    with meta_de_actualizacion(RELEASE_SIGUIENTE, PYPI_2026_08, "2026.08.19"):
         upd = FakeMessageUpdate("/actualizar")
         await b.cmd_actualizar(upd, SimpleNamespace(args=[]))
     assert len(upd.sent) == 1, upd.sent
     texto = upd.sent[0][0]
-    assert texto.startswith("⚠️ No se pudo bajar la versión 1.2.0: "), texto
+    assert texto.startswith(f"⚠️ No se pudo bajar la versión {VERSION_SIGUIENTE}: "), texto
     assert "GitHub no respondio (te)" in texto, texto
     assert lanzados == [] and marcas == [], (lanzados, marcas)
 

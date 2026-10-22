@@ -7,9 +7,21 @@
 Bot de Telegram para controlar la reproducción de videos de YouTube en su PC.
 Búsqueda por chat, tarjeta de control con botones, radio automática por artista.
 
-**Versión actual:** v1.1.4 (arreglos del reproductor: el video ya arranca en
-todas las PCs, `/next` no se rinde con un enlace viejo de YouTube, y los
-fallos muestran el motivo real).
+**Versión actual:** v1.2.0 (radio por país y género, `/buscar` sin escribir,
+historiales separados, `/letra` y menú de comandos por rol).
+
+Lo que cambia respecto de v1.1.4:
+
+| Cambio | Qué es |
+|--------|--------|
+| Radio por país y género | `/radio` abre un menú con 🌍 Países y 🎵 Géneros. El país de la PC va primero (sale de la zona horaria de Windows, sin preguntar nada) y los géneros son los de las emisoras de ese país, con los que ya sonaron en la sala arriba. La rotación se queda en ese país: ya no salta a una emisora de otro continente |
+| Destacadas y favoritas | 🔥 Destacadas trae las emisoras más votadas del catálogo. ❤️ Favoritas guarda las suyas con el ♥ de cada fila, y la lista sobrevive a los reinicios |
+| `/buscar` sin escribir | Sin texto, `/buscar` muestra botones con los artistas que más sonaron en la sala: un toque busca ese artista, con las mismas garantías que escribirlo |
+| Historiales separados | El 🕘 del 📋 pregunta qué historial abrir: 📻 Emisoras o 🎵 Canciones, cada uno con su contador. Tocar una fila la repite y ⏭ / ⏮ caminan por ese historial |
+| `/letra` | La letra de lo que está sonando, como mensaje de texto. En una emisora avisa que no hay letra y, si la base libre no la tiene, lo dice sin inventar |
+| Menú por persona | El "/" se arma por usuario: el invitado solo ve `/start`, el dj ve además `/buscar`, `/radio` y `/letra`, y el admin suma `/reglas`, `/salud` y `/actualizar` |
+| Contenido infantil | Los videos que YouTube marca como "hecho para niños" volvieron a reproducirse: el bot prueba otro cliente de consulta antes de darse por vencido |
+| Tarjeta quieta | Con un listado abierto (`/buscar`, `/radio` o el home de artistas) la tarjeta no se mueve; vuelve al final al elegir o cancelar |
 
 Lo que cambia respecto de v1.1.3:
 
@@ -125,6 +137,11 @@ Si no usa el guion, todo el texto se busca como nombre de artista:
 
 Si pega un link de YouTube, reproduce directo sin buscar.
 
+Si escribe `/buscar` sin nada y ya sonó música en la sala, el bot muestra los
+artistas que más sonaron como botones: un toque busca ese artista, igual que
+escribirlo. Si todavía no hay historial, le recuerda el uso con un ejemplo y
+que también acepta un link.
+
 Si el link es de una **playlist o mix**, arranca de inmediato con los primeros
 temas y sigue cargando el resto en segundo plano (el bot avisa cuando quedó
 completa). El 📋 muestra la lista completa mientras se va expandiendo, y la
@@ -143,6 +160,28 @@ sin eso, el playlist local que une video y audio no podía bajar sus
 sub-playlists https y mpv quedaba en "Drop files to play here". Si un directo
 no logra cargar, el bot avisa "No se pudo reproducir" en vez de mostrar una
 tarjeta engañosa.
+
+## Radio
+
+`/radio` sin argumentos abre el menú: **🌍 Países**, **🎵 Géneros** y, al pie,
+**📻 Inicio**, **🔥 Destacadas** y **❤️ Favoritas**.
+
+| Opción | Qué hace |
+|--------|----------|
+| 🌍 Países | El catálogo completo, ordenado por cercanía a la PC. El país de su equipo aparece primero: el bot lo deduce de la zona horaria de Windows, sin preguntarle nada |
+| 🎵 Géneros | Los géneros de las emisoras de ese país, con los que ya sonaron en la sala primero. Los nombres van en español |
+| 🔥 Destacadas | Las emisoras más votadas del catálogo |
+| ❤️ Favoritas | Su lista propia: el ♥ de cada fila guarda o quita la emisora, y la lista sobrevive a los reinicios |
+
+Al elegir una emisora, el logo ocupa la pantalla (los streams de radio son
+solo audio) y la tarjeta muestra lo que está sonando. ⏭ y ⏮ rotan dentro de la
+lista desde la que salió, con vuelta al principio; si el stream se corta, el
+bot gira a la siguiente emisora de esa misma lista y nunca cae en la radio de
+YouTube. Sin una lista de referencia (por ejemplo, después de reiniciar) avisa
+que abra `/radio` para seguir rotando en vez de inventar el siguiente.
+
+`/radio pais:<país>`, `/radio genero:<género>` y `/radio favoritas` siguen
+funcionando si prefiere escribirlo.
 
 ## Tarjeta de reproducción
 
@@ -173,6 +212,13 @@ ir a la página anterior, cancelar y ver la siguiente. Si no le gusta ninguna,
 toque **❌ Cancelar** y el listado se desvanece, quedando de nuevo la tarjeta a
 la vista. Al elegir una canción, la lista se borra y la tarjeta muestra la
 nueva.
+
+El 📋 abre la lista de lo que está en cola. Desde ahí, el botón 🕘 abre el
+historial y el bot pregunta cuál: **📻 Emisoras (N)** o **🎵 Canciones (N)**.
+Tocar una fila la vuelve a reproducir y ⏭ / ⏮ caminan por ese historial; al
+llegar al extremo más nuevo, una emisora abre la radio de su país y una canción
+vuelve al buscador con ese artista. Repetir un tema no lo duplica: lo mueve al
+tope.
 
 Si al filtrar por artista no queda ninguna canción de ese artista, el bot **no
 esconde nada**: lo avisa y muestra las que encontró. Entre una versión original
@@ -210,24 +256,28 @@ desde la lista.
 | `/salud` | admin | Estado del bot: reproductor, versión de YT-Remote y conexión |
 | `/actualizar` | admin | Trae YT-Remote y sus componentes a la versión publicada más nueva (reinicia solo) |
 
-**Todos los roles** pueden tocar el botón 📋 (ver lista). Los demás
-botones de la tarjeta (▶ ⏮ ⏭ ⏹ 🔊) son solo para dj y admin; ⚙️ Ajustes
-abre el menú de configuración: 💤 apagado programado para **dj** y
-⚙️ Calidad con 👥 Usuarios exclusivos de **admin**.
+El 📋 (ver lista) y los botones de la tarjeta (▶ ⏮ ⏭ ⏹ 🔊) son de **dj y
+admin**; ⚙️ Ajustes abre el menú de configuración: 💤 apagado programado para
+**dj** y ⚙️ Calidad con 👥 Usuarios exclusivos de **admin**. Quien no tiene rol
+no toca nada: recibe un solo aviso.
 
 ## Roles
 
 | Rol | Qué puede hacer |
 |-----|----------------|
-| admin | Todo + gestionar usuarios (botón 👥) y calidad (botón ⚙️) |
-| dj | Buscar, controlar reproducción (tarjeta y comandos) |
-| user | Solo ver la lista con el botón 📋 (sin elegir temas) |
+| admin | Todo, más la calidad (⚙️) y los usuarios (👥) |
+| dj | `/buscar`, `/radio`, `/letra` y el control de la reproducción |
+| user | Nada: es el invitado que está en el grupo sin permiso |
 
 Por defecto solo el dueño es admin. Para dar acceso a otra persona, use el
 botón `👥 Usuarios` de la tarjeta: la lista llega a su chat privado y basta
 tocar al usuario para alternarlo entre dj y user. Esa es la única puerta a
 dj: quien no tiene rol no puede usar el bot (ni comandos, ni listados, ni
 botones) y recibe un solo aviso: "🔒 El bot es solo para dj/admin".
+
+El menú "/" se arma por persona: el invitado solo ve `/start`; el dj ve además
+`/buscar`, `/radio` y `/letra`; el admin suma `/reglas`, `/salud` y
+`/actualizar`. Si alguien pierde el rol, el bot le retira ese menú.
 
 ## Variables de entorno
 

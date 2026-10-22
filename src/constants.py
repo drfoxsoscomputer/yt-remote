@@ -15,7 +15,7 @@ internas y para las pruebas.
 # release de GitHub y la que muestra /salud; el test la comparara contra
 # release_rules.json (--release_rules_version_match) para que los dos
 # sitios no se desincronicen al publicar.
-VERSION = "1.1.4"
+VERSION = "1.2.0"
 
 # Timeout para cada resolucion de stream (yt-dlp en thread): si tarda mas,
 # se corta y se trata como fallo de resolucion. Sin esto, un yt-dlp colgado
