@@ -3,7 +3,7 @@
 Guarda una lista de items (URL + titulo) como PLAYLIST FIJA con un cursor:
 los N items quedan siempre visibles (la lista no se encoge al reproducir) y
 la reproduccion va avanzando el cursor, dando la vuelta (bucle) al llegar al
-final. Un /play nuevo (playlist o cancion suelta) reemplaza la lista.
+final. Una busqueda nueva (playlist o cancion suelta) reemplaza la lista.
 
 Tambien mantiene el modo radio: sin playlist, un item suelto es el "actual"
 y la radio por semilla decide el siguiente (nunca repite URLs recientes).

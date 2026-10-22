@@ -152,7 +152,7 @@ _RADIO_PAGE_SIZE = RADIO_PAGE_SIZE
 _RADIO_DIRECTORIO = RADIO_DIRECTORIO_PAGINA
 _TOPE_LETRA = TOPE_LETRA
 
-# Menú de comandos ("/") por audiencia. Los comandos de DJ (/buscar, /play,
+# Menú de comandos ("/") por audiencia. Los comandos de DJ (/buscar,
 # /radio, /letra) NO van en el menú abierto: se aplican con el scope
 # BotCommandScopeChatMember (visible SOLO para ese miembro del grupo), uno
 # por dj/admin, al arrancar y tras cada cambio de rol (ver
@@ -167,7 +167,6 @@ _COMANDOS_PUBLICOS = [
 _COMANDOS_DJ = [
     BotCommand("start", "Info del bot (dj+)"),
     BotCommand("buscar", "Buscar artista o link para reproducir"),
-    BotCommand("play", "Buscar y reproducir (alias de /buscar)"),
     BotCommand("radio", "Elegir emisora o favoritas"),
     BotCommand("letra", "Letra de lo que esta sonando"),
 ]
@@ -569,7 +568,7 @@ class YTRemoteBot:
         self._search_cache: dict[str, SearchResult] = {}
         # True mientras el listado de resultados de /buscar sigue en pantalla.
         # En ese lapso la card NO se reposiciona: queda arriba del listado.
-        # Se limpia al elegir, al cancelar o ante un /buscar o /play nuevo.
+        # Se limpia al elegir, al cancelar o ante un /buscar nuevo.
         self._search_list_pending: bool = False
         # Listado de resultados de /buscar: se acumulan entre tandas para poder
         # paginar sin pegarle a YouTube en cada pagina, con la consulta, la
@@ -712,7 +711,7 @@ class YTRemoteBot:
         self._nav_forward: deque[QueueItem] = deque(maxlen=100)
         # Persistencia: volumen, pausa, cola, historial y radio artist
         # sobreviven a reinicios. Por defecto arranca en pausa si habia
-        # algo sonando (el usuario decide reanudar con /play).
+        # algo sonando (el usuario decide reanudar con el boton ▶).
         self._state = StateStore()
         # True si se restauro estado previo (hay una cancion que retomar),
         # para el texto "retoma" en la tarjeta.
@@ -778,7 +777,7 @@ class YTRemoteBot:
         self._restored = has_current
         # Si se restauro una cancion, arranca en PAUSA aunque el estado
         # guardado dijera "sonando": el autoadvance no corre y el usuario
-        # decide reanudar con /play (o el boton ▶ de la tarjeta).
+        # decide reanudar con el boton ▶ de la tarjeta.
         self._paused = True if has_current else loaded.get("paused", False)
         if loaded.get("current"):
             try:
@@ -958,14 +957,14 @@ class YTRemoteBot:
 
     def _clear_nav_stacks(self) -> None:
         """Limpia ambas pilas. Se llama al cambiar de fuente (nueva búsqueda,
-        nuevo /play, detener, etc.) para que el historial no se mezcle."""
+        nuevo link, detener, etc.) para que el historial no se mezcle."""
         self._nav_back.clear()
         self._nav_forward.clear()
 
     def _snapshot_reproduccion(self) -> dict:
         """Copia de todo lo que un arranque nuevo va a reemplazar.
 
-        La usa /buscar y /play con link: si el tema elegido no arranca, con
+        La usa /buscar con link: si el tema elegido no arranca, con
         restore() la lista, el historial, el artista de la radio y la tarjeta
         quedan exactamente como estaban.
         """
@@ -1031,7 +1030,6 @@ class YTRemoteBot:
         # visualizacion; los mensajes del comando quedan arriba).
         app.add_handler(CommandHandler("start", self._with_card_reposition(self._require_chat(self._require("dj", self.cmd_start)))))
         app.add_handler(CommandHandler("buscar", self._with_card_reposition(self._require_chat(self._require("dj", self.cmd_play)))))
-        app.add_handler(CommandHandler("play", self._with_card_reposition(self._require_chat(self._require("dj", self.cmd_play)))))
         app.add_handler(
             CommandHandler(
                 "reglas",
@@ -2836,7 +2834,7 @@ class YTRemoteBot:
             # (nada de chips inventados). Cero preguntas, cero tecleo.
             await self._buscar_home_abrir(update)
             return
-        # Todo /buscar o /play nuevo reemplaza al intento anterior: la card
+        # Todo /buscar nuevo reemplaza al intento anterior: la card
         # vuelve a poder reposicionarse (un listado nuevo re-setea el flag).
         self._search_list_pending = False
         # Usar el buscador ES cambiar de sesion: el ancla del hub 🕘 muere
@@ -2908,9 +2906,16 @@ class YTRemoteBot:
             return
         self._buscar_home_chat_id = chat_id
         self._buscar_home_message_id = msg.message_id
+        # El home es un listado como el de resultados: mientras este en
+        # pantalla la card NO se mueve (se elige un chip o se toca ❌).
+        self._search_list_pending = True
 
     async def _buscar_home_cerrar(self) -> None:
         """Borra el home abierto de /buscar (si lo hay) y limpia sus ids."""
+        # Cerrado el listado (elegir o ❌), la card recupera el derecho a
+        # reposicionarse. Va ANTES del early-return: si el home ya no
+        # existia, el flag igual tiene que quedar limpio.
+        self._search_list_pending = False
         if self._buscar_home_chat_id is None or self._buscar_home_message_id is None:
             return
         try:

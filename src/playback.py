@@ -88,7 +88,7 @@ class PlaybackEngine:
     # --- Resolucion de streams ---------------------------------------------
 
     def cancel_prefetch(self) -> None:
-        """Cancela el prefetch en curso (nuevo /play del usuario)."""
+        """Cancela el prefetch en curso (nueva busqueda del usuario)."""
         if self.prefetch_task is not None:
             self.prefetch_task.cancel()
         self.prefetch_task = None

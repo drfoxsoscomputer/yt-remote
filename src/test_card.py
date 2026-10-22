@@ -461,7 +461,7 @@ async def test_menu_cubre_todos_los_comandos():
 
 
 async def test_menu_dj_por_usuario_y_se_borra_al_perder_el_rol():
-    """/buscar, /play, /radio y /letra solo se VEN para dj y admin: el
+    """/buscar, /radio y /letra solo se VEN para dj y admin: el
     default del "/" queda con /start y los de dj se aplican con el scope
     ChatMember por usuario; a quien pierde el rol se le BORRA el scope
     (sin eso, Telegram le seguiria mostrando el menu viejo para siempre).
@@ -494,7 +494,7 @@ async def test_menu_dj_por_usuario_y_se_borra_al_perder_el_rol():
     sets = [a for a in actos if a[0] == "set"]
     assert {a[2].user_id for a in sets} == {1, 77, 88}, actos
     vistos = {a[2].user_id: a[1] for a in sets}
-    dj = ("start", "buscar", "play", "radio", "letra")
+    dj = ("start", "buscar", "radio", "letra")
     admin = dj + ("reglas", "salud", "actualizar")
     assert vistos[77] == admin, vistos
     assert vistos[1] == admin, vistos
@@ -545,7 +545,7 @@ async def test_menu_dj_por_usuario_y_se_borra_al_perder_el_rol():
     publicos = {c.command for c in bot_mod._COMANDOS_PUBLICOS}
     djs = {c.command for c in bot_mod._COMANDOS_DJ}
     assert publicos == {"start"}, publicos
-    assert {"buscar", "play", "radio", "letra"} <= djs, djs
+    assert {"buscar", "radio", "letra"} <= djs, djs
     assert djs - {"start"} and not ({c for c in djs if c != "start"} & publicos), (publicos, djs)
 
 
@@ -5465,8 +5465,8 @@ async def test_with_card_reposition_skips_while_search_pending():
     assert b._app.bot.sent == [], b._app.bot.sent
 
 
-async def test_cmd_play_link_resets_pending_search():
-    """Un link pegado en /play descarta el listado pendiente: el flag se limpia
+async def test_cmd_buscar_link_resets_pending_search():
+    """Un link pegado en /buscar descarta el listado pendiente: el flag se limpia
     y la card vuelve a poder reposicionarse al final."""
     b = make_bot()
     b._search_list_pending = True
@@ -6361,6 +6361,22 @@ async def test_buscar_home_artistas_y_candado_de_rol():
     assert any("GP Band (2)" in t for t in texts), texts
     assert any("Otro Artista (1)" in t for t in texts), texts
     assert b._buscar_home_message_id is not None
+    # El home es un listado abierto: mientras este en pantalla la card NO se
+    # mueve. Antes nacia sin el flag y el wrapper reenviaba la card debajo de
+    # los chips en el mismo toque de /buscar.
+    assert b._search_list_pending is True, "el home tiene que declararse listado"
+
+    # ❌ cierra el home y le devuelve a la card el derecho a reposicionarse.
+    upd_cerrar = FakeUpdate("bsm:close", user_id=77, chat_id=44)
+    await b._on_buscar_home_callback(upd_cerrar, None)
+    assert b._buscar_home_message_id is None and b._buscar_home_chat_id is None
+    assert b._search_list_pending is False, "cerrado el home la card puede volver"
+
+    # Se reabre para probar el chip.
+    await b.cmd_play(
+        FakeMessageUpdate("/buscar", user_id=77), SimpleNamespace(args=[])
+    )
+    assert b._search_list_pending is True
 
     # El toque busca el artista (misma semilla que escribirlo) y cierra.
     searches.clear()
@@ -6372,6 +6388,7 @@ async def test_buscar_home_artistas_y_candado_de_rol():
         assert b._search_artist == "GP Band", b._search_artist
         assert b._hist_ancla is None, "el cambio de sesion mata el ancla del hub"
         assert b._buscar_home_message_id is None and b._buscar_home_chat_id is None
+        assert b._search_list_pending is False, "el home se cerro antes de buscar"
     finally:
         b._run_search = viejo_run_search
 

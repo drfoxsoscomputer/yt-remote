@@ -66,7 +66,7 @@ _VIDEO_ID_RE = re.compile(
 def thumbnail_from_url(url: str) -> str:
     """Deriva la miniatura de YouTube desde un link directo (watch/shorts/youtu.be).
 
-    Sirve para items sin thumbnail cargado (links directos de /play, /now);
+    Sirve para items sin thumbnail cargado (links directos de /buscar, /now);
     si no se puede extraer el ID devuelve "".
     """
     m = _VIDEO_ID_RE.search(url or "")
