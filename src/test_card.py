@@ -464,7 +464,9 @@ async def test_menu_dj_por_usuario_y_se_borra_al_perder_el_rol():
     """/buscar, /play, /radio y /letra solo se VEN para dj y admin: el
     default del "/" queda con /start y los de dj se aplican con el scope
     ChatMember por usuario; a quien pierde el rol se le BORRA el scope
-    (sin eso, Telegram le seguiria mostrando el men viejo para siempre)."""
+    (sin eso, Telegram le seguiria mostrando el menu viejo para siempre).
+    El ADMIN recibe ademas los suyos en LA MISMA lista: Telegram no une
+    scopes, gana el chat_member y perderia /reglas, /salud y /actualizar."""
     from telegram import BotCommandScopeChatMember
 
     import bot as bot_mod
@@ -492,17 +494,44 @@ async def test_menu_dj_por_usuario_y_se_borra_al_perder_el_rol():
     sets = [a for a in actos if a[0] == "set"]
     assert {a[2].user_id for a in sets} == {1, 77, 88}, actos
     vistos = {a[2].user_id: a[1] for a in sets}
-    assert vistos[77] == ("start", "buscar", "play", "radio", "letra"), vistos
-    assert vistos[88] == ("start", "buscar", "play", "radio", "letra"), vistos
+    dj = ("start", "buscar", "play", "radio", "letra")
+    admin = dj + ("reglas", "salud", "actualizar")
+    assert vistos[77] == admin, vistos
+    assert vistos[1] == admin, vistos
+    assert vistos[88] == dj, vistos
     assert all(a[2].chat_id == 44 for a in sets), actos
     assert all(
         isinstance(a[2], BotCommandScopeChatMember) for a in sets
     ), actos
     assert b._comandos_dj_aplicados == {1, 77, 88}, b._comandos_dj_aplicados
 
+    # Sin allowed_chat_id (arranque sin settings.enc) el chat sale de la
+    # card: antes el return silencioso dejaba el menu SIN aplicar.
+    actos.clear()
+    b.config.allowed_chat_id = None
+    b._card_chat_id = 55
+    await b._sincronizar_menu_dj(_BotFakeMenu())
+    sets = [a for a in actos if a[0] == "set"]
+    assert sets and all(a[2].chat_id == 55 for a in sets), actos
+
+    # Sin NINGUN chat de referencia no se inventa uno: no toca el API.
+    actos.clear()
+    b._card_chat_id = None
+    await b._sincronizar_menu_dj(_BotFakeMenu())
+    assert actos == [], actos
+
+    # Arranque: el chat de la card se resuelve ANTES de borrarla y se pasa
+    # como argumento (aunque _card_chat_id ya quedo en None).
+    actos.clear()
+    await b._sincronizar_menu_dj(_BotFakeMenu(), 66)
+    sets = [a for a in actos if a[0] == "set"]
+    assert sets and all(a[2].chat_id == 66 for a in sets), actos
+
     # Quitarle dj a 88: la sincronizacion siguiente BORRA su scope y
     # re-aplica solo el de 77.
     actos.clear()
+    b.config.allowed_chat_id = 44
+    b._card_chat_id = 44
     b.roles.set_role(88, "user", "Ocho")
     await b._sincronizar_menu_dj(_BotFakeMenu())
     dels = [a for a in actos if a[0] == "del"]
@@ -5958,6 +5987,7 @@ async def test_radio_menu_paises_por_cercania_y_genero_del_pais():
     equipo PRIMERO, después los vecinos aunque suenen menos, y los países
     sin coordenadas al final) y el de géneros pone lo de la SALA encima de
     los tags del pais segun el API. Todo en rótulos de español."""
+    import bot as bot_mod
     import radio as radio_mod
     from queue_manager import QueueItem
     from radio import Emisora
@@ -6012,6 +6042,11 @@ async def test_radio_menu_paises_por_cercania_y_genero_del_pais():
     b._state.marcar_historial(
         QueueItem(url="r3", title="C", channel="Venezuela", tags="merengue", directo=True)
     )
+    # Un genero GLOBAL de una emisora de OTRO pais no puede entrar al menu:
+    # era el chip "religious" que metia la musulmana en la rotacion.
+    b._state.marcar_historial(
+        QueueItem(url="r4", title="D", channel="Saudi Arabia", tags="religious", directo=True)
+    )
     b._radio_chat_id, b._radio_message_id = 44, 7
     try:
         upd = FakeUpdate("rad:paises", user_id=77)
@@ -6048,11 +6083,18 @@ async def test_radio_menu_paises_por_cercania_y_genero_del_pais():
         assert b._radio_view == "generos", b._radio_view
         claves = [t[0] for t in b._radio_generos]
         assert claves == ["salsa", "merengue", "vallenato"], claves
+        assert "religious" not in claves, claves
         etiquetas_g = [btn.text for fila in b._radio_keyboard().inline_keyboard for btn in fila]
-        assert "🎵 salsa (2)" in etiquetas_g, etiquetas_g
+        assert "🎵 Salsa (40)" in etiquetas_g, etiquetas_g
+        assert "🎵 Merengue (10)" in etiquetas_g, etiquetas_g
+        # Los chips son del pais: el genero no aparece en crudo en ingles.
+        assert not any("religious" in e for e in etiquetas_g), etiquetas_g
 
-        # Rad:gen:0 abre el listado del genero.
-        async def _genero_falso(tag, cantidad):
+        # Rad:gen:0 abre el listado del genero ACOTADO al pais del chip.
+        pedidos: list[tuple] = []
+
+        async def _genero_falso(tag, cantidad, pais=None):
+            pedidos.append((tag, cantidad, pais))
             return [Emisora(nombre="Gen", pais="Venezuela", stream="https://g.example/1")]
 
         viejo_genero = radio_mod.buscar_genero
@@ -6060,7 +6102,8 @@ async def test_radio_menu_paises_por_cercania_y_genero_del_pais():
         try:
             upd4 = FakeUpdate("rad:gen:0", user_id=77)
             await b._on_radio_callback(upd4, None)
-            assert b._radio_view == "busqueda" and b._radio_query == "salsa", (b._radio_view, b._radio_query)
+            assert pedidos == [("salsa", bot_mod._RADIO_BATCH, "VE")], pedidos
+            assert b._radio_view == "busqueda" and b._radio_query == "Salsa", (b._radio_view, b._radio_query)
         finally:
             radio_mod.buscar_genero = viejo_genero
     finally:
@@ -6088,6 +6131,90 @@ async def test_radio_sin_pais_y_sin_sala_avisa_generos_vacio():
         assert upd.answered is not None and upd.answered_kwargs.get("show_alert"), upd.__dict__
     finally:
         radio_mod.tags_de_pais = viejo
+
+
+async def test_radio_espejos_y_genero_acotado_al_pais():
+    """Dos garantias del motor: si un espejo de radio-browser no contesta
+    (un 404 por tasa, un corte) la consulta pasa al SIGUIENTE con los mismos
+    params; y buscar_genero con pais manda el countrycode del pais resuelto
+    en vez del tag global — el listado global de 'religious' es el que metia
+    una radio musulmana detras de una cristiana venezolana."""
+    import radio as radio_mod
+
+    vistos: list[tuple] = []
+
+    async def _pedir_falso(base, path, params):
+        vistos.append((base, path, dict(params)))
+        if len(vistos) == 1:
+            raise RuntimeError("HTTP 404 (tasa)")
+        return [{"name": "Ok", "url_resolved": "https://ok.example/1"}]
+
+    viejo_pedir = radio_mod._pedir_una
+    radio_mod._pedir_una = _pedir_falso
+    try:
+        filas = await radio_mod._get("/json/stations/search", {"tag": "x"})
+        assert len(vistos) == 2, vistos
+        assert vistos[0][0] != vistos[1][0], "tiene que rotar de espejo, no repetir"
+        assert vistos[0][2] == vistos[1][2], "los params no cambian al reintentar"
+        assert filas and filas[0]["name"] == "Ok", filas
+
+        # Todos caidos: motivo honesto (RadioError), sin excepcion cruda.
+        async def _pedir_muerto(base, path, params):
+            raise RuntimeError("sin red")
+
+        radio_mod._pedir_una = _pedir_muerto
+        try:
+            await radio_mod._get("/json/stations/search", {})
+        except radio_mod.RadioError as exc:
+            assert "no responde" in str(exc) and "sin red" in str(exc), exc
+        else:
+            raise AssertionError("sin espejos tiene que avisar RadioError")
+    finally:
+        radio_mod._pedir_una = viejo_pedir
+
+    # Genero con pais: el API recibe tag + countrycode, nunca el tag solo.
+    pedidos: list[dict] = []
+
+    async def _pedir_pais(base, path, params):
+        pedidos.append(dict(params))
+        return []
+
+    catalogo = {
+        radio_mod._normalizar_clave("Bolivarian Republic Of Venezuela"): {
+            "name": "Bolivarian Republic Of Venezuela",
+            "iso_3166_1": "VE",
+            "stationcount": 200,
+        }
+    }
+
+    async def _paises_falso():
+        return catalogo
+
+    viejo_paises = radio_mod.paises
+    radio_mod.paises = _paises_falso
+    radio_mod._pedir_una = _pedir_pais
+    try:
+        await radio_mod.buscar_genero("cristiana", 40, pais="Venezuela")
+        assert pedidos and pedidos[0].get("countrycode") == "VE", pedidos
+        assert pedidos[0].get("tag") == "cristiana", pedidos
+
+        # Pais que el catalogo no conoce: aviso honesto, jamas lista global.
+        try:
+            await radio_mod.buscar_genero("cristiana", 40, pais="Narnia")
+        except radio_mod.RadioError as exc:
+            assert "Narnia" in str(exc), exc
+        else:
+            raise AssertionError("un pais desconocido no puede buscar global")
+    finally:
+        radio_mod.paises = viejo_paises
+        radio_mod._pedir_una = viejo_pedir
+
+    # Rotulos en español: la busqueda sigue usando el tag real del API.
+    assert radio_mod.genero_visible("christian") == "Cristianas"
+    assert radio_mod.genero_visible("religious") == "Religiosas"
+    assert radio_mod.genero_visible("gospel") == "Gospel"
+    assert radio_mod.genero_visible("salsa") == "Salsa"
+    assert radio_mod.genero_visible("") == ""
 
 
 async def test_radio_rep_viejo_recupera_y_guarda_tags():
@@ -6153,43 +6280,45 @@ async def test_historial_emisora_proxima_por_genero():
     )
     assert b._hist_ancla == {"tipo": "emisora", "pais": "Venezuela", "tags": "cristiana,salsa"}, b._hist_ancla
 
-    pedidos: list[tuple[str, int]] = []
+    pedidos: list[tuple] = []
 
-    async def _genero_falso(tag, cantidad):
-        pedidos.append((tag, cantidad))
+    async def _genero_falso(tag, cantidad, pais=None):
+        pedidos.append((tag, cantidad, pais))
         return [
             Emisora(nombre="Radio Fe Y Alegria", pais="Venezuela", stream="https://f.example/1", tags=tag),
-            Emisora(nombre="Otra del Genero", pais="Colombia", stream="https://f.example/2", tags=tag),
+            Emisora(nombre="Otra del Genero", pais="Venezuela", stream="https://f.example/2", tags=tag),
         ]
 
     viejo_genero = radio_mod.buscar_genero
     radio_mod.buscar_genero = _genero_falso
     try:
         await b.cmd_next(FakeUpdate("ctl:next"), SimpleNamespace(args=[]))
-        assert pedidos == [("cristiana", bot_mod._RADIO_BATCH)], pedidos
+        # El genero se busca ACOTADO al pais del ancla: jamas global.
+        assert pedidos == [("cristiana", bot_mod._RADIO_BATCH, "Venezuela")], pedidos
         # La que suena (r.example/1) NO esta en el listado: entra la primera
         # distinta... es la propia f.example/1? NO: la que suena no sale en
         # el listado, asi que entra la PRIMERA del listado.
         assert b.player.loaded[-1] == ("https://f.example/1", None), b.player.loaded
         assert b._radio_ancla is not None and len(b._radio_ancla) == 2, b._radio_ancla
         assert b._hist_ancla is None, "la sesion del hub muere con el salto"
-        # El aviso dice el criterio (genero), no manda el titulo callado.
+        # El aviso dice el criterio (genero + pais), no manda el titulo callado.
         rastro = [str(s) for s in b._app.bot.sent] + [str(e) for e in b._app.bot.edited]
         assert any("Siguiente por género" in s for s in rastro), rastro
+        assert any("de Venezuela" in s for s in rastro), rastro
 
         # Tags con SOLO tags sin emisoras: prueba el siguiente tag del
         # ancla antes de caer al caminar.
         pedidos.clear()
 
-        async def _genero_vacio(tag, cantidad):
-            pedidos.append(tag)
+        async def _genero_vacio(tag, cantidad, pais=None):
+            pedidos.append((tag, pais))
             return []
 
         radio_mod.buscar_genero = _genero_vacio
         b._radio_ancla = None
         b._hist_ancla = {"tipo": "emisora", "pais": "Venezuela", "tags": "cristiana,salsa"}
         await b.cmd_next(FakeUpdate("ctl:next"), SimpleNamespace(args=[]))
-        assert pedidos == ["cristiana", "salsa"], pedidos
+        assert pedidos == [("cristiana", "Venezuela"), ("salsa", "Venezuela")], pedidos
     finally:
         radio_mod.buscar_genero = viejo_genero
 

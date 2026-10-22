@@ -669,6 +669,9 @@ class YTRemoteBot:
         # pagina) para que rad:pais:N / rad:gen:N sepa a que fila toco.
         self._radio_paises: list = []  # [(nombre_api, iso, emisoras)]
         self._radio_generos: list = []  # [(tag, emisoras)]
+        # El pais del que salieron esos generos: la busqueda del genero se
+        # acota a EL (una cristiana de Venezuela no salta a Indonesia).
+        self._radio_genero_pais: str = ""
         # El LUGAR del salon: la zona horaria de la PC (la maquina donde
         # corre el bot), leida UNA vez al arrancar (stdlib, sin preguntar).
         self._radio_equipo = radio.pais_del_equipo()
@@ -877,21 +880,34 @@ class YTRemoteBot:
             )
         except Exception as exc:  # noqa: BLE001 - no debe tumbar el arranque
             logger.warning("No se pudo registrar los comandos: %s", exc)
-        await self._sincronizar_menu_dj(bot)
+        # El chat de la card se toma ANTES de que el arranque la borre: sin
+        # el, un bot que arranca sin settings.enc se quedaba sin el menu de
+        # dj por usuario (el return silencioso de antes).
+        await self._sincronizar_menu_dj(bot, chat_de_la_card)
 
-    async def _sincronizar_menu_dj(self, bot) -> None:
-        """El menu "/" de los comandas de DJ se aplica POR USUARIO con el
+    async def _sincronizar_menu_dj(self, bot, chat: int | None = None) -> None:
+        """El menu "/" de los comandos de DJ se aplica POR USUARIO con el
         scope `BotCommandScopeChatMember` (visible SOLO para ese miembro del
         grupo) a cada dj/admin conocido. Quien pierde el rol conserva el
         menu viejo hasta que se le borre explicitamente: por eso el helper
         tambien tira `delete_my_commands` de los djs que se quedaron fuera.
-        Al arrancar y DESPUES de cada commit de roles (👥)."""
-        chat = self.config.allowed_chat_id
+        Al arrancar (con el chat de la card ya resuelto) y DESPUES de cada
+        commit de roles (👥).
+
+        El chat sale de `chat`, luego de `allowed_chat_id` y al final del
+        chat de la card: antes el `return` silencioso, con la configuracion
+        vacia, dejaba el menu de dj SIN aplicar y el admin solo veia los
+        comandos de admin. Y la lista de un ADMIN lleva tambien los de dj:
+        Telegram no une scopes, gana el `chat_member`."""
+        chat = chat or self.config.allowed_chat_id or self._card_chat_id
         if not chat:
+            logger.warning(
+                "Menu de comandos por usuario: sin chat de referencia "
+                "(allowed_chat_id vacio y sin card); no se aplica"
+            )
             return
-        dj_y_admin = set(self.roles.get_all_with_role("dj")) | set(
-            self.roles.get_all_with_role("admin")
-        )
+        admins = set(self.roles.get_all_with_role("admin"))
+        dj_y_admin = set(self.roles.get_all_with_role("dj")) | admins
         quitados = self._comandos_dj_aplicados - dj_y_admin
         self._comandos_dj_aplicados = set(dj_y_admin)
         for uid in quitados:
@@ -904,9 +920,12 @@ class YTRemoteBot:
                     "No se pudo esconder el menu de dj para %s: %s", uid, exc
                 )
         for uid in sorted(dj_y_admin):
+            comandos = (
+                _COMANDOS_DJ + _COMANDOS_ADMIN if uid in admins else _COMANDOS_DJ
+            )
             try:
                 await bot.set_my_commands(
-                    _COMANDOS_DJ,
+                    comandos,
                     scope=BotCommandScopeChatMember(chat_id=chat, user_id=uid),
                 )
             except Exception as exc:  # noqa: BLE001
@@ -1671,7 +1690,11 @@ class YTRemoteBot:
             if vista == "fav":
                 items = list(self._radio_favs)
             elif vista == "tag":
-                items = await radio.buscar_genero(termino, _RADIO_BATCH)
+                # El genero se acota al pais del equipo: es la misma regla
+                # del menu (un genero global mezclaba paises y religiones).
+                items = await radio.buscar_genero(
+                    termino, _RADIO_BATCH, pais=self._radio_equipo[0] or None
+                )
             elif vista == "pais":
                 items = await radio.buscar_pais(termino, _RADIO_BATCH)
             elif vista == "name":
@@ -1773,7 +1796,7 @@ class YTRemoteBot:
             iso = self._radio_equipo[0] or ""
             pais_salon = radio.pais_visible(iso) if iso else ""
             de = f" de {pais_salon}" if pais_salon else ""
-            encabezado = f"🎵 Géneros{de} (los de tu sala pesan primero):"
+            encabezado = f"🎵 Géneros{de} (los de tu sala primero):"
         else:
             encabezado = "🔥 Emisoras destacadas:"
         lineas = [encabezado]
@@ -1830,7 +1853,7 @@ class YTRemoteBot:
                         etiqueta = f"{tono} {radio.pais_visible(dato[0])} ({dato[2]})"
                         acc = f"rad:pais:{idx}"
                     else:
-                        etiqueta = f"{tono} {dato[0]} ({dato[1]})"
+                        etiqueta = f"{tono} {radio.genero_visible(dato[0])} ({dato[1]})"
                         acc = f"rad:gen:{idx}"
                     fila_b.append(InlineKeyboardButton(etiqueta, callback_data=acc))
                 filas.append(fila_b)
@@ -1916,32 +1939,41 @@ class YTRemoteBot:
         )
 
     async def _radio_armar_generos(self) -> None:
-        """La lista de generos del menu: PRIMERO lo que la sala ya sono
-        (uso real, la base) y despues los tags con que las emisoras del
-        pais del salon se marcan de verdad en el API (suma directa del
-        listado, nada inventado). Sin pais y sin sala: lista vacia y el
-        aviso honesto lo dice."""
-        lista: list[tuple[str, int]] = []
-        ya: set[str] = set()
-        for dato in self._state.top_generos_uso(10):
-            clave = str(dato["clave"]).lower()
-            if clave not in ya:
-                lista.append((clave, int(dato["usos"])))
-                ya.add(clave)
+        """La lista de generos del menu: SOLO los tags con que las emisoras
+        del pais del salon se marcan de verdad en el API (suma directa del
+        listado, nada inventado), con lo que la sala ya sono primero. Sin
+        pais del equipo: lista vacia y el aviso honesto lo dice.
+
+        Antes entraban los tags de uso de la sala AUNQUE fueran de emisoras
+        de otros paises: un chip 'religious' global metia musulmanas en la
+        rotacion de una cristiana venezolana."""
+        self._radio_generos = []
+        self._radio_genero_pais = ""
         iso = self._radio_equipo[0]
-        if iso:
-            try:
-                for tag, emisoras in await radio.tags_de_pais(
-                    iso, cantidad=300, tope=60
-                ):
-                    if tag not in ya:
-                        lista.append((tag, emisoras))
-                        ya.add(tag)
-            except radio.RadioError:
-                # El API no contesto: el menu de generos queda con lo de la
-                # sala (o avisa vacio) sin tumbar el home.
-                pass
+        if not iso:
+            return
+        try:
+            crudos = await radio.tags_de_pais(iso, cantidad=300, tope=60)
+        except radio.RadioError:
+            # El API no contesto: el menu de generos queda vacio (el aviso
+            # honesto lo dice) sin tumbar el home.
+            return
+        del_pais = {tag: emisoras for tag, emisoras in crudos}
+        usados: list[str] = []
+        for dato in self._state.top_generos_uso(10):
+            clave = str(dato["clave"]).strip().lower()
+            if clave in del_pais and clave not in usados:
+                usados.append(clave)
+        lista: list[tuple[str, int]] = []
+        vistos: set[str] = set()
+        for tag in usados + [tag for tag, _ in crudos if tag not in usados]:
+            etiqueta = radio.genero_visible(tag)
+            if not etiqueta or etiqueta in vistos:
+                continue
+            vistos.add(etiqueta)
+            lista.append((tag, del_pais[tag]))
         self._radio_generos = lista
+        self._radio_genero_pais = iso
 
     async def _radio_render(self) -> None:
         """Repinta el listado abierto (texto + teclado de la vista/pagina
@@ -2046,8 +2078,8 @@ class YTRemoteBot:
             if not self._radio_generos:
                 await self._list_answer(
                     query,
-                    "Sin géneros todavía: escucha algo primero o elige el país"
-                    " en 🌍 Países.",
+                    "No tengo géneros del país de tu PC ahora mismo: probá de"
+                    " nuevo en un rato o elegí una emisora en 🌍 Países.",
                     show_alert=True,
                 )
                 return
@@ -2091,12 +2123,25 @@ class YTRemoteBot:
                 nombre_api, iso, _ = lista[posicion]
                 clave_busqueda = iso or nombre_api
                 clave_visible = radio.pais_visible(nombre_api)
-                consulta = radio.buscar_pais
+                es_pais = True
             else:
-                clave_busqueda = clave_visible = lista[posicion][0]
-                consulta = radio.buscar_genero
+                clave_busqueda = lista[posicion][0]
+                clave_visible = radio.genero_visible(clave_busqueda)
+                es_pais = False
             try:
-                self._radio_items = await consulta(clave_busqueda, _RADIO_BATCH)
+                if es_pais:
+                    self._radio_items = await radio.buscar_pais(
+                        clave_busqueda, _RADIO_BATCH
+                    )
+                else:
+                    # El genero se busca ACOTADO al pais del que salio el
+                    # chip: de aca en mas ⏭ gira dentro de ese listado y no
+                    # cruza a otro pais.
+                    self._radio_items = await radio.buscar_genero(
+                        clave_busqueda,
+                        _RADIO_BATCH,
+                        pais=self._radio_genero_pais,
+                    )
             except radio.RadioError as exc:
                 await self._list_answer(query, str(exc), show_alert=True)
                 return
@@ -2260,25 +2305,30 @@ class YTRemoteBot:
         """La rotacion por GÉNERO con el ancla del hub.
 
         Usa los tags de la fila elegida (del API de radios, letra chica:
-        'bible,cristiana,...'). Entra la emisora que sigue en el listado
-        del genero, con la del actual descartada, y el listado pasa a ser
-        el ancla de rotacion (reglas de /radio, wrap incluido). Devuelve
-        False si la fila no trae tags con que trabajar: el camino del
-        llamador cae al caminar por pais. Un listado vacio para los 3
-        primeros tags del ancla y una caida del API SE AVISAN: True."""
+        'bible,cristiana,...') SIEMPRE acotados al PAIS de esa fila: entra
+        la emisora que sigue en el listado del genero DEL MISMO PAIS, con la
+        del actual descartada, y el listado pasa a ser el ancla de rotacion
+        (reglas de /radio, wrap incluido). Devuelve False si la fila no trae
+        tags o pais con que trabajar (sin pais el listado seria global y
+        cruzaria frontera): el llamador cae al caminar por pais. Un listado
+        vacio para los 3 primeros tags del ancla y una caida del API SE
+        AVISAN: True."""
         ancla = self._hist_ancla or {}
+        pais = str(ancla.get("pais") or "").strip()
         tags = [
             t.strip()
             for t in str(ancla.get("tags", "") or "").split(",")
             if t.strip()
         ]
-        if not tags:
+        if not tags or not pais:
             return False
         for tag in tags[:3]:
             try:
                 emisoras = [
                     e
-                    for e in await radio.buscar_genero(tag, _RADIO_BATCH)
+                    for e in await radio.buscar_genero(
+                        tag, _RADIO_BATCH, pais=pais
+                    )
                     if e.stream
                 ]
             except radio.RadioError as exc:
@@ -2289,7 +2339,12 @@ class YTRemoteBot:
                 )
                 return True
             if emisoras:
-                await self._hist_saltar_listado(update, emisoras, f"género {tag}")
+                await self._hist_saltar_listado(
+                    update,
+                    emisoras,
+                    f"género {radio.genero_visible(tag)} de "
+                    f"{radio.pais_visible(pais)}",
+                )
                 return True
             # Tag sin emisoras hoy: prueba el siguiente del ancla.
         return False
@@ -2384,6 +2439,10 @@ class YTRemoteBot:
                     thumbnail=emisora.logo,
                     channel=emisora.pais,
                     directo=True,
+                    # Los tags viajan con la fila del historial: sin ellos el
+                    # rep quedaba sin genero y el backfill tenia que salir a
+                    # buscarlos (misma garantia que _radio_item_de).
+                    tags=emisora.tags,
                 )
                 await self._list_answer(query)
                 ok = await self._play_item(update, item)

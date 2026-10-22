@@ -92,10 +92,16 @@ RADIO_PAGE_SIZE = 5
 # Botones por pagina en los directorios (paises y generos) del menu /radio.
 RADIO_DIRECTORIO_PAGINA = 10
 
-# Host fijo de radio-browser: si cae, el error es honesto ("radio-browser
-# no responde (...)"); no hay fallback multi-servidor porque el plan no lo
-# pide.
+# Espejos de radio-browser: el API publico vive en varios servidores y uno
+# solo se cae (o responde 404 por tasa) mientras los otros siguen. La lista
+# se verifico hoy con GET /json/countries: de1 y de2 contestan 200 y `all`
+# es el nombre comodin que rota por DNS. El primero es el de siempre.
 RADIO_API = "https://de1.api.radio-browser.info"
+RADIO_API_ESPEJOS = (
+    RADIO_API,
+    "https://de2.api.radio-browser.info",
+    "https://all.api.radio-browser.info",
+)
 RADIO_API_TIMEOUT = 15.0
 
 # /letra (lrclib.net): base de datos libre de letras, sin API key. El

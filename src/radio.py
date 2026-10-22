@@ -13,7 +13,7 @@ que falla en vivo, que es lo peor que le puede pasar al salon.
 from dataclasses import dataclass
 import sys
 
-from constants import RADIO_API, RADIO_API_TIMEOUT
+from constants import RADIO_API_ESPEJOS, RADIO_API_TIMEOUT
 
 
 class RadioError(Exception):
@@ -107,23 +107,50 @@ def _motivo_red(exc: Exception) -> str:
     return f"{type(exc).__name__}: {texto}" if texto else type(exc).__name__
 
 
-async def _get(path: str, params: dict) -> list:
-    """GET al API de radio-browser. Cualquier falla se devuelve honesta:
-    RadioError con el motivo, para que el usuario vea QUE fallo."""
+async def _pedir_una(base: str, path: str, params: dict) -> list:
+    """UN GET a UN espejo. Separado del bucle para poder probar la rotacion
+    (la prueba reemplaza esta funcion y hace fallar el primer espejo)."""
     import httpx
 
-    try:
-        async with httpx.AsyncClient(
-            timeout=RADIO_API_TIMEOUT, follow_redirects=True
-        ) as cli:
-            r = await cli.get(RADIO_API + path, params=params)
-            r.raise_for_status()
-            datos = r.json()
-    except Exception as exc:  # noqa: BLE001 - el motivo honesto va al usuario
-        raise RadioError(f"radio-browser no responde ({_motivo_red(exc)})") from exc
-    if not isinstance(datos, list):
-        raise RadioError("radio-browser devolvió algo raro (no es una lista)")
-    return datos
+    async with httpx.AsyncClient(
+        timeout=RADIO_API_TIMEOUT, follow_redirects=True
+    ) as cli:
+        r = await cli.get(base + path, params=params)
+        r.raise_for_status()
+        return r.json()
+
+
+_INDICE_ESPEJO = 0
+
+
+def _servidores() -> list[str]:
+    """Los espejos en el orden de ESTA consulta, empezando por uno distinto
+    cada vez (round-robin): asi el trafico no se acumula en el mismo host y
+    un 404 por tasa no condena la llamada."""
+    global _INDICE_ESPEJO  # noqa: PLW0603
+    if not RADIO_API_ESPEJOS:
+        return []
+    _INDICE_ESPEJO = (_INDICE_ESPEJO + 1) % len(RADIO_API_ESPEJOS)
+    return list(RADIO_API_ESPEJOS[_INDICE_ESPEJO:]) + list(
+        RADIO_API_ESPEJOS[:_INDICE_ESPEJO]
+    )
+
+
+async def _get(path: str, params: dict) -> list:
+    """GET al API de radio-browser con rotacion de espejos: si uno no
+    contesta (o lo corta por tasa), se prueba el siguiente con los MISMOS
+    params. Si ninguno responde, RadioError con el motivo del ultimo."""
+    ultimo = ""
+    for base in _servidores():
+        try:
+            datos = await _pedir_una(base, path, params)
+        except Exception as exc:  # noqa: BLE001 - el motivo honesto va al usuario
+            ultimo = _motivo_red(exc)
+            continue
+        if not isinstance(datos, list):
+            raise RadioError("radio-browser devolvió algo raro (no es una lista)")
+        return datos
+    raise RadioError(f"radio-browser no responde ({ultimo})")
 
 
 def _params(**extra: str) -> dict:
@@ -150,12 +177,31 @@ async def buscar_nombre(termino: str, cantidad: int) -> list:
     return _normalizar(filas)
 
 
-async def buscar_genero(termino: str, cantidad: int) -> list:
-    """Busqueda por genero (el tag del API: salsa, bolero, rock...)."""
-    filas = await _get(
-        "/json/stations/search",
-        _params(tag=termino, limit=str(cantidad), order="votes", reverse="true"),
-    )
+async def buscar_genero(
+    termino: str, cantidad: int, pais: str | None = None
+) -> list:
+    """Busqueda por genero (el tag del API: salsa, bolero, rock...).
+
+    Con `pais` (nombre oficial o codigo de dos letras) el listado queda
+    ACOTADO a ese pais: es lo que impide que la rotacion de una emisora
+    venezolana salte a una de Arabia Saudita o Indonesia. Sin `pais` es la
+    busqueda global de siempre (la usa el listado abierto a proposito). Un
+    pais que el catalogo no reconoce NO se ignora callado: RadioError, que
+    es preferible al cruce de frontera invisible."""
+    extra = {
+        "tag": termino,
+        "limit": str(cantidad),
+        "order": "votes",
+        "reverse": "true",
+    }
+    if pais:
+        iso = await _iso_de_pais(pais)
+        if iso is None:
+            raise RadioError(
+                f"no reconozco «{pais}» como país para acotar el género"
+            )
+        extra["countrycode"] = iso
+    filas = await _get("/json/stations/search", _params(**extra))
     return _normalizar(filas)
 
 
@@ -252,27 +298,17 @@ async def bajar_logo(url: str) -> str | None:
     return str(destino)
 
 
-async def buscar_pais(termino: str, cantidad: int) -> list:
-    """Busqueda por pais. El API pide el nombre del pais EXACTO (es
-    case-sensitive: country=venezuela devuelve 0 emisores, country=Venezuela
-    funciona), asi que el nombre se RESUELVE contra el catalogo oficial
-    (/json/countries, se pide una vez y queda en cache) y el filtro sale
-    del codigo ISO de dos letras. Con 2 letras va directo como countrycode.
-    Sin match: motivo honesto en vez del 'no encontre emisoras' que no
-    diagnostica nada."""
-    if len(termino) == 2 and termino.isalpha():
-        filas = await _get(
-            "/json/stations/search",
-            _params(
-                countrycode=termino.upper(),
-                limit=str(cantidad),
-                order="votes",
-                reverse="true",
-            ),
-        )
-        return _normalizar(filas)
+async def _iso_de_pais(termino: str) -> str | None:
+    """El codigo ISO de dos letras de un pais: acepta el codigo ('VE') o el
+    nombre oficial/del catalogo ('Bolivarian Republic Of Venezuela',
+    'Venezuela'). None si el catalogo no lo reconoce."""
+    texto = str(termino or "").strip()
+    if not texto:
+        return None
+    if len(texto) == 2 and texto.isalpha():
+        return texto.upper()
     catalogo = await paises()
-    clave = _normalizar_clave(termino)
+    clave = _normalizar_clave(texto)
     fila = catalogo.get(clave)
     if fila is None:
         # Match parcial: el API nombra a los paises por su nombre OFICIAL
@@ -288,6 +324,20 @@ async def buscar_pais(termino: str, cantidad: int) -> list:
         if candidatas:
             fila = max(candidatas, key=lambda par: par[1])[0]
     if fila is None or not fila.get("iso_3166_1"):
+        return None
+    return str(fila["iso_3166_1"])
+
+
+async def buscar_pais(termino: str, cantidad: int) -> list:
+    """Busqueda por pais. El API pide el nombre del pais EXACTO (es
+    case-sensitive: country=venezuela devuelve 0 emisores, country=Venezuela
+    funciona), asi que el nombre se RESUELVE contra el catalogo oficial
+    (/json/countries, se pide una vez y queda en cache) y el filtro sale
+    del codigo ISO de dos letras. Con 2 letras va directo como countrycode.
+    Sin match: motivo honesto en vez del 'no encontre emisoras' que no
+    diagnostica nada."""
+    iso = await _iso_de_pais(termino)
+    if iso is None:
         raise RadioError(
             f"no reconozco «{termino}» como país; usá el nombre completo "
             "(Venezuela, Colombia...) o el código de dos letras (VE, MX)"
@@ -295,7 +345,7 @@ async def buscar_pais(termino: str, cantidad: int) -> list:
     filas = await _get(
         "/json/stations/search",
         _params(
-            countrycode=str(fila["iso_3166_1"]),
+            countrycode=iso,
             limit=str(cantidad),
             order="votes",
             reverse="true",
@@ -480,6 +530,47 @@ def pais_visible(nombre: str) -> str:
     el nombre original (los rótulos mentirosos mejor ni aparecen)."""
     texto = str(nombre or "").strip()
     return _PAIS_VISIBLE.get(texto, texto)
+
+
+_GENERO_VISIBLE = {
+    # Rotulo en ESPAÑOL para los tags de genero que el API escribe en
+    # ingles (o en singular/plural mezclado). La BUSQUEDA siempre usa el
+    # tag real: esto es solo lo que se lee en el boton.
+    "christian": "Cristianas", "cristiana": "Cristianas",
+    "cristiano": "Cristianas", "cristian": "Cristianas",
+    "cristianas": "Cristianas", "christians": "Cristianas",
+    "catholic": "Católicas", "catolica": "Católicas",
+    "catolico": "Católicas", "catolicas": "Católicas",
+    "gospel": "Gospel", "evangelio": "Evangélicas",
+    "evangelical": "Evangélicas", "evangelica": "Evangélicas",
+    "religious": "Religiosas", "religion": "Religiosas",
+    "religioso": "Religiosas", "religiosa": "Religiosas",
+    "bible": "Bíblicas", "biblia": "Bíblicas",
+    "biblical": "Bíblicas", "biblica": "Bíblicas",
+    "talk": "Conversación", "news": "Noticias", "noticias": "Noticias",
+    "music": "Música", "musica": "Música",
+    "sports": "Deportes", "deportes": "Deportes",
+    "classical": "Clásica", "clasica": "Clásica",
+    "electronic": "Electrónica", "electronica": "Electrónica",
+    "romantic": "Romántica", "romantica": "Romántica",
+    "balada": "Baladas", "baladas": "Baladas",
+    "latin": "Latina", "latina": "Latina", "latino": "Latina",
+    "tropical": "Tropical", "folk": "Folclor", "folklore": "Folclor",
+    "instrumental": "Instrumental", "oldies": "Clásicos", "retro": "Retro",
+    "variada": "Variada", "varied": "Variada", "hits": "Éxitos",
+}
+
+
+def genero_visible(tag: str) -> str:
+    """El rotulo EN ESPAÑOL de un genero (tag del API). Sin mapa: el tag
+    con la inicial en mayuscula (nunca vacio, nunca en crudo si se conoce)."""
+    texto = str(tag or "").strip()
+    if not texto:
+        return ""
+    mapeado = _GENERO_VISIBLE.get(texto.lower())
+    if mapeado:
+        return mapeado
+    return texto[:1].upper() + texto[1:]
 
 
 _TAGS_POR_STREAM: "dict[str, str | None]" = {}  # cache de la sesion
